@@ -75,6 +75,44 @@ async function handleReview(req: Request, env: Env): Promise<Response> {
   }
 }
 
+/** Read open markets straight from the NEAR market contract — the chain is
+ * the state; KV is only a dev fallback when no contract is configured. */
+async function listOnchainMarkets(env: Env): Promise<unknown[] | null> {
+  const acct = (env as { NEAR_CONTRACT?: string }).NEAR_CONTRACT;
+  const rpc = (env as { NEAR_RPC_URL?: string }).NEAR_RPC_URL
+    ?? "https://rpc.testnet.near.org";
+  if (!acct) return null;
+  const res = await fetch(rpc, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0", id: "wide",
+      method: "query",
+      params: {
+        request_type: "call_function",
+        finality: "final",
+        account_id: acct,
+        method_name: "listOpen",
+        args_base64: btoa("{}"),
+      },
+    }),
+  });
+  const out = await res.json() as { result?: { result?: number[] } };
+  const bytes = out.result?.result;
+  if (!bytes) return null;
+  const markets = JSON.parse(
+    String.fromCharCode(...bytes),
+  ) as { marketId: string; payer: string; spec: string; amount: string; locked: string; deadline: string; status: string }[];
+  return markets.map((m) => ({
+    marketId: m.marketId, payer: m.payer, spec: m.spec,
+    amount: m.amount, locked: m.locked, deadline: m.deadline,
+    status: m.status, payout_trace: {
+      escrowed: true, state: m.status,
+      to: m.status === "paid" ? "claimant" : "escrow", tx: null,
+    },
+  }));
+}
+
 interface BountyBody {
   repo?: string;
   amount?: string;
@@ -148,8 +186,12 @@ export default {
       return json({ claims: claimsWithTrace, bounties });
     }
     // Public bounty board — funded, open markets + where the money goes.
-    // Queryable by agents/auditors the way settled.tools scrapes rivals'.
+    // Market truth is the CHAIN (widespread-near contract listOpen), not our
+    // KV — the bridge is a thin renderer; participant infra holds the state.
     if (pathname === "/api/markets" && req.method === "GET") {
+      const onchain = await listOnchainMarkets(env).catch(() => null);
+      if (onchain) return json({ markets: onchain, total: onchain.length, source: "chain" });
+      // fallback: local registry when no contract is configured (dev).
       const [claims, bounties] = await Promise.all([listRecords(env), listBounties(env)]);
       const markets = bounties.map((b) => ({
         repo: b.repo, amount: b.amount, currency: b.currency,
@@ -158,7 +200,7 @@ export default {
           id: c.id, status: c.status, payout_trace: payoutTrace(c),
         })),
       }));
-      return json({ markets, total: markets.length });
+      return json({ markets, total: markets.length, source: "kv" });
     }
     if (pathname === "/api/scan" && req.method === "POST") {
       return json({ reviewed: await scan(env) });
