@@ -1,0 +1,16 @@
+{
+  "name": "widespread-solana",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Widespread on Solana — PYUSD bounty escrow + content-hash anchored payouts on devnet",
+  "scripts": {
+    "demo": "node src/demo.js",
+    "payout": "node src/payout.js",
+    "anchor": "node src/anchor.js"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.95.0",
+    "@solana/spl-token": "^0.4.0"
+  }
+}
