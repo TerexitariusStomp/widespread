@@ -1,9 +1,19 @@
-// contract.js — widespread permissionless market on NEAR (near-sdk-js 2.x).
+// contract.src.js — widespread permissionless market on NEAR (near-sdk-js 2.x).
 //
-// The loop: payer locks NEAR in createMarket → agent ships a signed
-// dg-ship-1 claim → a verdict (payer sig or a registered oracle's signed
-// verdict) releases escrow → contributor self-settles. No operator in the
-// loop — the contract IS the market. 2% to a DAO sink, no platform cut.
+// SOURCE OF TRUTH: near-sdk-js build overwrites contract.js — edit THIS file,
+// rebuild via the market build pipeline, deploy build/contract.wasm.
+//
+// The loop: payer locks NEAR in createMarket → agents ship signed dg-ship-1
+// claims (UNBOUNDED — no cap on submissions) → a verdict names the winning
+// claim → escrow releases to the best VERIFIED work, not the first past the
+// post. Losers are recorded with public scores — strong losing work still
+// builds reputation. 2% to a DAO sink, no platform cut.
+//
+// Claims are free for claimants: contract state bytes are absorbed by the
+// contract account (~300B/claim), reclaimed when claims expire and are
+// batch-deleted. Spam is deterred by consequences, not tolls: bridge-side
+// attestation (real forge submissions only), stage-1 evidence recompute,
+// forge-native identity, and verdict competition.
 //
 // Oracles register themselves — permissionless adjudication: the bridge
 // is the reference implementation, but any payer can pick their own
@@ -24,12 +34,14 @@ const REFUNDED = "refunded";
 const EXPIRED = "expired";
 const DAO_SINK = "widespread-dao.near"; // set at deploy
 const FEE_BPS = 200n; // 2%
+const DEFAULT_CLAIM_TTL_NS = 7n * 24n * 60n * 60n * 1_000_000_000n; // 7 days
+const CLAIM_PAGE = 50;
 
 @NearBindgen({})
 export class WidespreadMarket {
   constructor() {
     this.markets = {};  // marketId -> market record
-    this.claims = {};   // marketId -> claim record
+    this.claims = {};   // marketId -> { seq, items: {claimId -> rec}, order: [claimId] }
     this.oracles = {};  // pubkey -> { active, owner, verdicts, disputes }
     this.nextId = 1;
   }
@@ -37,7 +49,7 @@ export class WidespreadMarket {
   // ---- payer: lock the bounty (attach deposit = escrow) ----
 
   @call({ payableFunction: true })
-  createMarket({ specHash, spec, deadline, acceptanceRule, payToHat }) {
+  createMarket({ specHash, spec, deadline, acceptanceRule, payToHat, claimTtlNs, acceptanceHash }) {
     const payer = near.predecessorAccountId();
     const attached = near.attachedDeposit();
     assert(attached > 0n, "market must be funded — attach the bounty");
@@ -45,12 +57,17 @@ export class WidespreadMarket {
     this.markets[marketId] = {
       marketId, payer, specHash, spec,
       locked: attached.toString(), deadline, acceptanceRule,
+      // hidden_tests acceptanceRule: payer commits a hash of hidden checks
+      // at funding; stage-1 recompute enforces them before oracle.
+      acceptanceHash: acceptanceHash ?? null,
+      claimTtlNs: claimTtlNs ?? DEFAULT_CLAIM_TTL_NS.toString(),
       // Intentional Hats binding: when set, release records the earning
       // hat so the bridge can route settlement through the hat's intents
       // leg (foreign address / Poidh claim) instead of only NEAR.
       payToHat: payToHat ?? null,
       status: OPEN, createdAt: near.blockTimestamp().toString(),
     };
+    this.claims[marketId] = { seq: 0, items: {}, order: [] };
     return marketId;
   }
 
@@ -59,12 +76,12 @@ export class WidespreadMarket {
     const m = this.markets[marketId];
     assert(m && m.status === OPEN, "market not open");
     const expired = near.blockTimestamp() > BigInt(m.deadline);
-    const noClaim = !this.claims[marketId];
+    const noPending = !this._pendingClaims(marketId).length;
     // payer can pull unclaimed funds any time; anyone can pull expired —
     // a payer can't hostage a market forever (timeout auto-release).
     assert(
-      (near.predecessorAccountId() === m.payer && noClaim) || expired,
-      "market is live with a pending claim"
+      (near.predecessorAccountId() === m.payer && noPending) || expired,
+      "market is live with pending claims"
     );
     m.status = expired ? EXPIRED : REFUNDED;
     this._transfer(m.payer, BigInt(m.locked));
@@ -81,58 +98,145 @@ export class WidespreadMarket {
     return true;
   }
 
-  // ---- agent: bind work to the market ----
+  // ---- agent: bind work to the market (UNBOUNDED submissions) ----
+  //
+  // Claims are free — no deposit, no cap. Each claim carries the bridge's
+  // attestation stamp (relayer + attested flag + forge identity) so the
+  // verdict only ever competes real, forge-verified submissions.
+  // claimTtlNs on the market bounds how long a claim stays pending;
+  // cleanupExpired reclaims the state bytes.
 
   @call({})
-  shipClaim({ marketId, claimHash, actor, commits, evidence }) {
+  shipClaim({ marketId, claimHash, actor, commits, evidence,
+              claimant, forgeId, forgeUserId, relayer, attested }) {
     const m = this.markets[marketId];
     assert(m && m.status === OPEN, "market not open");
-    assert(!this.claims[marketId], "a claim is already pending");
-    this.claims[marketId] = {
-      marketId, claimHash, actor, commits, evidence,
-      claimant: near.predecessorAccountId(),
-      ts: near.blockTimestamp().toString(),
+    const bag = this._claimsBag(marketId) ??
+      (this.claims[marketId] = { seq: 0, items: {}, order: [] });
+    const claimId = String(++bag.seq);
+    const ttl = BigInt(m.claimTtlNs ?? DEFAULT_CLAIM_TTL_NS.toString());
+    const now = near.blockTimestamp();
+    bag.items[claimId] = {
+      claimId, marketId, claimHash, actor, commits, evidence,
+      // payout identity (NEAR acct) vs shippedBy (who called — the relayer)
+      claimant: claimant ?? near.predecessorAccountId(),
+      shippedBy: near.predecessorAccountId(),
+      // anti-sybil key resolved by the bridge from the forge artifact —
+      // GitHub numeric user ID / forge DID; NEAR accounts are payout-only.
+      forgeId: forgeId ?? null, forgeUserId: forgeUserId ?? null,
+      relayer: relayer ?? null,
+      attested: attested === true,
+      status: "pending",
+      claimDeadline: (now + ttl).toString(),
+      ts: now.toString(),
     };
+    bag.order.push(claimId);
+    return claimId;
+  }
+
+  @call({})
+  withdrawClaim({ marketId, claimId }) {
+    const bag = this._claimsBag(marketId);
+    const c = bag?.items?.[claimId];
+    assert(c && c.status === "pending", "no pending claim");
+    const who = near.predecessorAccountId();
+    assert(who === c.shippedBy || who === c.claimant, "not your claim");
+    c.status = "withdrawn";
     return true;
   }
 
-  // ---- settlement: verdict-gated release ----
+  /** Anyone can reap expired claims — returns their storage bytes to the
+   * contract account. Junk/stale claims never block the market. */
+  @call({})
+  cleanupExpired({ marketId }) {
+    const bag = this._claimsBag(marketId);
+    assert(bag, "no claims");
+    const now = near.blockTimestamp();
+    let reaped = 0;
+    for (const id of bag.order) {
+      const c = bag.items[id];
+      if (c && c.status === "pending" && BigInt(c.claimDeadline) < now) {
+        c.status = "expired";
+        reaped++;
+      }
+    }
+    return { reaped };
+  }
+
+  // ---- settlement: verdict-gated release, winner among ALL claims ----
 
   @call({})
-  release({ marketId, verdictSig, oraclePubkey }) {
+  release({ marketId, verdictSig, oraclePubkey, winningClaimId }) {
     const m = this.markets[marketId];
-    const c = this.claims[marketId];
-    assert(m && c && m.status === OPEN, "no open market with claim");
+    assert(m && m.status === OPEN, "market not open");
+    const bag = this._claimsBag(marketId);
+    const pending = this._pendingClaims(marketId);
+    assert(pending.length > 0, "no pending claims");
 
     const signer = near.signerAccountId();
     const isPayer = signer === m.payer;                    // merge=accept on-chain
     const oracle = oraclePubkey && this.oracles[oraclePubkey];
     const isOracle = oracle && oracle.active;
-
     assert(isPayer || isOracle, "release needs payer sig or oracle verdict");
+
+    // Winner selection: oracle/payer names the claim. Payer may accept any
+    // claim (their money); oracle verdicts only count ATTESTED claims —
+    // real forge-verified submissions, never raw contract spam.
+    const winner = winningClaimId
+      ? bag.items[String(winningClaimId)]
+      : (isPayer ? pending[0] : null);
+    assert(winner && winner.status === "pending", "winning claim not pending");
     if (isOracle && !isPayer) {
       assert(verdictSig && verdictSig.length > 32, "oracle verdict proof required");
+      assert(winner.attested, "oracle can only settle attested claims");
       oracle.verdicts += 1;
     }
 
     const locked = BigInt(m.locked);
     const fee = (locked * FEE_BPS) / 10000n;
     m.status = PAID;
-    m.paidTo = c.claimant;
-    m.claimHash = c.claimHash;
+    m.paidTo = winner.claimant;
+    m.claimHash = winner.claimHash;
+    m.winningClaimId = winner.claimId;
     if (m.payToHat) m.payoutHatId = m.payToHat;
-    this._transfer(c.claimant, locked - fee);
+    // losers stay on record — public scores, reputation signal
+    for (const c of pending) {
+      if (c.claimId !== winner.claimId) c.status = "outcompeted";
+    }
+    winner.status = "won";
+    this._transfer(winner.claimant, locked - fee);
     if (fee > 0n) this._transfer(DAO_SINK, fee);
-    return { paid: c.claimant, net: (locked - fee).toString(),
-             fee: fee.toString(), claimHash: m.claimHash };
+    return { paid: winner.claimant, net: (locked - fee).toString(),
+             fee: fee.toString(), claimHash: m.claimHash,
+             winningClaimId: winner.claimId, losers: pending.length - 1 };
   }
 
   // ---- views (public market state — the on-chain bounty board) ----
 
   @view({})
   getMarket({ marketId }) { return this.markets[marketId]; }
+  /** Compat shim: first pending claim or null (pre-multi-claim callers). */
   @view({})
-  getClaim({ marketId }) { return this.claims[marketId]; }
+  getClaim({ marketId }) {
+    const pending = this._pendingClaims(marketId);
+    return pending.length ? pending[0] : null;
+  }
+  /** Paginated claims for a market — the competition surface. */
+  @view({})
+  getClaims({ marketId, from, limit }) {
+    const bag = this._claimsBag(marketId);
+    if (!bag) return { claims: [], total: 0 };
+    const f = Number(from ?? 0), l = Math.min(Number(limit ?? CLAIM_PAGE), 200);
+    const pending = bag.order
+      .map((id) => bag.items[id])
+      .filter((c) => c && c.status === "pending");
+    const resolved = bag.order
+      .map((id) => bag.items[id])
+      .filter((c) => c && c.status !== "pending");
+    const all = [...pending, ...resolved];
+    return { claims: all.slice(f, f + l), total: all.length,
+             pending: pending.length };
+  }
   @view({})
   getOracle({ pubkey }) { return this.oracles[pubkey]; }
   @view({})
@@ -143,6 +247,33 @@ export class WidespreadMarket {
   listAll() { return Object.values(this.markets); }
 
   // ---- internal ----
+
+  /** Claims container with lazy migration from the legacy single-claim
+   * shape (claims[marketId] was the claim record itself). Legacy claims
+   * predate attestation — they came through the bridge's validated path,
+   * so they're marked attested to keep existing markets settleable. */
+  _claimsBag(marketId) {
+    let bag = this.claims[marketId];
+    if (bag && bag.items === undefined && bag.claimHash !== undefined) {
+      bag = {
+        seq: 1,
+        items: {
+          "1": { ...bag, claimId: "1", status: "pending",
+                 shippedBy: bag.claimant, attested: true,
+                 claimDeadline: this.markets[marketId]?.deadline ?? "0" },
+        },
+        order: ["1"],
+      };
+      this.claims[marketId] = bag;
+    }
+    return bag ?? null;
+  }
+
+  _pendingClaims(marketId) {
+    const bag = this._claimsBag(marketId);
+    if (!bag) return [];
+    return bag.order.map((id) => bag.items[id]).filter((c) => c && c.status === "pending");
+  }
 
   _transfer(to, amount) {
     // plain NEAR transfer = promise batch with a single transfer action —

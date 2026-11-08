@@ -7,7 +7,7 @@ import os from "os";
 import path from "path";
 
 const CREDS = path.join(os.homedir(), ".widespread-near.json");
-const wasm = readFileSync(new URL("../build/contract.wasm", import.meta.url));
+const wasm = readFileSync(new URL("./build/contract.wasm", import.meta.url));
 
 const cfg = {
   networkId: "testnet",
