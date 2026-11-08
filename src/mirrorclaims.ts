@@ -17,6 +17,7 @@ import type { Env, MirrorListing } from "./types";
 import { validateForgeSubmission, attestationForMirror } from "./claims";
 import { feedDoc } from "./feed";
 import { sendPayout } from "./payouts";
+import { paxosPyusdWithdraw } from "./paxos";
 
 const claimKey = (mirrorId: string, hash: string) => `mclaim:${mirrorId}:${hash}`;
 const claimsPrefix = (mirrorId: string) => `mclaim:${mirrorId}:`;
@@ -180,21 +181,48 @@ export async function handleMirrorPayout(req: Request, env: Env, ctx?: Execution
     return Response.json({ ok: true, status: "already_paid", settlement });
   }
 
-  // PYUSD leg: no public PayPal API for PYUSD sends yet — ops converts USD→
-  // PYUSD in PayPal and sends to the Solana address (or via Paxos API once
-  // Widespread holds a Paxos account). We record the exact payout spec.
-  if (settlement.pyusd && !settlement.paypal_usd) {
-    settlement.payout = {
-      rail: "pyusd-solana", status: "pending_ops",
-      note: `Send ${settlement.pyusd.amount} PYUSD on Solana to ${settlement.pyusd.to} ` +
-            `(mint ${settlement.pyusd.mint}). Convert ${settlement.net_usd} USD → PYUSD in PayPal, ` +
-            `then send to the external Solana wallet.`,
+  // Payout rail priority: PYUSD on Solana via Paxos (licensed transmitter
+  // of record — sanctions screening + Travel Rule enforced by them) when
+  // the winner gave a Solana address; USD via PayPal Payouts otherwise.
+  const paxosReady = !!(env.PAXOS_CLIENT_ID && env.PAXOS_CLIENT_SECRET && env.PAXOS_PROFILE_ID);
+  if (settlement.pyusd) {
+    const winClaim = await env.CLAIMS.get(claimKey(mirrorId, settlement.winning_claim_hash))
+      .then((v) => v ? JSON.parse(v) as { payout?: { beneficiary?: Record<string, unknown> } } : null);
+    const payoutSpec = (winClaim?.payout ?? {}) as {
+      beneficiary?: { first_name?: string; last_name?: string; physical_address?: { country?: string } };
     };
+    if (paxosReady) {
+      const refId = `wide-mirror-${mirrorId}`.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 100);
+      const result = await paxosPyusdWithdraw(env, {
+        refId,
+        amount: settlement.pyusd.amount,
+        destinationAddress: settlement.pyusd.to,
+        beneficiary: payoutSpec.beneficiary,
+      });
+      settlement.payout = result.ok
+        ? { rail: "pyusd-solana", provider: "paxos", status: result.status,
+            transfer_id: result.transfer_id, ref_id: refId,
+            ...(result.error ? { note: result.error } : {}) }
+        : { rail: "pyusd-solana", provider: "paxos", status: "failed",
+            error: result.error, travel_rule_required: !!result.travel_rule_required,
+            ...(result.travel_rule_required
+              ? { next: "Resubmit claim payout with beneficiary {first_name,last_name,physical_address.country} or save Travel Rule metadata on the Paxos destination address." }
+              : {}) };
+    } else {
+      // No Paxos creds — queue the exact send for ops (PayPal app / Paxos
+      // dashboard) rather than lose the settlement.
+      settlement.payout = {
+        rail: "pyusd-solana", status: "pending_ops",
+        note: `Send ${settlement.pyusd.amount} PYUSD on Solana to ${settlement.pyusd.to} ` +
+              `(mint ${settlement.pyusd.mint}).`,
+      };
+    }
     await env.CLAIMS.put(settleKey(mirrorId), JSON.stringify(settlement));
-    return Response.json({ ok: true, settlement, note: "PYUSD payout queued — ops executes the PayPal→Solana send." });
+    return Response.json({ ok: settlement.payout.status !== "failed", settlement });
   }
 
-  // USD fallback: PayPal Payouts to the winner's PayPal email — live today.
+  // USD fallback: PayPal Payouts to the winner's PayPal email — live today,
+  // PayPal is the licensed transmitter on this rail.
   if (settlement.paypal_usd) {
     const receipt = await sendPayout(env, {
       repo: mirrorId, seq: 0, claimHash: settlement.winning_claim_hash,
