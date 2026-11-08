@@ -187,7 +187,7 @@ export type IdentityRef =
 
 export function parseIdentityRef(ref: string | null | undefined): IdentityRef | null {
   if (!ref) return null;
-  let m = ref.match(/^erc8004:(\d+):(\d+)$/i);
+  let m = ref.match(/^erc8004:(\d+):([^:]+)$/i);
   if (m) return { kind: "erc8004", chainId: parseInt(m[1], 10), agentId: m[2] };
   m = ref.match(/^at:\/\/([^/]+)(\/(\S+))?$/);
   if (m) return { kind: "atproto", did: m[1], record: m[3] };
