@@ -1,0 +1,9 @@
+FROM node:22-alpine
+RUN apk add --no-cache git python3 py3-pip bash dumb-init
+RUN addgroup -S agent && adduser -S agent -G agent
+COPY scripts/run-task.sh /usr/local/bin/run-task.sh
+RUN chmod +x /usr/local/bin/run-task.sh
+# uid supplied at runtime (User: host uid) so volume writes map cleanly
+WORKDIR /work
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+CMD ["/usr/local/bin/run-task.sh"]
