@@ -49,10 +49,11 @@ export class WidespreadMarket {
   // ---- payer: lock the bounty (attach deposit = escrow) ----
 
   @call({ payableFunction: true })
-  createMarket({ specHash, spec, deadline, acceptanceRule, payToHat, claimTtlNs, acceptanceHash }) {
+  createMarket({ specHash, spec, deadline, acceptanceRule, payToHat, claimTtlNs, acceptanceHash, platformBps, platformTo }) {
     const payer = near.predecessorAccountId();
     const attached = near.attachedDeposit();
     assert(attached > 0n, "market must be funded — attach the bounty");
+    assert((platformBps ?? 0) <= 5000, "platformBps above 50% refused");
     const marketId = String(this.nextId++);
     this.markets[marketId] = {
       marketId, payer, specHash, spec,
@@ -65,6 +66,11 @@ export class WidespreadMarket {
       // hat so the bridge can route settlement through the hat's intents
       // leg (foreign address / Poidh claim) instead of only NEAR.
       payToHat: payToHat ?? null,
+      // Mirror-market markup: platformBps of `locked` is skimmed at release
+      // to platformTo (default DAO sink) — how third-party bounties listed
+      // through us earn their spread. 0 = plain market, unchanged.
+      platformBps: platformBps ?? 0,
+      platformTo: platformTo ?? null,
       status: OPEN, createdAt: near.blockTimestamp().toString(),
     };
     this.claims[marketId] = { seq: 0, items: {}, order: [] };
@@ -194,6 +200,8 @@ export class WidespreadMarket {
 
     const locked = BigInt(m.locked);
     const fee = (locked * FEE_BPS) / 10000n;
+    const platformCut = (locked * BigInt(m.platformBps ?? 0)) / 10000n;
+    const net = locked - fee - platformCut;
     m.status = PAID;
     m.paidTo = winner.claimant;
     m.claimHash = winner.claimHash;
@@ -204,10 +212,12 @@ export class WidespreadMarket {
       if (c.claimId !== winner.claimId) c.status = "outcompeted";
     }
     winner.status = "won";
-    this._transfer(winner.claimant, locked - fee);
+    this._transfer(winner.claimant, net);
     if (fee > 0n) this._transfer(DAO_SINK, fee);
-    return { paid: winner.claimant, net: (locked - fee).toString(),
-             fee: fee.toString(), claimHash: m.claimHash,
+    if (platformCut > 0n) this._transfer(m.platformTo ?? DAO_SINK, platformCut);
+    return { paid: winner.claimant, net: net.toString(),
+             fee: fee.toString(), platformCut: platformCut.toString(),
+             claimHash: m.claimHash,
              winningClaimId: winner.claimId, losers: pending.length - 1 };
   }
 
