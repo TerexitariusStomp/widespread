@@ -24,6 +24,24 @@ const json = (body: unknown, status = 200) =>
 
 const bad = (msg: string, status = 400) => json({ error: msg }, status);
 
+/** Where-the-money-goes trace for a claim: escrow → paid | refunded |
+ * open | expired | slashed — the public answer to "where did it go". */
+function payoutTrace(c: Record<string, unknown>) {
+  const pay = (c.payout ?? {}) as {
+    batch_id?: string; transaction_id?: string; receiver?: string;
+    amount?: string; currency?: string;
+  };
+  const status = String(c.status ?? "open");
+  return {
+    escrowed: true,
+    state: status === "accepted_paid" ? "paid" : status,
+    to: pay.receiver ?? (status === "accepted_paid" ? "claimant" : "escrow"),
+    tx: pay.transaction_id ?? pay.batch_id ?? null,
+    amount: pay.amount ?? null,
+    currency: pay.currency ?? null,
+  };
+}
+
 function isAuthorized(req: Request, env: Env): boolean {
   if (!env.ADMIN_TOKEN) return true;
   return req.headers.get("authorization") === `Bearer ${env.ADMIN_TOKEN}`;
@@ -129,7 +147,30 @@ export default {
       // claims get reviewed without needing a cron trigger slot.
       ctx.waitUntil(scan(env).catch((e) => console.error(`scan: ${String(e)}`)));
       const [claims, bounties] = await Promise.all([listRecords(env), listBounties(env)]);
+      for (const c of claims as Record<string, unknown>[]) {
+        c.payout_trace = payoutTrace(c);
+      }
       return json({ claims, bounties });
+    }
+    // Public bounty board — funded, open markets + where the money goes.
+    // Queryable by agents/auditors the way settled.tools scrapes rivals'.
+    if (pathname === "/api/markets" && req.method === "GET") {
+      const [claims, bounties] = await Promise.all([listRecords(env), listBounties(env)]);
+      const byRepo = new Map<string, typeof claims>();
+      for (const c of claims as { repo?: string }[]) {
+        const k = String(c.repo ?? "");
+        byRepo.set(k, [...(byRepo.get(k) ?? []), c]);
+      }
+      const markets = (bounties as Record<string, unknown>[]).map((b) => ({
+        repo: b.repo, amount: b.amount, currency: b.currency,
+        spec: b.spec, created_at: b.created_at,
+        claims: (byRepo.get(String(b.repo)) ?? []).map((c) => ({
+          id: (c as Record<string, unknown>).id,
+          status: (c as Record<string, unknown>).status,
+          payout_trace: payoutTrace(c as Record<string, unknown>),
+        })),
+      }));
+      return json({ markets, total: markets.length });
     }
     if (pathname === "/api/scan" && req.method === "POST") {
       return json({ reviewed: await scan(env) });
