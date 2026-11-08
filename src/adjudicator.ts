@@ -36,6 +36,9 @@ interface AdjudicatorInput {
   bounty: Bounty | null;
   commits: CommitEvidence[];
   check: Crosscheck;
+  /** Derivative-use proof: a later upstream commit landed the same patch
+   *  fingerprint — the payer may have used the work without merging. */
+  derivative?: { sha: string; matched: boolean } | null;
 }
 
 function buildPrompt(input: AdjudicatorInput): string {
@@ -67,6 +70,7 @@ function buildPrompt(input: AdjudicatorInput): string {
       bounty_spec: input.bounty?.spec ?? null,
       bounty_amount: input.bounty ? `${input.bounty.amount} ${input.bounty.currency}` : null,
       crosscheck: input.check,
+      derivative_use: input.derivative ?? null,
       commits,
     },
     null,

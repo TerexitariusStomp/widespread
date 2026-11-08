@@ -82,6 +82,7 @@ export async function runReview(
     bounty,
     commits,
     check,
+    derivative,
   });
 
   // Money moves only on: model says accept + confidence floor + intact chain.

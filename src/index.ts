@@ -15,6 +15,8 @@ import { handlePremiumExport } from "./premium";
 import { reviewOutstanding, runReview } from "./review";
 import { handleBotVerdict, type BotVerdictBody } from "./botverdict";
 import { attestClaim, ecosystem, openDispute } from "./ecosystem";
+import { resolveLocator } from "./locator";
+import { sponsorPage } from "./sponsor";
 import { deleteBounty, listBounties, listRecords, putBounty } from "./store";
 import type { Bounty, Env } from "./types";
 
@@ -178,6 +180,8 @@ export default {
         headers: { "content-type": "text/html; charset=utf-8" },
       });
     }
+    // Sponsor-tool surface: AG Grid payout-trace viewer.
+    if (pathname === "/sponsor") return sponsorPage(env);
     if (pathname === "/healthz") return json({ ok: true, service: "slopcash-bridge" });
     if (pathname === "/api/state" && req.method === "GET") {
       // Opportunistic pickup: an open dashboard polls this route, so new ship
@@ -229,6 +233,11 @@ export default {
     // forges, workers, dispute/proof seams. All env-gated, all optional.
     if (pathname === "/api/ecosystem" && req.method === "GET") {
       return json(await ecosystem(env));
+    }
+    // Sovereign repo layer — resolve any locator to its verification surface.
+    if (pathname === "/api/locator" && req.method === "GET") {
+      const u = url.searchParams.get("u") ?? "";
+      return u ? json(resolveLocator(u)) : bad("need ?u=<locator>", 400);
     }
     // Kleros dispute seam — binds claimHash+reason as arbitration evidence.
     if (pathname === "/api/dispute" && req.method === "POST") {

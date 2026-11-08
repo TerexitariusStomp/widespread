@@ -8,6 +8,7 @@
 //      format-patch there). We do the same, independently.
 
 import type { CommitEvidence, Crosscheck, Env, ShipClaim } from "./types";
+import { diffUrlFor, resolveLocator } from "./locator";
 
 const DIFF_EXCERPT_CHARS = 6000;
 const MAX_PATCH_BYTES = 2 * 1024 * 1024;
@@ -211,24 +212,33 @@ export async function gatherCommitEvidence(
     };
   }
 
-  // 2) remote-backed: the upstream's public format-patch endpoint
+  // 2) remote-backed: resolve the repo locator — forge-aware diff URL when
+  // the type has an HTTP diff surface, .patch convention otherwise; p2p
+  // remotes (knot/radicle/deltagit) report unavailable → clone path.
   const upstreamBase = upstreamFor(repo, env, upstream);
   if (upstreamBase) {
-    const patchUrl = `${upstreamBase}/commit/${sha}.patch`;
-    const patch = await fetchText(patchUrl, MAX_PATCH_BYTES);
-    if (patch && patch.includes("diff --git")) {
-      const parsed = parseUnifiedDiff(patch);
-      return {
-        ...base,
-        source: "upstream-patch",
-        message: patchSubject(patch),
-        files: parsed.files,
-        lines_added: parsed.linesAdded,
-        lines_removed: parsed.linesRemoved,
-        diff_excerpt: patch.slice(0, DIFF_EXCERPT_CHARS),
-        evidence_url: patchUrl,
-        patch_fingerprint: await patchFingerprint(patch),
-      };
+    const loc = resolveLocator(upstreamBase);
+    const candidates = [
+      diffUrlFor(loc, sha),
+      loc.type === "github" || loc.type === "generic"
+        ? `${upstreamBase}/commit/${sha}.patch` : null,
+    ].filter((u): u is string => !!u);
+    for (const patchUrl of candidates) {
+      const patch = await fetchText(patchUrl, MAX_PATCH_BYTES);
+      if (patch && patch.includes("diff --git")) {
+        const parsed = parseUnifiedDiff(patch);
+        return {
+          ...base,
+          source: "upstream-patch",
+          message: patchSubject(patch),
+          files: parsed.files,
+          lines_added: parsed.linesAdded,
+          lines_removed: parsed.linesRemoved,
+          diff_excerpt: patch.slice(0, DIFF_EXCERPT_CHARS),
+          evidence_url: patchUrl,
+          patch_fingerprint: await patchFingerprint(patch),
+        };
+      }
     }
   }
 
