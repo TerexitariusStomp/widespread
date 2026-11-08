@@ -39,6 +39,11 @@ export interface Env {
   FEED_POLAR?: string;
   /** HMAC secret for /api/claims attestation tokens (falls back to ADMIN_TOKEN). */
   ATTEST_SECRET?: string;
+  /** Markup (bps) applied when mirroring third-party bounties into our
+   * markets — our spread, skimmed on-chain to platformTo at release. */
+  MARKUP_BPS?: string;
+  /** NEAR account that receives mirror-market markup (default: DAO sink). */
+  MARKUP_SINK?: string;
 }
 
 /** Normalized discovery record — one funded work item from any source.
@@ -69,10 +74,24 @@ export interface FeedRecord {
   execution?: { recommended: string; isolation: string; alternatives: string[]; note: string };
   trust?: { repo_claims?: number; repo_paid?: number; repo_pass_rate?: number };
   competition?: { pending_claims?: number; unique_claimants?: number; first_claim_age_h?: number };
-  /** Monetization path for non-Widespread funding — never implies our escrow. */
-  widespread_offer?: string;
+  /** Monetization path for non-Widespread funding — never implies our escrow.
+   * String for simple hints; MirrorOffer when a concrete marked-up mirror
+   * into a Widespread market is available. */
+  widespread_offer?: string | MirrorOffer;
   created_at?: number;
   updated_at: number;
+}
+
+/** Concrete mirror offer: route an external bounty through a Widespread
+ * market at a marked-up price. platformBps is skimmed on-chain at release
+ * to MARKUP_SINK — proportional markup needs no FX oracle. */
+export interface MirrorOffer {
+  action: "mirror";
+  endpoint: "createMarket";
+  contract?: string;
+  markup_bps: number;
+  original?: { amount?: string; currency?: string };
+  note: string;
 }
 
 /** Materialized feed document stored in KV — merged+normalized once per refresh. */

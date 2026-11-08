@@ -16,11 +16,31 @@ import {
   acquireFeedLock, getFeedDoc, getSourceStamp, putFeedDoc,
   putSourceStamp, releaseFeedLock, FEED_TTL_MS, type SourceStamp,
 } from "./feedstore";
-import type { Env, FeedDoc, FeedRecord } from "./types";
+import type { Env, FeedDoc, FeedRecord, MirrorOffer } from "./types";
 
 const UA = { "user-agent": "widespread-feed/1.0", accept: "application/json" };
 const FETCH_TIMEOUT_MS = 8000;
 const MAX_RECORDS = 500;
+const DEFAULT_MARKUP_BPS = 1000; // 10% — third-party mirror spread
+
+/** Mirror markup for externally-funded bounties routed through our
+ * markets. Proportional (bps of escrow) so no FX oracle is needed — the
+ * payer funds the marked-up NEAR amount and the contract skims the cut
+ * to MARKUP_SINK at release. */
+export function markupBps(env: Env): number {
+  const n = parseInt(env.MARKUP_BPS ?? "", 10);
+  return Number.isFinite(n) && n >= 0 && n <= 5000 ? n : DEFAULT_MARKUP_BPS;
+}
+
+export function mirrorOffer(env: Env, amount?: string, currency?: string): MirrorOffer {
+  return {
+    action: "mirror", endpoint: "createMarket", contract: env.NEAR_CONTRACT,
+    markup_bps: markupBps(env),
+    ...(amount || currency ? { original: { ...(amount ? { amount } : {}), ...(currency ? { currency } : {}) } } : {}),
+    note: "Mirror this external bounty into a Widespread market: attach a NEAR deposit covering the marked-up value, set platformBps=" +
+      `${markupBps(env)} + platformTo on createMarket. Our spread is skimmed on-chain at release; agents claim via POST /api/claims.`,
+  };
+}
 
 // Rough USD estimates for sort only — never settlement truth.
 const USD_MAP: Record<string, number> = {
@@ -149,21 +169,47 @@ async function ghRepoIssues(env: Env, repo: string): Promise<GhIssue[]> {
 }
 
 // Third-party bounty signatures found in issue bodies/comments.
-const PLATFORM_SIGS: { platform: string; re: RegExp; amountRe?: RegExp }[] = [
-  { platform: "algora", re: /algora\.io\/bounty\/([\w-]+)|\/bounty\s*\$?([\d,.]+)/i,
-    amountRe: /\/bounty\s*\$?([\d,.]+)/i },
-  { platform: "issuehunt", re: /issuehunt\.io\/[\w/-]+/i },
-  { platform: "polar", re: /polar\.sh\/[\w/-]+/i },
-  { platform: "gitpay", re: /gitpay\.(?:me|dev)\/[\w/-]+/i },
-  { platform: "opire", re: /opire\.(?:dev|app)\/[\w/-]+/i },
+const PLATFORM_SIGS: { platform: string; re: RegExp; amountRes: RegExp[] }[] = [
+  { platform: "algora", re: /algora\.io\/bounty\/[\w-]+|\/bounty\s*\$?[\d,.]+/i,
+    amountRes: [/\$\s*([\d,]+(?:\.\d+)?)/, /\/bounty\s*\$?([\d,]+(?:\.\d+)?)/i,
+                /algora[\s\S]{0,80}?\$\s*([\d,]+(?:\.\d+)?)/i] },
+  { platform: "issuehunt", re: /issuehunt\.io\/[\w/-]+/i,
+    amountRes: [/\$\s*([\d,]+(?:\.\d+)?)/, /reward[\s\S]{0,40}?\$?\s*([\d,]+(?:\.\d+)?)/i] },
+  { platform: "polar", re: /polar\.sh\/[\w/-]+/i,
+    amountRes: [/\$\s*([\d,]+(?:\.\d+)?)/] },
+  { platform: "gitpay", re: /gitpay\.(?:me|dev)\/[\w/-]+/i,
+    amountRes: [/\$\s*([\d,]+(?:\.\d+)?)/, /([\d,]+(?:\.\d+)?)\s*(?:USD|USDC|EUR)/i] },
+  { platform: "opire", re: /opire\.(?:dev|app)\/[\w/-]+/i,
+    amountRes: [/\$\s*([\d,]+(?:\.\d+)?)/] },
 ];
+
+/** Last-resort amount scrape for generic hits — "$50", "bounty of 200",
+ * "[BOUNTY $50]", "reward: $1,000". Returns undefined when nothing parses. */
+const GENERIC_AMOUNT_RES = [
+  /\[\s*bounty\s*\$?\s*([\d,]+(?:\.\d+)?)\s*\]/i,
+  /\bbounty\s+(?:of|for|:)?\s*\$?\s*([\d,]+(?:\.\d+)?)/i,
+  /\breward\s+(?:of|:)?\s*\$?\s*([\d,]+(?:\.\d+)?)/i,
+  /\$\s*([\d,]+(?:\.\d+)?)\s*(?:usd|usdc|usdt)?\b/i,
+];
+
+function scrapeAmount(text: string): string | undefined {
+  for (const re of GENERIC_AMOUNT_RES) {
+    const m = text.match(re);
+    if (m) return m[1].replace(/,/g, "");
+  }
+  return undefined;
+}
 
 function detectPlatform(text: string): { platform: string; ref?: string; amount?: string } | null {
   for (const sig of PLATFORM_SIGS) {
     const m = text.match(sig.re);
     if (m) {
-      const amt = sig.amountRe ? text.match(sig.amountRe)?.[1] : undefined;
-      return { platform: sig.platform, ref: m[0].slice(0, 120), amount: amt };
+      let amt: string | undefined;
+      for (const re of sig.amountRes) {
+        amt = text.match(re)?.[1]?.replace(/,/g, "");
+        if (amt) break;
+      }
+      return { platform: sig.platform, ref: m[0].slice(0, 120), amount: amt ?? scrapeAmount(text) };
     }
   }
   return null;
@@ -182,11 +228,12 @@ const THIRD_PARTY_QUERIES = [
 // while covering every signature over successive cycles.
 let ghQueryCursor = 0;
 
-function ghIssueToRecord(issue: GhIssue, repo: string, opts: {
+function ghIssueToRecord(env: Env, issue: GhIssue, repo: string, opts: {
   source: string; escrow: FeedRecord["escrow"]; amount?: string; currency?: string;
   spec?: string; url?: string; platform?: string;
 }): FeedRecord {
   const usd = estUsd(opts.amount, opts.currency);
+  const thirdParty = !!opts.platform || opts.source.startsWith("github-thirdparty");
   return {
     id: `${opts.source}:${repo}#${issue.number}`,
     source: opts.source,
@@ -199,13 +246,11 @@ function ghIssueToRecord(issue: GhIssue, repo: string, opts: {
     ...(opts.currency ? { currency: opts.currency } : {}),
     ...(usd ? { est_usd: usd } : {}),
     escrow: opts.escrow,
-    ...(opts.platform || opts.source !== "github"
-      ? { widespread_offer: "external funding — route through Widespread escrow + dg-ship-1 verification for the platform fee" }
-      : {}),
+    ...(thirdParty ? { widespread_offer: mirrorOffer(env, opts.amount, opts.currency ?? "USD") } : {}),
     url: opts.url ?? issue.html_url,
     claim: {
       how: opts.platform
-        ? `claim on ${opts.platform}, or mirror into a Widespread market via /api/bounties`
+        ? `claim on ${opts.platform}, or mirror into a Widespread market at +${markupBps(env) / 100}% via createMarket(platformBps)`
         : "PR with 'closes #N' + @widespread grammar",
       grammar: "@widespread <amount> <spec>",
     },
@@ -227,7 +272,7 @@ async function pollGithub(env: Env): Promise<FeedRecord[]> {
     seen.add(`${repo}#${issue.number}`);
     const amount = issue.labels?.find((l) => /^wide:funded:\$?[\d.]+/i.test(l.name))?.name
       .replace(/^wide:funded:\$?/i, "") ?? "";
-    out.push(ghIssueToRecord(issue, repo, {
+    out.push(ghIssueToRecord(env, issue, repo, {
       source: "github", escrow: { state: "label-only" },
       amount: amount || undefined, currency: "USD",
     }));
@@ -257,8 +302,14 @@ async function pollGithub(env: Env): Promise<FeedRecord[]> {
           if (hit) break;
         }
       }
+      // Noise gate: "/bounty" in:comments matches prose too — only record
+      // when a platform signature fired OR an amount/bounty-title signal
+      // is present. Keeps the index signal-dense for agents.
+      const genericAmount = scrapeAmount(`${issue.title}\n${issue.body ?? ""}`);
+      if (!hit && !genericAmount && !BOUNTY_TITLE.test(issue.title)) continue;
       if (hit?.amount) amount = hit.amount;
-      out.push(ghIssueToRecord(issue, repo, {
+      else if (genericAmount) amount = genericAmount;
+      out.push(ghIssueToRecord(env, issue, repo, {
         source: `github-thirdparty:${hit?.platform ?? "generic"}`,
         escrow: { state: "external" }, amount,
         currency: amount ? "USD" : undefined, platform: hit?.platform,
@@ -273,7 +324,7 @@ async function pollGithub(env: Env): Promise<FeedRecord[]> {
       if (!BOUNTY_TITLE.test(issue.title) && !issue.labels?.some((l) => /bounty|reward/i.test(l.name))) continue;
       if (seen.has(`${entry}#${issue.number}`)) continue;
       seen.add(`${entry}#${issue.number}`);
-      out.push(ghIssueToRecord(issue, entry, {
+      out.push(ghIssueToRecord(env, issue, entry, {
         source: "github-watch", escrow: { state: "none" },
       }));
     }
@@ -395,7 +446,7 @@ async function pollImmunefi(env: Env): Promise<FeedRecord[]> {
       escrow: { state: "external" },
       payout: { rails: ["immunefi"], note: "paid by Immunefi on verdict — security bounties only" },
       url: String(b.url ?? b.link ?? "https://immunefi.com"),
-      widespread_offer: "external funding — route through Widespread escrow + dg-ship-1 verification for the platform fee",
+      widespread_offer: mirrorOffer(env, reward ? String(reward) : undefined, cur),
       updated_at: Date.now(),
     } satisfies FeedRecord;
   }).filter((r) => r.title);
@@ -528,6 +579,50 @@ export async function feedDoc(env: Env, ctx?: ExecutionContext): Promise<FeedDoc
     } else void p; // stale doc: serve last-good, refresh behind
   }
   return doc ?? { generated_at: 0, sources: {}, records: [] };
+}
+
+// ------------------------------------------------------------ mirror offer
+
+async function sha256Hex(s: string): Promise<string> {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** POST /api/bounties/mirror {record_id} — turn an external/third-party feed
+ * record into a concrete marked-up Widespread market quote. Stateless: the
+ * payer signs createMarket themselves (bridge holds no NEAR key); platformBps
+ * makes our spread an on-chain fact skimmed to MARKUP_SINK at release. */
+export async function handleMirrorQuote(env: Env, ctx: ExecutionContext | undefined, body: { record_id?: string; spec?: string }): Promise<Response> {
+  if (!body.record_id) return Response.json({ ok: false, error: "record_id required" }, { status: 400 });
+  const doc = await feedDoc(env, ctx);
+  const rec = doc.records.find((r) => r.id === body.record_id);
+  if (!rec) return Response.json({ ok: false, error: "record not found", record_id: body.record_id }, { status: 404 });
+  const isExternal = rec.escrow.state === "external" || rec.source.startsWith("github-thirdparty") || rec.source.startsWith("external:");
+  if (!isExternal) {
+    return Response.json({ ok: false, error: "only external/third-party records can be mirrored — Widespread-native markets are already ours" }, { status: 422 });
+  }
+  const spec = body.spec ?? rec.spec ?? `${rec.title}\n\nSource: ${rec.url}`;
+  const bps = markupBps(env);
+  const sink = env.MARKUP_SINK ?? "widespread-dao.near";
+  return Response.json({
+    ok: true,
+    record: { id: rec.id, title: rec.title, url: rec.url, amount: rec.amount, currency: rec.currency, est_usd: rec.est_usd },
+    mirror: {
+      markup_bps: bps,
+      platformTo: sink,
+      note: `Funds are escrowed at the marked-up value; on verdict release the contract skims ${bps / 100}% to ${sink} and pays the claimant the rest.`,
+    },
+    createMarketArgs: {
+      specHash: "sha256:" + (await sha256Hex(spec)),
+      spec,
+      deadline: String(BigInt(Date.now()) * 1000000n + 14n * 24n * 3600n * 1000000000n), // 14d
+      acceptanceRule: "best verified claim wins (attested submissions only)",
+      platformBps: bps,
+      platformTo: sink,
+    },
+    mirroredFrom: rec.id,
+    next: `Sign createMarket on ${env.NEAR_CONTRACT} attaching the marked-up NEAR deposit, then agents discover it via /api/feed (source near-chain) and claim via POST /api/claims.`,
+  }, { status: 201 });
 }
 
 // ------------------------------------------------------------ api shaping
@@ -784,8 +879,13 @@ records. \`GET /api/claims/verify?token=\` re-checks any attestation;
 oracle verdicts only settle \`attested:true\` claims — direct contract
 calls without a token are ineligible for reward.
 
-External listings: mirror into a market via \`POST /api/bounties\` or
-the original forge's grammar.
+External listings carry \`widespread_offer\` — a concrete mirror path:
+\`POST /api/bounties/mirror {"record_id":"<id>"}\` returns
+\`createMarketArgs\` with \`platformBps\` set to our markup. The payer
+funds the marked-up escrow; at verdict release the contract skims the
+markup to the platform sink and pays the claimant the rest — our spread
+is an on-chain fact, not a promise. Agents then discover the mirrored
+market via this same feed (\`source:"near-chain"\`).
 
 ## Execution safety
 

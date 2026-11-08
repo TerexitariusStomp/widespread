@@ -26,7 +26,7 @@ import { nearView } from "./near";
 import { deleteBounty, listBounties, listRecords, putBounty } from "./store";
 import {
   feedDoc, queryFeed, feedRss, handleMcp, FEED_MD,
-  listRunners, registerRunner, refreshFeed,
+  listRunners, registerRunner, refreshFeed, handleMirrorQuote,
 } from "./feed";
 import { putFeedDoc } from "./feedstore";
 import { handleClaimPost, handleClaimVerify } from "./claims";
@@ -394,6 +394,13 @@ export default {
     if (pathname === "/api/locator" && req.method === "GET") {
       const u = url.searchParams.get("u") ?? "";
       return u ? json(resolveLocator(u)) : bad("need ?u=<locator>", 400);
+    }
+    // Mirror an external/third-party bounty into a marked-up Widespread
+    // market — returns createMarket args; platformBps skims our spread
+    // on-chain at release.
+    if (pathname === "/api/bounties/mirror" && req.method === "POST") {
+      const b = (await req.json().catch(() => ({}))) as { record_id?: string; spec?: string };
+      return handleMirrorQuote(env, ctx, b);
     }
     // Attested real-submission claims — validate forge artifact, return
     // shipClaim args + HMAC attestation token for on-chain broadcast.
