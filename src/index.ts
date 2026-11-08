@@ -13,6 +13,7 @@
 import { DASHBOARD_HTML } from "./dash";
 import { handlePremiumExport } from "./premium";
 import { reviewOutstanding, runReview } from "./review";
+import { handleBotVerdict, type BotVerdictBody } from "./botverdict";
 import { deleteBounty, listBounties, listRecords, putBounty } from "./store";
 import type { Bounty, Env } from "./types";
 
@@ -208,6 +209,20 @@ export default {
     }
     if (pathname === "/api/bounties" && req.method === "POST") {
       return handleBountyPost(req, env);
+    }
+    // PR-bot verdict oracle — widespread-bot posts a bot's public verdict on
+    // a wide:funded PR; we sign it as a wide-verdict and settle if bound.
+    if (pathname === "/api/bot-verdict" && req.method === "POST") {
+      return handleBotVerdict(env, (await req.json().catch(() => ({}))) as BotVerdictBody);
+    }
+    // Public audit feed of PR-bot oracle verdicts (who verified, what score,
+    // where the money went) — the "they're the verifier, we're the money" trail.
+    if (pathname === "/api/bot-verdicts" && req.method === "GET") {
+      const list = await env.CLAIMS.list({ prefix: "botverdict:" }).catch(() => null);
+      const records = await Promise.all(
+        (list?.keys ?? []).map((k) => env.CLAIMS.get(k.name, "json").catch(() => null))
+      );
+      return json({ verdicts: records.filter(Boolean), total: records.filter(Boolean).length });
     }
     const bountyDel = pathname.match(/^\/api\/bounties\/([a-z0-9-]+\/[a-z0-9-]+)$/i);
     if (bountyDel && req.method === "DELETE") {
