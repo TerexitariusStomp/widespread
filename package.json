@@ -1,0 +1,16 @@
+{
+  "name": "widespread-near",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Widespread on NEAR — permissionless verified-work market: payer locks FT escrow, attested verdict releases, contributor self-settles",
+  "scripts": {
+    "build": "esbuild src/contract.js --bundle --format=esm --target=es2022 --outfile=build/contract.js",
+    "deploy": "node src/deploy.js",
+    "demo": "node src/demo.js"
+  },
+  "dependencies": {
+    "near-sdk-js": "^2.0.0",
+    "esbuild": "^0.24.0"
+  }
+}
