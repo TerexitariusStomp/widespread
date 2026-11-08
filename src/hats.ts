@@ -61,7 +61,7 @@ export function stanceScore(
 }
 
 // Complexity estimate from spec signals — drives estCost in ranking.
-function estCost(spec: string): number {
+export function estCost(spec: string): number {
   let c = 1;
   if (/smart.?contract|consensus|crypt|mpc|tee|zero.?knowledge/i.test(spec)) c += 3;
   if (/audit|security|vuln/i.test(spec)) c += 2;
@@ -125,4 +125,232 @@ export async function hatsOpportunities(
     .filter((r) => r.score > 0)
     .sort((a, b) => b.score - a.score);
   return { hatId, wearer: hat.wearer, ranked, evaluated: markets.length };
+}
+
+// ---- earned stance: declared prefs adjusted by verified work history ----
+// verdicts: [{spec, outcome}] where outcome ∈ paid|refunded|derivative|rejected.
+// Each paid verdict in a domain nudges that domain's effective pref up;
+// refunds/rejections nudge down — personality is earned, not just declared.
+export function earnedStance(
+  hat: HatRecord,
+  verdicts: { spec?: string; outcome?: string }[]
+): { prefs: Record<string, number>; earned: Record<string, number>; verdictsUsed: number } {
+  const prefs = { ...hat.stance.prefs };
+  const earned: Record<string, number> = {};
+  let used = 0;
+  for (const v of verdicts ?? []) {
+    const outcome = (v.outcome ?? "").toLowerCase();
+    if (!["paid", "refunded", "derivative", "rejected"].includes(outcome)) continue;
+    used++;
+    const delta = outcome === "paid" ? 0.15 : outcome === "derivative" ? -0.1 : -0.2;
+    for (const d of specDomains(v.spec ?? "")) {
+      prefs[d] = (prefs[d] ?? 0) + delta;
+      earned[d] = (earned[d] ?? 0) + delta;
+    }
+  }
+  return { prefs, earned, verdictsUsed: used };
+}
+
+// ---- delegated deliberation: constitutionRef as a live endpoint ----
+// If the hat's constitutionRef is an http(s) URL (e.g. a Simocracy sim's
+// deliberation endpoint or an org.simocracy.mechanism service), the stance
+// check delegates to it and returns its reasoned verdict alongside ours.
+export async function delegatedStance(
+  hat: HatRecord, spec: string
+): Promise<{ delegated: boolean; endpoint?: string; verdict?: unknown; error?: string }> {
+  const ref = hat.constitutionRef ?? hat.stance?.constitutionRef ?? hat.identityRef;
+  if (!ref || !/^https?:\/\//.test(ref)) return { delegated: false };
+  try {
+    const res = await fetch(ref, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        type: "org.simocracy.decision.request",
+        proposal: { spec, hatId: hat.hatId, wearer: hat.wearer,
+          stance: hat.stance },
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return { delegated: true, endpoint: ref, error: `http ${res.status}` };
+    return { delegated: true, endpoint: ref, verdict: await res.json().catch(() => null) };
+  } catch (e) {
+    return { delegated: true, endpoint: ref, error: String(e) };
+  }
+}
+
+// ---- identity refs: ERC-8004 / ATProto / bare NEAR ----
+export type IdentityRef =
+  | { kind: "erc8004"; chainId: number; agentId: string }
+  | { kind: "atproto"; did: string; record?: string }
+  | { kind: "near"; account: string }
+  | { kind: "opaque"; raw: string };
+
+export function parseIdentityRef(ref: string | null | undefined): IdentityRef | null {
+  if (!ref) return null;
+  let m = ref.match(/^erc8004:(\d+):(\d+)$/i);
+  if (m) return { kind: "erc8004", chainId: parseInt(m[1], 10), agentId: m[2] };
+  m = ref.match(/^at:\/\/([^/]+)(\/(\S+))?$/);
+  if (m) return { kind: "atproto", did: m[1], record: m[3] };
+  if (/^[a-z0-9\-]+\.(near|testnet)$/.test(ref)) return { kind: "near", account: ref };
+  return { kind: "opaque", raw: ref };
+}
+
+// ERC-8004 registries are CREATE2-deterministic — same addresses on every
+// EVM mainnet (erc-8004/erc-8004-contracts, config/chains.yml).
+export const ERC8004_REGISTRIES: Record<number, { identity: string; reputation: string }> = {
+  1:    { identity: "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432",
+         reputation: "0x8004BAa17C55a88189AE136b182e5fdA19dE9b63" },
+  8453: { identity: "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432",
+         reputation: "0x8004BAa17C55a88189AE136b182e5fdA19dE9b63" }, // Base
+};
+
+// ---- foreign-chain identity: derivation params for v1.signer MPC ----
+// The bridge can't derive the foreign address itself (chainsig.js needs
+// Node crypto; Workers can't bundle it) — agents/tooling derive client-side
+// via chainsig.js deriveAddressAndPublicKey(predecessor, path). We expose
+// the signer root key + full params so any client can verify/derive.
+export async function hatsForeign(
+  env: { HATS_CONTRACT?: string; NEAR_RPC_URL?: string }, hatId: string
+) {
+  const hat = await hatsHat(env, hatId);
+  if (!hat || "error" in hat || !hat) return { error: "hat not found" };
+  if (!hat.foreign) return { hatId, foreign: null };
+  const isTestnet = (env.NEAR_RPC_URL ?? "").includes("testnet")
+    || (env.HATS_CONTRACT ?? "").endsWith(".testnet");
+  const signer = isTestnet ? "v1.signer-prod.testnet" : "v1.signer";
+  // derived_public_key is a real view on the MPC contract (snake_case —
+  // the camelCase derivedPublicKey does NOT exist).
+  const domainId = hat.foreign.keyType === "secp256k1" ? 0 : 1;
+  const derived = await nearView(env, signer, "derived_public_key", {
+    path: hat.foreign.path,
+    predecessor: env.HATS_CONTRACT,
+    domain_id: domainId,
+  }).catch(() => null) as string | null;
+  // Solana addresses are base58(ed25519 pubkey) — the derived key IS the
+  // foreign address for ed25519 chains. EVM needs keccak(uncompressed
+  // secp256k1 pubkey) — returned raw for client-side derivation.
+  const address = derived?.startsWith("ed25519:")
+    ? derived.slice(8)
+    : derived ?? null;
+  return {
+    hatId, hatName: hat.name, wearer: hat.wearer,
+    foreign: {
+      ...hat.foreign,
+      predecessor: env.HATS_CONTRACT,
+      signerContract: signer,
+      derivedPublicKey: derived,
+      address,
+      addressNote: hat.foreign.keyType === "secp256k1"
+        ? "EVM address = keccak(uncompressed secp256k1 pubkey)[12:] — derive client-side"
+        : "ed25519 derived key is the foreign address (Solana-style base58)",
+    },
+  };
+}
+
+// ---- Simocracy-compatible mechanism service (org.simocracy.mechanism) ----
+// GET /mechanisms advertises our governance primitives; POST
+// /workflows/<id> executes them. Other sims/services can call these.
+export function mechanismList() {
+  return {
+    mechanisms: [
+      {
+        id: "widespread.stake-check",
+        title: "Hat stance check — would this identity support this spec?",
+        endpoint: "/api/workflows/widespread.stake-check",
+        input: { hatId: "string", spec: "string" },
+        output: { support: "boolean", score: "number", reasons: "string[]" },
+      },
+      {
+        id: "widespread.opportunity-ranking",
+        title: "Rank funded work by alignment × reward / estCost",
+        endpoint: "/api/workflows/widespread.opportunity-ranking",
+        input: { hatId: "string", markets: "MarketLike[]" },
+        output: { ranked: "scored markets, best first" },
+      },
+      {
+        id: "widespread.futarchy-proposals",
+        title: "Live futarchy governance proposals",
+        endpoint: "/api/workflows/widespread.futarchy-proposals",
+        input: {},
+        output: { proposals: "proposal records" },
+      },
+    ],
+  };
+}
+
+export async function mechanismRun(
+  env: { HATS_CONTRACT?: string; FUTARCHY_CONTRACT?: string; NEAR_CONTRACT?: string; NEAR_RPC_URL?: string },
+  id: string, input: Record<string, unknown>
+) {
+  switch (id) {
+    case "widespread.stake-check": {
+      const r = await hatsStanceCheck(env,
+        String(input.hatId ?? ""), String(input.spec ?? ""));
+      return { workflow: id, result: r };
+    }
+    case "widespread.opportunity-ranking": {
+      const r = await hatsOpportunities(env,
+        String(input.hatId ?? ""),
+        (input.markets as MarketLike[]) ?? []);
+      return { workflow: id, result: r };
+    }
+    case "widespread.futarchy-proposals": {
+      const acct = env.FUTARCHY_CONTRACT;
+      if (!acct) return { workflow: id, error: "no FUTARCHY_CONTRACT" };
+      const proposals = await nearView(env, acct, "listProposals", {})
+        .catch(() => null);
+      return { workflow: id, result: { proposals: proposals ?? [] } };
+    }
+    default:
+      return { workflow: id, error: "unknown mechanism", known: mechanismList().mechanisms.map(m => m.id) };
+  }
+}
+
+// ---- intents payout quote (dry — never credits on a quote alone) ----
+// Same discipline as widespread-solana/src/intents.js: a quote is a
+// preview; settlement only counts after solver-confirmed status.
+const INTENTS_API = "https://intents-api.aurora.dev/api";
+
+export async function hatsPayoutQuote(
+  env: { AURORA_APP_KEY?: string },
+  args: {
+    hatId?: string; assetIn?: string; assetOut?: string;
+    amount?: string; recipient?: string; destChain?: string;
+  }
+) {
+  const appKey = env.AURORA_APP_KEY ?? "";
+  if (!appKey) return { error: "no AURORA_APP_KEY configured — dry-run unavailable" };
+  if (!args.amount || !args.recipient) {
+    return { error: "need {amount, recipient} — assetIn/assetOut/destChain optional" };
+  }
+  // Defaults mirror the proven intents.js leg: NEAR USDC in → SPL USDC out.
+  const body = {
+    dry: true,
+    swapType: "EXACT_OUTPUT",
+    depositType: "ORIGIN_CHAIN",
+    originAsset: args.assetIn ?? "nep141:nep141.omft.near",
+    destinationAsset: args.assetOut ?? "nep141:sol-5ce3bf3a31af18be40ba30f721101b4341690186.omft.near",
+    amount: String(args.amount),
+    slippageTolerance: 100,
+    refundTo: "widespread.near",
+    refundType: "ORIGIN_CHAIN",
+    recipient: args.recipient,
+    recipientType: "DESTINATION_CHAIN",
+    deadline: new Date(Date.now() + 3600e3).toISOString(),
+    ...(args.destChain ? { destinationChain: args.destChain } : {}),
+  };
+  const res = await fetch(`${INTENTS_API}/quote/${appKey}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15000),
+  });
+  const data = await res.json().catch(() => null) as Record<string, unknown> | null;
+  return {
+    hatId: args.hatId ?? null,
+    dry: true,
+    status: res.ok ? "quoted" : `http ${res.status}`,
+    quote: data,
+    note: "dry quote only — settlement requires solver-confirmed status; see intents.js waitSettled discipline",
+  };
 }

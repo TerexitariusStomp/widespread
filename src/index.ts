@@ -18,7 +18,10 @@ import { attestClaim, ecosystem, openDispute } from "./ecosystem";
 import { resolveLocator } from "./locator";
 import { sponsorPage } from "./sponsor";
 import { poidhInfo } from "./poidh";
-import { hatsOrg, hatsHat, hatsStanceCheck, hatsOpportunities } from "./hats";
+import { hatsOrg, hatsHat, hatsStanceCheck, hatsOpportunities,
+         hatsForeign, hatsPayoutQuote, mechanismList, mechanismRun,
+         earnedStance, delegatedStance, parseIdentityRef, stanceScore,
+         ERC8004_REGISTRIES } from "./hats";
 import { nearView } from "./near";
 import { deleteBounty, listBounties, listRecords, putBounty } from "./store";
 import type { Bounty, Env } from "./types";
@@ -236,9 +239,48 @@ export default {
     }
     if (pathname.startsWith("/api/hats/") && pathname.endsWith("/stance-check") && req.method === "POST") {
       const hatId = pathname.split("/")[3];
-      const d = (await req.json().catch(() => ({}))) as { spec?: string };
+      const d = (await req.json().catch(() => ({}))) as
+        { spec?: string; verdicts?: { spec?: string; outcome?: string }[]; delegate?: boolean };
       if (!d.spec) return bad("need {spec}", 400);
-      return json(await hatsStanceCheck(env, hatId, d.spec));
+      const base = await hatsStanceCheck(env, hatId, d.spec) as Record<string, unknown>;
+      if ("error" in base) return json(base);
+      const hat = await hatsHat(env, hatId);
+      const hatOk = hat && !("error" in hat) && hat ? hat : null;
+      // earned stance: fold verified verdict history into effective prefs
+      if (d.verdicts?.length && hatOk) {
+        const es = earnedStance(hatOk, d.verdicts);
+        const adj = { ...hatOk, stance: { ...hatOk.stance, prefs: es.prefs } };
+        const rescored = stanceScore(adj, d.spec);
+        base.earned = { ...es, rescored };
+      }
+      // delegated deliberation: constitutionRef as live endpoint (Simocracy)
+      if (d.delegate !== false && hatOk)
+        base.delegated = await delegatedStance(hatOk, d.spec);
+      // identity ref parsing (ERC-8004 / ATProto / NEAR)
+      if (hatOk) {
+        const ref = parseIdentityRef(hatOk.identityRef ?? hatOk.constitutionRef);
+        base.identity = ref?.kind === "erc8004"
+          ? { ...ref, registries: ERC8004_REGISTRIES[ref.chainId] ?? null }
+          : ref;
+      }
+      return json(base);
+    }
+    if (pathname.startsWith("/api/hats/") && pathname.endsWith("/foreign") && req.method === "GET") {
+      const hatId = pathname.split("/")[3];
+      return json(await hatsForeign(env, hatId));
+    }
+    if (pathname === "/api/hats/payout-quote" && req.method === "POST") {
+      const d = (await req.json().catch(() => ({}))) as Record<string, string>;
+      return json(await hatsPayoutQuote(env as never, d));
+    }
+    // Simocracy-compatible mechanism service (org.simocracy.mechanism).
+    if (pathname === "/api/mechanisms" && req.method === "GET") {
+      return json(mechanismList());
+    }
+    if (pathname.startsWith("/api/workflows/") && req.method === "POST") {
+      const id = pathname.split("/")[3];
+      const d = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+      return json(await mechanismRun(env, id, d));
     }
     if (pathname.startsWith("/api/hats/") && pathname.endsWith("/opportunities") && req.method === "GET") {
       const hatId = pathname.split("/")[3];
@@ -258,8 +300,7 @@ export default {
       return json({
         ...hat, contract: acct,
         foreign: hat.foreign
-          ? { ...hat.foreign, address: null,
-              note: "foreign address derives via v1.signer MPC from the stored path — query the signer contract or /api/hats/:id/foreign-address once wired" }
+          ? { ...hat.foreign, address: "see /api/hats/:id/foreign (derived_public_key view)" }
           : null,
         scopeCheck: scope ? { scope, granted: has } : undefined,
       });

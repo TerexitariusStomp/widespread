@@ -95,3 +95,33 @@ export function encodeCreateSoloBounty(name: string, description: string, amount
   });
   return { to: POIDH_CHAINS.base, data, value: amountWei.toString() };
 }
+
+/** payToHat mirror — bind a Widespread market's payout to an Intentional
+ *  Hats hat. The Poidh bounty description carries the linkage so the claim
+ *  NFT + issuer approval resolve back to {marketId, hatId} in payout_trace.
+ *  Poidh pays issuer-approved claims (no trustless verification) — Widespread
+ *  remains the evidence/verification layer; this is the ETH collection rail. */
+export function payToHatMirror(args: {
+  marketId: string; hatId: string; spec: string;
+  amountWei: bigint; wearer?: string;
+}) {
+  const link = JSON.stringify({
+    protocol: "widespread", marketId: args.marketId,
+    hatId: args.hatId, wearer: args.wearer ?? null,
+    verification: "widespread bridge verdict + dg-ship-1 evidence",
+  });
+  const description =
+    `[widespread:market=${args.marketId}:hat=${args.hatId}] ${args.spec}\n\n` +
+    `Settlement link (for payout_trace): ${link}`;
+  const tx = encodeCreateSoloBounty(
+    `widespread m${args.marketId} → hat ${args.hatId}`, description, args.amountWei);
+  return {
+    ...tx,
+    meta: {
+      marketId: args.marketId, hatId: args.hatId,
+      claimNft: POIDH_NFT.base,
+      trace: "hatId → poidh bountyId → claim NFT id → widespread market verdict",
+      honestNote: "Poidh issuer approval ≠ verification — require the Widespread verdict before approving",
+    },
+  };
+}
