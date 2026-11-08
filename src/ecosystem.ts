@@ -165,7 +165,7 @@ export function rails(env: Env): Record<string, unknown>[] {
     { id: "paypal", status: e.PAYPAL_CLIENT_ID ? "live" : "off", note: "Payouts batches" },
     { id: "pyusd-solana", status: "live", note: "widespread-solana rail" },
     { id: "usdc", status: "live", note: "SPL token payouts" },
-    { id: "aurora-intents", status: "live", note: "cross-chain intents (dry-run quotes)" },
+    { id: "near-intents-1click", status: "live", note: "cross-chain intents settlement (dry-run quotes)" },
     { id: "x402", status: e.X402_FACILITATOR ? "live" : "ready", note: "@fastnear/x402 + @x402/near deps" },
     { id: "tempo", status: e.TEMPO_API ? "live" : "ready", note: "Stripe Tempo stablecoin rail" },
     { id: "privy", status: e.PRIVY_APP_ID ? "live" : "ready", note: "agent identity/wallets" },
