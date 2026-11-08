@@ -94,7 +94,7 @@ console.log(`   market.payToHat=${after.payToHat} status=${after.status} locked=
 
 // 7. Payout quote leg (dry — NEAR Intents 1Click, no key needed)
 const quote = await post(`/api/hats/payout-quote`,
-  { hatId: HAT_ID, amount: "100000", recipient: foreign.foreign.address });
+  { hatId: HAT_ID, amount: "1000000", recipient: foreign.foreign.address });
 console.log(`\n7. PAYOUT QUOTE (intents, dry): ${quote.error ?? quote.status}`);
 
 console.log("\n═══ story: agent wears hat → stance-checks work → claims inside scope →");
