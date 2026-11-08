@@ -19,9 +19,10 @@ import { NearBindgen, near, call, view, assert } from "near-sdk-js";
 
 const ACTIVE = "active";
 const REVOKED = "revoked";
-const SIGNER = "v1.signer.testnet"; // chain-signatures MPC contract
-const SIGN_GAS = 30_000_000_000_000n; // 30 Tgas
-const PAY_GAS = 10_000_000_000_000n;
+const SIGNER = "v1.signer-prod.testnet"; // chain-signatures MPC (testnet)
+const SIGN_GAS = 200_000_000_000_000n; // 200 Tgas — MPC yield flow needs headroom
+const PAY_GAS = 30_000_000_000_000n;   // 30 Tgas — callback deserializes MPC result
+const SIGN_DEPOSIT = 300_000_000_000_000n; // 0.0003 NEAR — MPC request fee
 
 const evt = (type, data) =>
   near.log(JSON.stringify({ event: type, ...data }));
@@ -149,14 +150,21 @@ export class IntentionalHats {
       status: "requested", createdAt: near.blockTimestamp().toString(),
     };
     evt("hat.sig.requested", { sigId, hatId, chain });
+    // v1.signer `sign` wire format (verified against chainsig.js + near/mpc):
+    // {request:{payload_v2:{Eddsa|Ecdsa:<hex>}, path, domain_id}} + 0.0003N fee.
+    const isEddsa = /ed25519|eddsa/i.test(this.sigs[sigId].keyType);
+    const hex = Array.from(this.sigs[sigId].payload)
+      .map((b) => b.toString(16).padStart(2, "0")).join("");
     const args = JSON.stringify({
-      payload: this.sigs[sigId].payload,
-      path: this.sigs[sigId].path,
-      keyType: this.sigs[sigId].keyType,
+      request: {
+        payload_v2: { [isEddsa ? "Eddsa" : "Ecdsa"]: hex },
+        path: this.sigs[sigId].path,
+        domain_id: isEddsa ? 1 : 0,
+      },
     });
     const idx = near.promiseBatchCreate(SIGNER);
     near.promiseBatchActionFunctionCall(
-      idx, "sign", args, 0n, SIGN_GAS
+      idx, "sign", args, SIGN_DEPOSIT, SIGN_GAS
     );
     near.promiseThen(
       idx, near.currentAccountId(), "sigCallback",
@@ -166,11 +174,17 @@ export class IntentionalHats {
   }
 
   @call({})
-  sigCallback({ sigId, result, isFailure }) {
+  sigCallback({ sigId }) {
     const sig = this.sigs[sigId];
     assert(sig, "unknown sig request");
-    sig.status = isFailure ? "failed" : "signed";
-    if (!isFailure) sig.result = result;
+    // The MPC result arrives via promiseResult — not as callback args.
+    try {
+      sig.status = "signed";
+      sig.result = near.promiseResult(0);
+    } catch (e) {
+      sig.status = "failed";
+      sig.error = String(e);
+    }
     evt("hat.sig.completed", { sigId, hatId: sig.hatId, status: sig.status });
   }
 

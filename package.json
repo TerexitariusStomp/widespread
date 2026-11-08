@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@seer-pm/sdk": "^0.0.20",
+    "chainsig.js": "^1.1.16",
     "esbuild": "^0.24.0",
     "near-api-js": "^7.4.0",
     "near-sdk-js": "^2.0.0",
