@@ -20,8 +20,10 @@ import { NearBindgen, near, call, view, assert } from "near-sdk-js";
 const ACTIVE = "active";
 const REVOKED = "revoked";
 const SIGNER = "v1.signer-prod.testnet"; // chain-signatures MPC (testnet)
-const SIGN_GAS = 200_000_000_000_000n; // 200 Tgas — MPC yield flow needs headroom
-const PAY_GAS = 30_000_000_000_000n;   // 30 Tgas — callback deserializes MPC result
+// NEAR bounds sum of child-call gas by the parent receipt's gas_limit (≤300 Tgas),
+// so SIGN+PAY must fit in one tx. 200 Tgas proved sufficient for `sign` on testnet.
+const SIGN_GAS = 200_000_000_000_000n; // 200 Tgas
+const PAY_GAS = 80_000_000_000_000n;  // 80 Tgas — callback reads promiseResult + writes state
 const SIGN_DEPOSIT = 300_000_000_000_000n; // 0.0003 NEAR — MPC request fee
 
 const evt = (type, data) =>
