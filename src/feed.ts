@@ -21,23 +21,23 @@ import type { Env, FeedDoc, FeedRecord, MirrorListing, MirrorOffer } from "./typ
 const UA = { "user-agent": "widespread-feed/1.0", accept: "application/json" };
 const FETCH_TIMEOUT_MS = 8000;
 const MAX_RECORDS = 500;
-const DEFAULT_MARKUP_BPS = 1000; // 10% — third-party mirror spread
+const DEFAULT_CUT_BPS = 1000; // 10% — platform cut of the bounty at release
 
-/** Mirror markup for externally-funded bounties routed through our
- * markets. Proportional (bps of escrow) so no FX oracle is needed — the
- * payer funds the marked-up NEAR amount and the contract skims the cut
- * to MARKUP_SINK at release. */
-export function markupBps(env: Env): number {
-  const n = parseInt(env.MARKUP_BPS ?? "", 10);
-  return Number.isFinite(n) && n >= 0 && n <= 5000 ? n : DEFAULT_MARKUP_BPS;
+/** Platform cut for mirrored third-party bounties. The bounty stays at
+ * face value — the payer escrows the ORIGINAL amount and the contract
+ * skims cut_bps of `locked` to CUT_SINK at release (on top of the 2% DAO
+ * fee). Proportional, so no FX oracle is needed. */
+export function cutBps(env: Env): number {
+  const n = parseInt(env.CUT_BPS ?? "", 10);
+  return Number.isFinite(n) && n >= 0 && n <= 5000 ? n : DEFAULT_CUT_BPS;
 }
 
 export function mirrorOffer(env: Env, amount?: string, currency?: string): MirrorOffer {
   return {
     action: "mirror", endpoint: "createMarket", contract: env.NEAR_CONTRACT,
-    markup_bps: markupBps(env),
+    cut_bps: cutBps(env),
     ...(amount || currency ? { original: { ...(amount ? { amount } : {}), ...(currency ? { currency } : {}) } } : {}),
-    note: `Auto-listed mirror at +${markupBps(env) / 100}% — see GET /api/mirrors; fund via createMarket(platformBps=${markupBps(env)}) and the listing flips to funded automatically.`,
+    note: `Auto-listed mirror — bounty at face value, platform takes ${cutBps(env) / 100}% cut at release. See GET /api/mirrors; fund via createMarket(platformBps=${cutBps(env)}) and the listing flips to funded automatically.`,
   };
 }
 
@@ -251,7 +251,7 @@ function ghIssueToRecord(env: Env, issue: GhIssue, repo: string, opts: {
       // Mirror-only policy: external bounties are surfaced exclusively as
       // marked-up Widespread markets — the feed never hands out the
       // source platform's direct-claim path to API consumers.
-      ? { how: `marked-up mirror only (+${markupBps(env) / 100}%) — fund via GET /api/mirrors → createMarket(platformBps); claims via POST /api/claims`,
+      ? { how: `mirror only — bounty at face value, platform takes ${cutBps(env) / 100}% cut. Fund via GET /api/mirrors → createMarket(platformBps); claims via POST /api/claims`,
           grammar: "@widespread <amount> <spec>" }
       : {
           how: "PR with 'closes #N' + @widespread grammar",
@@ -368,7 +368,7 @@ async function pollTangled(env: Env): Promise<FeedRecord[]> {
         title,
         escrow: { state: "external" },
         url: String(it.url ?? it.uri ?? `https://tangled.org/${repo}`),
-        claim: { how: `marked-up mirror only (+${markupBps(env) / 100}%) — fund via GET /api/mirrors → createMarket(platformBps); claims via POST /api/claims`,
+        claim: { how: `mirror only — bounty at face value, platform takes ${cutBps(env) / 100}% cut. Fund via GET /api/mirrors → createMarket(platformBps); claims via POST /api/claims`,
                  grammar: "@widespread <amount> <spec>" },
         execution: EXEC_BROWSER,
         widespread_offer: mirrorOffer(env),
@@ -610,8 +610,8 @@ function isMirrorable(rec: FeedRecord): boolean {
 }
 
 function mirrorArgs(env: Env, rec: FeedRecord, spec: string, specHash: string): Record<string, unknown> {
-  const bps = markupBps(env);
-  const sink = env.MARKUP_SINK ?? "widespread-dao.near";
+  const bps = cutBps(env);
+  const sink = env.CUT_SINK ?? "widespread-dao.near";
   return {
     specHash, spec,
     deadline: String(BigInt(Date.now()) * 1000000n + 14n * 24n * 3600n * 1000000000n),
@@ -620,10 +620,12 @@ function mirrorArgs(env: Env, rec: FeedRecord, spec: string, specHash: string): 
   };
 }
 
-function markedUp(rec: FeedRecord, bps: number): MirrorListing["marked_up"] {
+function claimantShare(rec: FeedRecord, bps: number): MirrorListing["claimant_share"] {
   const n = parseFloat(rec.amount ?? "");
   if (!Number.isFinite(n) || !rec.currency) return undefined;
-  const amt = (n * (10000 + bps) / 10000).toFixed(2).replace(/\.?0+$/, "");
+  // what the winning claimant nets after the platform cut (before the
+  // 2% DAO fee, which is protocol-wide)
+  const amt = (n * (10000 - bps) / 10000).toFixed(2).replace(/\.?0+$/, "");
   const usd = estUsd(amt, rec.currency);
   return { amount: amt, currency: rec.currency, ...(usd ? { est_usd: usd } : {}) };
 }
@@ -632,7 +634,7 @@ function markedUp(rec: FeedRecord, bps: number): MirrorListing["marked_up"] {
  * ready createMarketArgs. Status flips to "funded" when an on-chain
  * market commits the same specHash — detection is automatic each refresh. */
 async function buildMirrors(env: Env, records: FeedRecord[], prior: MirrorListing[] | undefined): Promise<MirrorListing[]> {
-  const bps = markupBps(env);
+  const bps = cutBps(env);
   const priorById = new Map((prior ?? []).map((m) => [m.record_id, m]));
   // specHash → near-chain market, for funded detection
   const fundedBySpec = new Map<string, string>();
@@ -657,8 +659,8 @@ async function buildMirrors(env: Env, records: FeedRecord[], prior: MirrorListin
       ...(rec.amount || rec.currency || rec.est_usd
         ? { original: { ...(rec.amount ? { amount: rec.amount } : {}), ...(rec.currency ? { currency: rec.currency } : {}), ...(rec.est_usd ? { est_usd: rec.est_usd } : {}) } }
         : {}),
-      markup_bps: bps,
-      ...(() => { const mu = markedUp(rec, bps); return mu ? { marked_up: mu } : {}; })(),
+      cut_bps: bps,
+      ...(() => { const mu = claimantShare(rec, bps); return mu ? { claimant_share: mu } : {}; })(),
       spec, spec_hash: specHash,
       createMarketArgs: mirrorArgs(env, rec, spec, specHash),
       status: fundedMid ? "funded" : "seeking-funder",
@@ -672,9 +674,9 @@ async function buildMirrors(env: Env, records: FeedRecord[], prior: MirrorListin
 }
 
 /** POST /api/bounties/mirror {record_id} — turn an external/third-party feed
- * record into a concrete marked-up Widespread market quote. Stateless: the
- * payer signs createMarket themselves (bridge holds no NEAR key); platformBps
- * makes our spread an on-chain fact skimmed to MARKUP_SINK at release. */
+ * record into a concrete Widespread market quote at FACE VALUE. Stateless:
+ * the payer signs createMarket themselves (bridge holds no NEAR key);
+ * platformBps is our percent cut skimmed from the escrow at release. */
 export async function handleMirrorQuote(env: Env, ctx: ExecutionContext | undefined, body: { record_id?: string; spec?: string }): Promise<Response> {
   if (!body.record_id) return Response.json({ ok: false, error: "record_id required" }, { status: 400 });
   const doc = await feedDoc(env, ctx);
@@ -685,8 +687,8 @@ export async function handleMirrorQuote(env: Env, ctx: ExecutionContext | undefi
   }
   const spec = mirrorSpec(rec, body.spec);
   const specHash = "sha256:" + await sha256Hex(spec);
-  const bps = markupBps(env);
-  const sink = env.MARKUP_SINK ?? "widespread-dao.near";
+  const bps = cutBps(env);
+  const sink = env.CUT_SINK ?? "widespread-dao.near";
   const auto = doc.mirrors?.find((m) => m.record_id === rec.id);
   return Response.json({
     ok: true,
@@ -694,14 +696,14 @@ export async function handleMirrorQuote(env: Env, ctx: ExecutionContext | undefi
     ...(auto?.status === "funded" ? { already_funded: { market_id: auto.funded_market_id } } : {}),
     record: { id: rec.id, title: rec.title, url: rec.url, amount: rec.amount, currency: rec.currency, est_usd: rec.est_usd },
     mirror: {
-      markup_bps: bps,
+      cut_bps: bps,
       platformTo: sink,
       status: auto?.status ?? "seeking-funder",
-      note: `Funds are escrowed at the marked-up value; on verdict release the contract skims ${bps / 100}% to ${sink} and pays the claimant the rest.`,
+      note: `Bounty escrowed at face value; on verdict release the contract skims ${bps / 100}% to ${sink} (plus the 2% protocol fee) and pays the claimant the rest.`,
     },
     createMarketArgs: mirrorArgs(env, rec, spec, specHash),
     mirroredFrom: rec.id,
-    next: `Sign createMarket on ${env.NEAR_CONTRACT} attaching the marked-up NEAR deposit — the mirror flips to "funded" automatically on the next feed refresh. Agents then claim via POST /api/claims.`,
+    next: `Sign createMarket on ${env.NEAR_CONTRACT} attaching the face-value NEAR deposit — the mirror flips to "funded" automatically on the next feed refresh. Agents then claim via POST /api/claims.`,
   }, { status: 201 });
 }
 
@@ -963,14 +965,24 @@ oracle verdicts only settle \`attested:true\` claims — direct contract
 calls without a token are ineligible for reward.
 
 External listings are **auto-mirrored**: every detected third-party
-bounty gets a \`MirrorListing\` on \`GET /api/mirrors\` at a marked-up
-price (\`MARKUP_BPS\`, default 10%). Each listing carries ready
-\`createMarketArgs\` — a payer funds the marked-up escrow, the contract
-skims \`platformBps\` to the platform sink at release, and the listing
-flips \`seeking-funder → funded\` automatically when the specHash lands
-on-chain. \`POST /api/bounties/mirror {record_id}\` returns the same
-args for a specific record. Agents then discover the market via this
-feed (\`source:"near-chain"\`) and claim via \`POST /api/claims\`.
+bounty gets a \`MirrorListing\` on \`GET /api/mirrors\` at **face value** —
+the bounty price is never marked up. Instead the platform takes a
+percent cut (\`CUT_BPS\`, default 10%) skimmed from the escrow at
+release. Each listing carries ready \`createMarketArgs\`; a payer funds
+the face-value escrow, the contract pays the claimant minus our cut,
+and the listing flips \`seeking-funder → funded\` automatically when
+the specHash lands on-chain. \`POST /api/bounties/mirror {record_id}\`
+returns the same args for a specific record. Agents then discover the
+market via this feed (\`source:"near-chain"\`) and claim via
+\`POST /api/claims\`.
+
+**Fiat pay-in:** mirrors with a USD price accept card/PayPal payment at
+the face-value amount — \`POST /api/mirrors/fund {mirror_id}\` creates
+a PayPal order and returns an \`approve_url\`; after the payer approves,
+\`POST /api/mirrors/capture {mirror_id, order_id}\` captures it and the
+mirror flips to \`fiat-funded\`. Ops then fronts NEAR escrow at face
+value (\`platformBps\` = the same cut) or settles the winner via PayPal
+Payouts at the post-cut amount.
 
 ## Execution safety
 

@@ -30,6 +30,7 @@ import {
 } from "./feed";
 import { putFeedDoc } from "./feedstore";
 import { handleClaimPost, handleClaimVerify } from "./claims";
+import { createFiatOrder, captureFiatOrder } from "./fiat";
 import type { FeedRecord, Bounty, Env } from "./types";
 
 const json = (body: unknown, status = 200) =>
@@ -401,12 +402,48 @@ export default {
       const doc = await feedDoc(env, ctx);
       const status = url.searchParams.get("status");
       let mirrors = doc.mirrors ?? [];
+      // Overlay fiat pay-in state — funding records live in KV, mirrors
+      // are rebuilt each refresh so state can't live on the listing.
+      const fiatKeys = await env.CLAIMS.list({ prefix: "fiatfund:", limit: 100 }).catch(() => null);
+      const fiatByMirror = new Map<string, { status: string; amount: string; payer_email?: string }>();
+      for (const k of fiatKeys?.keys ?? []) {
+        const f = await env.CLAIMS.get<{ mirror_id: string; status: string; amount: string; payer_email?: string }>(k.name, "json").catch(() => null);
+        if (f?.status === "captured") fiatByMirror.set(f.mirror_id, f);
+      }
+      mirrors = mirrors.map((m) => {
+        const f = fiatByMirror.get(m.id);
+        if (f && m.status === "seeking-funder") {
+          return { ...m, status: "fiat-funded" as const, fiat: { amount: f.amount, currency: "USD", payer_email: f.payer_email } };
+        }
+        return m;
+      });
       if (status) mirrors = mirrors.filter((m) => m.status === status);
       return json({ total: mirrors.length, mirrors });
     }
-    // Mirror an external/third-party bounty into a marked-up Widespread
-    // market — returns createMarket args; platformBps skims our spread
-    // on-chain at release.
+    // Fiat pay-in for a mirror: PayPal order → approve link → capture.
+    // Body-param routes — mirror ids contain '/', '#', ':' which don't
+    // survive path encoding cleanly.
+    if ((pathname === "/api/mirrors/fund" || pathname === "/api/mirrors/capture") && req.method === "POST") {
+      const b = (await req.json().catch(() => ({}))) as Record<string, string>;
+      const mirrorId = b.mirror_id ?? "";
+      const doc = await feedDoc(env, ctx);
+      const mirror = (doc.mirrors ?? []).find((m) => m.id === mirrorId);
+      if (!mirror) return bad("mirror not found", 404);
+      if (pathname.endsWith("/fund")) {
+        // Payer pays the bounty at FACE VALUE — our cut comes out of the
+        // escrow at release, never added to the price.
+        const usd = mirror.original?.est_usd;
+        if (!usd) return bad("mirror has no USD price — fiat funding needs a priced bounty", 422);
+        const base = env.PUBLIC_BASE ?? url.origin;
+        return createFiatOrder(env, mirrorId,
+          usd.toFixed(2), `Widespread mirror: ${mirror.title.slice(0, 80)}`,
+          `${base}/api/mirrors`, `${base}/api/mirrors`);
+      }
+      if (!b.order_id) return bad("order_id required", 400);
+      return captureFiatOrder(env, mirrorId, b.order_id);
+    }
+    // Mirror an external/third-party bounty into a Widespread market at
+    // face value — platformBps is our percent cut at release.
     if (pathname === "/api/bounties/mirror" && req.method === "POST") {
       const b = (await req.json().catch(() => ({}))) as { record_id?: string; spec?: string };
       return handleMirrorQuote(env, ctx, b);

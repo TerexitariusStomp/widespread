@@ -41,9 +41,9 @@ export interface Env {
   ATTEST_SECRET?: string;
   /** Markup (bps) applied when mirroring third-party bounties into our
    * markets — our spread, skimmed on-chain to platformTo at release. */
-  MARKUP_BPS?: string;
-  /** NEAR account that receives mirror-market markup (default: DAO sink). */
-  MARKUP_SINK?: string;
+  CUT_BPS?: string;
+  /** NEAR account that receives the platform cut (default: DAO sink). */
+  CUT_SINK?: string;
 }
 
 /** Normalized discovery record — one funded work item from any source.
@@ -75,7 +75,7 @@ export interface FeedRecord {
   trust?: { repo_claims?: number; repo_paid?: number; repo_pass_rate?: number };
   competition?: { pending_claims?: number; unique_claimants?: number; first_claim_age_h?: number };
   /** Monetization path for non-Widespread funding — never implies our escrow.
-   * String for simple hints; MirrorOffer when a concrete marked-up mirror
+   * String for simple hints; MirrorOffer when a concrete mirror
    * into a Widespread market is available. */
   widespread_offer?: string | MirrorOffer;
   created_at?: number;
@@ -83,19 +83,19 @@ export interface FeedRecord {
 }
 
 /** Concrete mirror offer: route an external bounty through a Widespread
- * market at a marked-up price. platformBps is skimmed on-chain at release
- * to MARKUP_SINK — proportional markup needs no FX oracle. */
+ * market at face value. platformBps is our percent cut skimmed on-chain
+ * at release to CUT_SINK — proportional, no FX oracle needed. */
 export interface MirrorOffer {
   action: "mirror";
   endpoint: "createMarket";
   contract?: string;
-  markup_bps: number;
+  cut_bps: number;
   original?: { amount?: string; currency?: string };
   note: string;
 }
 
 /** Auto-generated mirror listing: an external bounty packaged as a
- * marked-up Widespread market opportunity. Created for EVERY detected
+ * Widespread market opportunity at face value. Created for EVERY detected
  * third-party record each refresh — status flips to "funded" when a
  * market with the matching specHash appears on-chain. */
 export interface MirrorListing {
@@ -105,13 +105,15 @@ export interface MirrorListing {
   url: string;
   repo?: string;
   original?: { amount?: string; currency?: string; est_usd?: number };
-  markup_bps: number;
-  marked_up?: { amount?: string; currency?: string; est_usd?: number };
+  cut_bps: number;
+  claimant_share?: { amount?: string; currency?: string; est_usd?: number };
   spec: string;
   spec_hash: string;
   createMarketArgs: Record<string, unknown>;
-  status: "seeking-funder" | "funded";
+  status: "seeking-funder" | "fiat-funded" | "funded";
   funded_market_id?: string;
+  /** Present when a fiat pay-in was captured (PayPal order). */
+  fiat?: { amount: string; currency: string; payer_email?: string };
   created_at: number;
   updated_at: number;
 }
