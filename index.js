@@ -92,23 +92,53 @@ module.exports = (app) => {
     }
   });
 
-  // ---- @widespread $N for <spec> on issues/comments → seed a market ----
-  app.on(["issue_comment.created"], async (ctx) => {
-    const body = ctx.payload.comment.body || "";
+  // ---- @widespread $N for <spec> → seed a market (issue body OR comment) ----
+  async function seedBounty(ctx, rawBody, issue) {
+    const body = rawBody || "";
     const m = body.match(/@widespread\s+\$?([\d.]+)\s+(?:for\s+)?([\s\S]+)/i);
-    if (!m) return;
+    if (!m) return false;
     const [_, amount, specRaw] = m;
     const paypal = (specRaw.match(/paypal:\s*(\S+@\S+)/i) || [])[1] ?? "";
     const spec = specRaw.replace(/\s*paypal:\s*\S+@\S+/i, "").trim();
-    const issue = ctx.payload.issue;
     const repo = `${ctx.payload.repository.owner.login}/${ctx.payload.repository.name}`;
-    // label + spec comment = the forge-native market record
-    await ctx.octokit.issues.addLabels({ ...ctx.issue(), labels: [`wide:funded:$${amount}`] });
-    await ctx.octokit.issues.createComment({ ...ctx.issue(),
+    // labels + spec comment = the forge-native market record.
+    // `wide:funded` (canonical) enables global label search for the feed poll.
+    await ctx.octokit.issues.addLabels({ ...ctx.issue(), issue_number: issue.number,
+      labels: [`wide:funded:$${amount}`, "wide:funded"] });
+    await ctx.octokit.issues.createComment({ ...ctx.issue(), issue_number: issue.number,
       body: `@widespread market — **$${amount}** for \`${spec.slice(0, 140)}\`\n` +
             `market_id: \`${repo}#${issue.number}\` · specHash pinned · escrow → ${BRIDGE}/api/markets` +
             (paypal ? `\npayout: ${paypal}` : "") });
+    // push-index into the unified feed — agents discover this within seconds
+    await fetch(`${BRIDGE}/api/feed/index`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: `gh:${repo}#${issue.number}`, source: "github", forge: "github",
+        kind: "bounty", repo, locator: `https://github.com/${repo}`,
+        title: issue.title || spec.slice(0, 140), spec,
+        amount, currency: "USD", est_usd: Number(amount) || undefined,
+        escrow: { state: "label-only" },
+        url: issue.html_url || `https://github.com/${repo}/issues/${issue.number}`,
+        claim: { how: "PR with 'closes #N' + @widespread grammar", grammar: "@widespread <amount> <spec>" },
+        execution: { recommended: "browser-tab (Pyodide/isomorphic-git)", isolation: "wasm-sandbox",
+          alternatives: ["self-hosted sealed runner"], note: "client-side execution only" },
+      }),
+    }).catch((e) => app.log.warn({ err: String(e) }, "feed index push failed"));
     app.log.info({ repo, amount }, "bounty seeded");
+    return true;
+  }
+
+  app.on(["issue_comment.created"], async (ctx) => {
+    if (ctx.payload.issue?.pull_request) return; // PR comments handled above
+    await seedBounty(ctx, ctx.payload.comment.body, ctx.payload.issue);
+  });
+
+  // Issue body grammar — opened seeds, edited re-seeds only if not funded yet.
+  app.on(["issues.opened", "issues.edited"], async (ctx) => {
+    const issue = ctx.payload.issue;
+    if (!issue?.body) return;
+    if ((issue.labels ?? []).some((l) => /wide:funded/i.test(l.name || ""))) return;
+    await seedBounty(ctx, issue.body, issue);
   });
 
   // ---- PR merge = accept → trigger the bridge review → payout ----
