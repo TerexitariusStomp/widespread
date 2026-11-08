@@ -53,6 +53,41 @@ export function patchSubject(patch: string): string | null {
   return m ? m[1].trim() : null;
 }
 
+/**
+ * Context-insensitive diff fingerprint — the `git patch-id` idea: a
+ * payer who re-lands your work in a fresh commit (new message, new
+ * metadata, same logical change) produces the same fingerprint.
+ * We hash normalized +/- line content only — filenames, line numbers,
+ * index lines, and commit metadata are all stripped, so a copy can't
+ * hide behind cosmetic edits.
+ */
+export async function patchFingerprint(diffText: string): Promise<string> {
+  const lines = diffText.split("\n").filter((l) => {
+    // keep added/removed content lines only — the change itself
+    return (l.startsWith("+") && !l.startsWith("+++"))
+        || (l.startsWith("-") && !l.startsWith("---"));
+  });
+  // normalize whitespace so trivial reformatting doesn't dodge matching
+  const normalized = lines
+    .map((l) => l[0] + l.slice(1).replace(/\s+/g, " ").trim())
+    .join("\n");
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(normalized));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Compare a claim's patch fingerprint against the fingerprints of later
+ * upstream commits. Returns the matching upstream sha when a later commit
+ * lands the same logical change — the "used my code, never accepted" proof.
+ */
+export async function findDerivative(opts: {
+  claimFingerprint: string;
+  laterCommits: { sha: string; fingerprint: string }[];
+}): Promise<{ sha: string; matched: boolean } | null> {
+  const hit = opts.laterCommits.find((c) => c.fingerprint === opts.claimFingerprint);
+  return hit ? { sha: hit.sha, matched: true } : null;
+}
+
 async function fetchText(url: string, maxBytes: number): Promise<string | null> {
   const res = await fetch(url, { headers: { accept: "text/plain" } }).catch(() => null);
   if (!res || !res.ok || !res.body) return null;
