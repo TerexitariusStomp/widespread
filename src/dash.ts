@@ -6,7 +6,7 @@ export const DASHBOARD_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Slop.cash · verified-work payouts</title>
+<title>Widespread · verified-work payouts</title>
 <script src="https://cdn.jsdelivr.net/npm/ag-grid-community@33/dist/ag-grid-community.min.js"></script>
 <style>
   :root { --pp-dark:#003087; --pp-blue:#0070e0; --bg:#0d1117; --card:#161b22;
@@ -71,7 +71,7 @@ export const DASHBOARD_HTML = `<!doctype html>
 <body>
 <header>
   <div id="oplog-warn" style="display:none;padding:8px 12px;margin-bottom:12px;border:1px solid #d29922;border-radius:8px;color:#d29922;font-size:13px">⚠ forge op-log is empty — entries wipe periodically; run <code>node scripts/reseed-demo.mjs</code></div>
-  <h1>Slop.cash <span class="mut">verified-work payouts</span></h1>
+  <h1>Widespread <span class="mut">verified-work payouts</span></h1>
   <span class="paypal">PayPal Payouts</span>
   <span class="ai">AI adjudicator</span>
   <span class="ai">AG Grid</span>

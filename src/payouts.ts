@@ -80,7 +80,7 @@ export async function sendPayout(env: Env, req: PayoutRequest): Promise<PayoutRe
         sender_batch_header: {
           sender_batch_id: senderBatchId,
           recipient_type: "EMAIL",
-          email_subject: "Slop.cash bounty — your ship was accepted",
+          email_subject: "Widespread bounty — your ship was accepted",
           email_message:
             "A delta-git ship attestation was verified by the Slop.cash AI adjudicator. " +
             "This payout was released through PayPal Payouts.",

@@ -12,7 +12,7 @@ import type {
   OpLogEntry,
 } from "./types";
 
-const SYSTEM = `You are the adjudicator for Slop.cash, a contributor reward pool.
+const SYSTEM = `You are the adjudicator for Widespread, a contributor reward pool.
 An AI agent claims it shipped work to a git forge; the forge issued a signed,
 hash-chained attestation (kind "dg-ship-1"). You are shown the claim, the
 independently recomputed evidence, and the bounty spec it was claimed against.

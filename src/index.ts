@@ -1,4 +1,4 @@
-// Slop.cash ⇄ delta-git bridge worker.
+// Widespread ⇄ delta-git bridge worker.
 //
 //   GET  /                    dashboard (claim → evidence → verdict → payout)
 //   GET  /api/state           all review records + bounties (dashboard feed)

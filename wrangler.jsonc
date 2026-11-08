@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "slopcash-bridge",
-  "account_id": "f6aff821e92502a4c148dfdcbc082a14",
+  "name": "widespread-bridge",
+  "account_id": "46966abcfb8f1245ec055842177edcb2",
   "main": "src/index.ts",
   "compatibility_date": "2025-10-01",
   "compatibility_flags": ["nodejs_compat"],
@@ -18,12 +18,12 @@
     "MIN_CONFIDENCE": "0.6",
     // Public base URL of this deployment — used for receipt target_urls
     // written back to the forge. Set after first deploy.
-    "PUBLIC_BASE": "https://slopcash-bridge.hardwoodstablecoin.workers.dev"
+    "PUBLIC_BASE": "https://widespread-bridge.widespread.workers.dev"
   },
   "kv_namespaces": [
     {
       "binding": "CLAIMS",
-      "id": "f939a2560ae24c69bf5f0859531ec3dd"
+      "id": "8b4e482c9fe045da900792b76fbbc846"
     }
   ],
   "ai": {
