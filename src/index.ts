@@ -32,6 +32,7 @@ import { putFeedDoc } from "./feedstore";
 import { handleClaimPost, handleClaimVerify } from "./claims";
 import { createFiatOrder, captureFiatOrder, tryOpsEscrow } from "./fiat";
 import { handleMirrorClaimPost, handleMirrorClaimsList, handleMirrorVerdict, handleMirrorPayout } from "./mirrorclaims";
+import { scanMirrorSubmissions } from "./ingest";
 import type { FeedRecord, Bounty, Env } from "./types";
 
 const json = (body: unknown, status = 200) =>
@@ -386,7 +387,7 @@ export default {
     }
     // Manual refresh — same opportunistic path, on demand.
     if (pathname === "/api/feed/refresh" && req.method === "POST") {
-      return json(await refreshFeed(env));
+      return json(await refreshFeed(env, ctx));
     }
     // Poidh rail — live sponsor-protocol state on Base (read-only).
     if (pathname === "/api/poidh" && req.method === "GET") {
@@ -512,5 +513,6 @@ export default {
   // when none is free the /api/state opportunistic scan covers pickup.
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(scan(env).catch((e) => console.error(`scan: ${String(e)}`)));
+    ctx.waitUntil(scanMirrorSubmissions(env).catch((e) => console.error(`ingest: ${String(e)}`)));
   },
 } satisfies ExportedHandler<Env>;

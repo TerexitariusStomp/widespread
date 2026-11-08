@@ -116,9 +116,10 @@ export async function handleMirrorClaimsList(url: URL, env: Env, ctx?: Execution
 
 export async function handleMirrorVerdict(req: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   const body = (await req.json().catch(() => null)) as Record<string, unknown> | null;
-  const mirrorId = String(body?.mirror_id ?? "");
-  const claimHash = String(body?.claim_hash ?? "");
-  const accept = body?.accept !== false;
+  if (!body) return Response.json({ ok: false, error: "json body required" }, { status: 400 });
+  const mirrorId = String(body.mirror_id ?? "");
+  const claimHash = String(body.claim_hash ?? "");
+  const accept = body.accept !== false;
   if (!mirrorId || !claimHash) {
     return Response.json({ ok: false, error: "mirror_id and claim_hash required" }, { status: 400 });
   }
@@ -139,8 +140,12 @@ export async function handleMirrorVerdict(req: Request, env: Env, ctx?: Executio
   const usd = mirror.original?.est_usd ?? 0;
   const cutBps = mirror.cut_bps ?? 1000;
   const netUsd = +(usd * (1 - cutBps / 10000)).toFixed(2);
-  const payoutSpec = (claim.payout ?? {}) as { pyusd_solana_address?: string; paypal_email?: string };
-
+  // Auto-ingested claims carry payout:null — the verdict caller (payer or
+  // ops) supplies the winner's payout address here.
+  const payoutIn = (body.payout ?? claim.payout ?? {}) as {
+    pyusd_solana_address?: string; paypal_email?: string;
+    beneficiary?: Record<string, unknown>;
+  };
   const settlement = {
     mirror_id: mirrorId,
     winning_claim_hash: claimHash,
@@ -149,15 +154,16 @@ export async function handleMirrorVerdict(req: Request, env: Env, ctx?: Executio
     platform_cut_usd: +(usd * cutBps / 10000).toFixed(2),
     net_usd: netUsd,
     // PYUSD is $1-pegged, 6 decimals on Solana (Token-2022).
-    pyusd: payoutSpec.pyusd_solana_address
+    pyusd: payoutIn.pyusd_solana_address
       ? { asset: "PYUSD", network: "solana", mint: "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",
-          amount: netUsd.toFixed(6), decimals: 6, to: payoutSpec.pyusd_solana_address }
+          amount: netUsd.toFixed(6), decimals: 6, to: payoutIn.pyusd_solana_address }
       : null,
-    paypal_usd: payoutSpec.paypal_email
-      ? { asset: "USD", rail: "paypal-payouts", amount: netUsd.toFixed(2), to: payoutSpec.paypal_email }
+    paypal_usd: payoutIn.paypal_email
+      ? { asset: "USD", rail: "paypal-payouts", amount: netUsd.toFixed(2), to: payoutIn.paypal_email }
       : null,
     verdict: accept ? "accept" : "reject",
     reasoning: String(body?.reasoning ?? ""),
+    payout_input: payoutIn,
     decided_at: Date.now(),
     status: accept ? "won" : "rejected",
   };
@@ -186,11 +192,9 @@ export async function handleMirrorPayout(req: Request, env: Env, ctx?: Execution
   // the winner gave a Solana address; USD via PayPal Payouts otherwise.
   const paxosReady = !!(env.PAXOS_CLIENT_ID && env.PAXOS_CLIENT_SECRET && env.PAXOS_PROFILE_ID);
   if (settlement.pyusd) {
-    const winClaim = await env.CLAIMS.get(claimKey(mirrorId, settlement.winning_claim_hash))
-      .then((v) => v ? JSON.parse(v) as { payout?: { beneficiary?: Record<string, unknown> } } : null);
-    const payoutSpec = (winClaim?.payout ?? {}) as {
+    const payoutSpec = ((settlement.payout_input ?? {}) as {
       beneficiary?: { first_name?: string; last_name?: string; physical_address?: { country?: string } };
-    };
+    });
     if (paxosReady) {
       const refId = `wide-mirror-${mirrorId}`.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 100);
       const result = await paxosPyusdWithdraw(env, {

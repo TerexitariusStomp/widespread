@@ -11,6 +11,7 @@
 //   forge watchlists 60m · external boards 60m–6h
 
 import { nearView } from "./near";
+import { scanMirrorSubmissions } from "./ingest";
 import { listBounties, listRecords } from "./store";
 import {
   acquireFeedLock, getFeedDoc, getSourceStamp, putFeedDoc,
@@ -521,7 +522,7 @@ const EXEC_BROWSER = {
 /** Refresh the materialized feed doc. Single-flight via KV lock; each
  * source honors its own min-interval so a 30-min doc TTL doesn't mean
  * 30-min upstream polling for every source. */
-export async function refreshFeed(env: Env): Promise<FeedDoc> {
+export async function refreshFeed(env: Env, ctx?: ExecutionContext): Promise<FeedDoc> {
   const locked = await acquireFeedLock(env);
   if (!locked) {
     const existing = await getFeedDoc(env);
@@ -564,6 +565,9 @@ export async function refreshFeed(env: Env): Promise<FeedDoc> {
 
     const doc: FeedDoc = { generated_at: Date.now(), sources, records, mirrors };
     await putFeedDoc(env, doc);
+    // Auto-ingest submissions on funded mirrors — agents keep using the
+    // original forge flow (PRs on the issue); we file attested claims.
+    if (ctx) ctx.waitUntil(scanMirrorSubmissions(env).catch((e) => console.error(`ingest: ${String(e)}`)));
     return doc;
   } finally {
     if (locked) await releaseFeedLock(env);
@@ -576,7 +580,7 @@ export async function feedDoc(env: Env, ctx?: ExecutionContext): Promise<FeedDoc
   const doc = await getFeedDoc(env);
   const stale = !doc || Date.now() - doc.generated_at > FEED_TTL_MS;
   if (stale) {
-    const p = refreshFeed(env).catch((e) => {
+    const p = refreshFeed(env, ctx).catch((e) => {
       console.error(`feed refresh: ${String(e)}`);
       return null;
     });
