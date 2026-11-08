@@ -159,6 +159,7 @@ export async function gatherCommitEvidence(
     lines_removed: 0,
     diff_excerpt: null,
     evidence_url: null,
+    patch_fingerprint: null,
   };
 
   // 1) forge-local objects
@@ -175,6 +176,7 @@ export async function gatherCommitEvidence(
       lines_removed: parsed.linesRemoved,
       diff_excerpt: local.slice(0, DIFF_EXCERPT_CHARS),
       evidence_url: diffUrl,
+      patch_fingerprint: await patchFingerprint(local),
     };
   }
 
@@ -194,6 +196,7 @@ export async function gatherCommitEvidence(
         lines_removed: parsed.linesRemoved,
         diff_excerpt: patch.slice(0, DIFF_EXCERPT_CHARS),
         evidence_url: patchUrl,
+        patch_fingerprint: await patchFingerprint(patch),
       };
     }
   }

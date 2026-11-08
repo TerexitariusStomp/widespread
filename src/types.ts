@@ -72,6 +72,9 @@ export interface CommitEvidence {
   /** Truncated unified diff fed to the adjudicator (chars capped). */
   diff_excerpt: string | null;
   evidence_url: string | null;
+  /** Context-insensitive diff fingerprint (patch-id) — proof for
+   * derivative-work detection: a re-landed copy produces the same hash. */
+  patch_fingerprint: string | null;
 }
 
 /** Claim-vs-recompute comparison shown on the dashboard + given to the LLM. */
