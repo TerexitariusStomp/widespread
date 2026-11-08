@@ -191,16 +191,8 @@ export default {
     if (pathname === "/api/markets" && req.method === "GET") {
       const onchain = await listOnchainMarkets(env).catch(() => null);
       if (onchain) return json({ markets: onchain, total: onchain.length, source: "chain" });
-      // fallback: local registry when no contract is configured (dev).
-      const [claims, bounties] = await Promise.all([listRecords(env), listBounties(env)]);
-      const markets = bounties.map((b) => ({
-        repo: b.repo, amount: b.amount, currency: b.currency,
-        spec: b.spec, created_at: b.created_at,
-        claims: claims.filter((c) => c.repo === b.repo).map((c) => ({
-          id: c.id, status: c.status, payout_trace: payoutTrace(c),
-        })),
-      }));
-      return json({ markets, total: markets.length, source: "kv" });
+      return json({ markets: [], total: 0, source: "chain",
+        error: "no NEAR_CONTRACT configured — markets live on-chain, not in KV" });
     }
     if (pathname === "/api/scan" && req.method === "POST") {
       return json({ reviewed: await scan(env) });
