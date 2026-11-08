@@ -19,7 +19,7 @@ import { resolveLocator } from "./locator";
 import { sponsorPage } from "./sponsor";
 import { poidhInfo } from "./poidh";
 import { hatsOrg, hatsHat, hatsStanceCheck, hatsOpportunities,
-         hatsForeign, hatsPayoutQuote, mechanismList, mechanismRun,
+         hatsForeign, hatsPayoutQuote, intentsStatus, mechanismList, mechanismRun,
          earnedStance, delegatedStance, parseIdentityRef, stanceScore,
          ERC8004_REGISTRIES } from "./hats";
 import { nearView } from "./near";
@@ -271,7 +271,11 @@ export default {
     }
     if (pathname === "/api/hats/payout-quote" && req.method === "POST") {
       const d = (await req.json().catch(() => ({}))) as Record<string, string>;
-      return json(await hatsPayoutQuote(env as never, d));
+      return json(await hatsPayoutQuote(env, d));
+    }
+    if (pathname === "/api/intents/status" && req.method === "GET") {
+      const dep = url.searchParams.get("depositAddress") ?? "";
+      return dep ? json(await intentsStatus(dep)) : bad("need ?depositAddress=", 400);
     }
     // Simocracy-compatible mechanism service (org.simocracy.mechanism).
     if (pathname === "/api/mechanisms" && req.method === "GET") {

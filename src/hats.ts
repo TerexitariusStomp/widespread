@@ -306,51 +306,79 @@ export async function mechanismRun(
   }
 }
 
-// ---- intents payout quote (dry — never credits on a quote alone) ----
-// Same discipline as widespread-solana/src/intents.js: a quote is a
-// preview; settlement only counts after solver-confirmed status.
-const INTENTS_API = "https://intents-api.aurora.dev/api";
+// ---- NEAR Intents payout quote (1Click Swap API — dry, never credits) ----
+// NEAR Intents' public swap API (chaindefuser/defuse infra — NOT the
+// legacy intents-api.aurora.dev). No app key needed for quotes.
+// Same discipline as intents.js: a quote is a preview; settlement only
+// counts after confirmed status — never credit on deposit alone.
+const INTENTS_API = "https://1click.chaindefuser.com/v0";
+
+// Defuse asset ids (from /v0/tokens): NEAR-native USDC is unwrapped
+// nep141:<contract>; foreign-chain assets are nep141:<chain>-<addr>.omft.near.
+export const INTENTS_ASSETS = {
+  NEAR_USDC: "nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+  SOL_USDC: "nep141:sol-5ce3bf3a31af18be40ba30f721101b4341690186.omft.near",
+  ETH_USDC: "nep141:eth-0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48.omft.near",
+};
 
 export async function hatsPayoutQuote(
-  env: { AURORA_APP_KEY?: string },
+  env: object,
   args: {
     hatId?: string; assetIn?: string; assetOut?: string;
-    amount?: string; recipient?: string; destChain?: string;
+    amount?: string; recipient?: string; destChain?: string; refundTo?: string;
   }
 ) {
-  const appKey = env.AURORA_APP_KEY ?? "";
-  if (!appKey) return { error: "no AURORA_APP_KEY configured — dry-run unavailable" };
   if (!args.amount || !args.recipient) {
     return { error: "need {amount, recipient} — assetIn/assetOut/destChain optional" };
   }
-  // Defaults mirror the proven intents.js leg: NEAR USDC in → SPL USDC out.
+  const deadline = new Date(Date.now() + 2 * 3600e3)
+    .toISOString().replace(/\.\d{3}Z$/, "Z");
+  const origin = args.assetIn ?? INTENTS_ASSETS.NEAR_USDC;
+  // refundTo must be a valid address ON THE ORIGIN CHAIN — NEAR account for
+  // nep141-native assets, chain address for omft-wrapped origins.
+  const isNearNative = origin.startsWith("nep141:") && !origin.includes(".omft.near");
+  const refundTo = args.refundTo
+    ?? (isNearNative ? "wide-mkt-11561.testnet" : null);
+  if (!refundTo)
+    return { error: "need refundTo — must be a valid address on the ORIGIN chain (NEAR account for nep141, chain address for omft assets)" };
   const body = {
     dry: true,
-    swapType: "EXACT_OUTPUT",
+    swapType: "EXACT_INPUT",
     depositType: "ORIGIN_CHAIN",
-    originAsset: args.assetIn ?? "nep141:nep141.omft.near",
-    destinationAsset: args.assetOut ?? "nep141:sol-5ce3bf3a31af18be40ba30f721101b4341690186.omft.near",
+    originAsset: origin,
+    destinationAsset: args.assetOut ?? INTENTS_ASSETS.SOL_USDC,
     amount: String(args.amount),
     slippageTolerance: 100,
-    refundTo: "widespread.near",
+    refundTo,
     refundType: "ORIGIN_CHAIN",
     recipient: args.recipient,
     recipientType: "DESTINATION_CHAIN",
-    deadline: new Date(Date.now() + 3600e3).toISOString(),
-    ...(args.destChain ? { destinationChain: args.destChain } : {}),
+    deadline,
   };
-  const res = await fetch(`${INTENTS_API}/quote/${appKey}`, {
+  const res = await fetch(`${INTENTS_API}/quote`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(15000),
+    signal: AbortSignal.timeout(20000),
   });
   const data = await res.json().catch(() => null) as Record<string, unknown> | null;
   return {
     hatId: args.hatId ?? null,
     dry: true,
+    rail: "near-intents-1click",
     status: res.ok ? "quoted" : `http ${res.status}`,
-    quote: data,
-    note: "dry quote only — settlement requires solver-confirmed status; see intents.js waitSettled discipline",
+    quote: data?.quote ?? data,
+    upstream: data?.message ? { message: data.message } : undefined,
+    note: "dry quote only — settlement requires confirmed status via /v0/status; see intents.js waitSettled discipline. NEAR-native origins currently 500 upstream (omft assets quote fine).",
   };
+}
+
+/** Settlement status for a 1Click deposit address — only credit on
+ *  terminal success states (same discipline as waitSettled). */
+export async function intentsStatus(depositAddress: string) {
+  const res = await fetch(
+    `${INTENTS_API}/status?depositAddress=${encodeURIComponent(depositAddress)}`,
+    { signal: AbortSignal.timeout(15000) });
+  const data = await res.json().catch(() => null);
+  return { depositAddress, http: res.status, status: data };
 }
