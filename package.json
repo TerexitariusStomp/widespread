@@ -1,0 +1,8 @@
+{
+  "name": "widespread-bot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GitHub App — @widespread mentions, merge=accept, payout receipts in repo history",
+  "main": "index.js",
+  "dependencies": { "probot": "^13.0.0" }
+}
