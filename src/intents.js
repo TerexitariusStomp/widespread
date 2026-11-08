@@ -1,4 +1,4 @@
-// intents.js — Aurora Intents settlement leg (the $3K bounty integration).
+// intents.js — NEAR Intents settlement leg (the $3K bounty integration).
 // Payer funds → quote → deposit → solvers settle to the contributor on
 // Solana (or any chain). Settlement ONLY counts after confirmed status —
 // post-Oct-2026-incident discipline: never credit on deposit alone.
@@ -7,7 +7,6 @@
 // public rail. Replaces the legacy intents-api.aurora.dev endpoint which
 // required an AURORA_APP_KEY; 1Click quotes are unauthenticated.
 const API = 'https://1click.chaindefuser.com/v0';
-export const APP_KEY = process.env.AURORA_APP_KEY || ''; // legacy, unused by 1Click
 
 export const TOKENS = {
   SOL_USDC: 'nep141:sol-5ce3bf3a31af18be40ba30f721101b4341690186.omft.near',
