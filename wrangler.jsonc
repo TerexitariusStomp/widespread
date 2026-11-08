@@ -17,6 +17,7 @@
     "NEAR_RPC_URL": "https://rpc.testnet.near.org",
     "ORACLE_PUBKEY_HEX": "1ad812e3b4a566d8a33358529adc431e3c752b6a0c2ca3fa70d92ee1423e0ef1",
     "ORACLE_ACCOUNT": "wide-mkt-11561.testnet",
+    "NEAR_AI_MODEL": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
     // Workers AI model for the adjudicator seat.
     "LLM_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
     // Minimum adjudicator confidence (0..1) required to release a payout.

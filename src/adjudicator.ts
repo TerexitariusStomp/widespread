@@ -119,7 +119,7 @@ async function nearAiCall(env: Env, input: AdjudicatorInput): Promise<{
   raw: string; model: string; signature_id?: string; tee_signature?: unknown;
 }> {
   const base = env.NEAR_AI_BASE || "https://cloud-api.near.ai/v1";
-  const model = env.NEAR_AI_MODEL || "deepseek-ai/DeepSeek-V3.1";
+  const model = env.NEAR_AI_MODEL || "deepseek-ai/DeepSeek-V4.1-Flash-1017";
   const res = await fetch(`${base}/chat/completions`, {
     method: "POST",
     headers: {
@@ -159,7 +159,7 @@ async function nearAiCall(env: Env, input: AdjudicatorInput): Promise<{
 export async function adjudicate(env: Env, input: AdjudicatorInput): Promise<Adjudication> {
   const useNearAi = !!(env as { NEAR_AI_API_KEY?: string }).NEAR_AI_API_KEY;
   const model = useNearAi
-    ? (env.NEAR_AI_MODEL || "deepseek-ai/DeepSeek-V3.1")
+    ? (env.NEAR_AI_MODEL || "deepseek-ai/DeepSeek-V4.1-Flash-1017")
     : (env.LLM_MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast");
   let raw = "";
   let sig: { signature_id?: string; tee_signature?: unknown } = {};
