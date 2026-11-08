@@ -92,7 +92,7 @@ if (!existing) {
 const after = await view(MARKET, "getMarket", { marketId: PAYTOHAT_MARKET });
 console.log(`   market.payToHat=${after.payToHat} status=${after.status} locked=${(Number(after.locked)/1e24).toFixed(3)} NEAR`);
 
-// 7. Payout quote leg (dry — needs AURORA_APP_KEY secret to execute)
+// 7. Payout quote leg (dry — NEAR Intents 1Click, no key needed)
 const quote = await post(`/api/hats/payout-quote`,
   { hatId: HAT_ID, amount: "100000", recipient: foreign.foreign.address });
 console.log(`\n7. PAYOUT QUOTE (intents, dry): ${quote.error ?? quote.status}`);
