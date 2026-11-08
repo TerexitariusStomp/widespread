@@ -3,8 +3,11 @@
 // Solana (or any chain). Settlement ONLY counts after confirmed status —
 // post-Oct-2026-incident discipline: never credit on deposit alone.
 
-const API = 'https://intents-api.aurora.dev/api';
-export const APP_KEY = process.env.AURORA_APP_KEY || '';
+// NEAR Intents 1Click Swap API (defuse/chaindefuser infra) — the current
+// public rail. Replaces the legacy intents-api.aurora.dev endpoint which
+// required an AURORA_APP_KEY; 1Click quotes are unauthenticated.
+const API = 'https://1click.chaindefuser.com/v0';
+export const APP_KEY = process.env.AURORA_APP_KEY || ''; // legacy, unused by 1Click
 
 export const TOKENS = {
   SOL_USDC: 'nep141:sol-5ce3bf3a31af18be40ba30f721101b4341690186.omft.near',
@@ -12,14 +15,14 @@ export const TOKENS = {
 };
 
 export async function getTokens() {
-  const r = await fetch(`${API}/tokens/${APP_KEY}`);
+  const r = await fetch(`${API}/tokens`);
   if (!r.ok) throw new Error(`tokens: HTTP ${r.status}`);
   return r.json();
 }
 
 // Request a quote: assetIn → assetOut to `recipient` on `destChain`.
 export async function quote({ assetIn, assetOut, amount, recipient, destChain, refundTo }) {
-  const r = await fetch(`${API}/quote/${APP_KEY}`, {
+  const r = await fetch(`${API}/quote`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -34,7 +37,7 @@ export async function quote({ assetIn, assetOut, amount, recipient, destChain, r
       refundType: 'ORIGIN_CHAIN',
       recipient: recipient,
       recipientType: 'DESTINATION_CHAIN',
-      deadline: new Date(Date.now() + 3600e3).toISOString(),
+      deadline: new Date(Date.now() + 3600e3).toISOString().replace(/\.\d{3}Z$/, 'Z'),
     }),
   });
   if (!r.ok) throw new Error(`quote: HTTP ${r.status} ${await r.text()}`);
@@ -43,7 +46,7 @@ export async function quote({ assetIn, assetOut, amount, recipient, destChain, r
 
 // Settlement is only real when the solver CONFIRMS — poll status.
 export async function getStatus(depositAddress) {
-  const r = await fetch(`${API}/status/${depositAddress}`);
+  const r = await fetch(`${API}/status?depositAddress=${encodeURIComponent(depositAddress)}`);
   if (!r.ok) throw new Error(`status: HTTP ${r.status}`);
   return r.json();
 }
