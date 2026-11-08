@@ -75,8 +75,14 @@ async function rpcCall<T>(env: { NEAR_RPC_URL?: string }, method: string, params
     body: JSON.stringify({ jsonrpc: "2.0", id: "ops", method, params }),
     signal: AbortSignal.timeout(10000),
   });
-  const j = (await res.json()) as { result?: T; error?: { message?: string } };
-  if (j.error) throw new Error(`near rpc ${method}: ${j.error.message}`);
+  const j = (await res.json()) as { result?: T; error?: { message?: string; data?: string; cause?: { info?: { error_message?: string } } } };
+  if (j.error) {
+    const e = j.error as Record<string, unknown>;
+    const detail = e.cause && typeof e.cause === "object"
+      ? JSON.stringify((e.cause as { info?: unknown }).info ?? e.cause)
+      : (typeof e.data === "string" ? e.data : JSON.stringify(e.data ?? e.message));
+    throw new Error(`near rpc ${method}: ${detail}`);
+  }
   return j.result as T;
 }
 
@@ -147,22 +153,40 @@ export async function nearFunctionCall(
     u64(call.gas),
     u128(call.deposit),
   );
+  // TransactionV1 (nearcore's current wire format — classic transactions
+  // are rejected with "invalid transaction version tag"): version=0x01,
+  // nonce as TransactionNonce enum {nonce:u64} (variant 0), nonceMode
+  // enum monotonic (variant 0) after actions.
   const tx = concat(
+    new Uint8Array([1]),                    // Transaction::V1 prefix
     str(ops.accountId),                     // signer_id
     new Uint8Array([0]), pubkey,            // PublicKey::ED25519 + key
-    u64(nonce),
+    new Uint8Array([0]), u64(nonce),        // TransactionNonce::Nonce{nonce}
     str(contractId),                        // receiver_id
     blockHash,
     u32(1), action,                         // actions vec
+    new Uint8Array([0]),                    // NonceMode::Monotonic
   );
-  const sig = await edSign(seed, pubkey, tx);
+  // NEAR signs SHA-256(serialized transaction), not the raw bytes —
+  // verified byte-identical against near-api-js encode().
+  const txHash = new Uint8Array(await crypto.subtle.digest("SHA-256", tx as BufferSource));
+  const sig = await edSign(seed, pubkey, txHash);
   const signedTx = concat(tx, new Uint8Array([0]), sig); // Signature::ED25519 + 64B
-  const b58tx = b58encode(signedTx);
+  let bin = "";
+  for (let i = 0; i < signedTx.length; i += 8192) {
+    bin += String.fromCharCode(...signedTx.subarray(i, i + 8192));
+  }
+  const b64 = btoa(bin);
 
-  const result = await rpcCall<{ transaction?: { hash?: string }; receipts_outcome?: unknown[] }>(
-    env, "broadcast_tx_commit", [b58tx, "FINAL"]);
-  const status = result.receipts_outcome?.map((r) =>
-    (r as { outcome?: { status?: unknown } })?.outcome?.status ?? r) ?? result;
+  // Modern RPC: send_tx takes {signed_tx_base64, wait_until} — the legacy
+  // broadcast_tx_commit(base58) endpoint is deprecated and rejects valid
+  // TransactionV1 payloads.
+  const result = await rpcCall<{
+    transaction?: { hash?: string };
+    receipts_outcome?: { outcome?: { status?: unknown } }[];
+    status?: unknown;
+  }>(env, "send_tx", { signed_tx_base64: b64, wait_until: "FINAL" });
+  const status = result.receipts_outcome?.map((r) => r?.outcome?.status ?? r) ?? result.status ?? result;
   return { txHash: result.transaction?.hash ?? "", status };
 }
 
