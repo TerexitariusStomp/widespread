@@ -88,6 +88,37 @@ export async function findDerivative(opts: {
   return hit ? { sha: hit.sha, matched: true } : null;
 }
 
+/**
+ * Fingerprints of an upstream repo's recent default-branch commits — the
+ * "did they land my patch anyway" scan. GitHub upstreams only; other forges
+ * return []. Fetches each commit's .diff (same source gatherCommitEvidence
+ * uses) so the fingerprint space matches claim-side exactly.
+ */
+export async function laterUpstreamFingerprints(
+  upstreamUrl: string,
+  limit = 15,
+): Promise<{ sha: string; fingerprint: string }[]> {
+  const m = upstreamUrl.match(/github\.com[/:]([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/);
+  if (!m) return [];
+  const [, owner, name] = m;
+  const res = await fetch(
+    `https://api.github.com/repos/${owner}/${name}/commits?per_page=${limit}`,
+    { headers: { accept: "application/vnd.github+json", "user-agent": "widespread-bridge" } },
+  ).catch(() => null);
+  if (!res?.ok) return [];
+  const commits = (await res.json().catch(() => [])) as { sha?: string }[];
+  const out: { sha: string; fingerprint: string }[] = [];
+  for (const c of commits.slice(0, limit)) {
+    if (!c.sha) continue;
+    const diff = await fetchText(
+      `https://github.com/${owner}/${name}/commit/${c.sha}.diff`, 512 * 1024,
+    ).catch(() => null);
+    if (!diff) continue;
+    out.push({ sha: c.sha, fingerprint: await patchFingerprint(diff) });
+  }
+  return out;
+}
+
 async function fetchText(url: string, maxBytes: number): Promise<string | null> {
   const res = await fetch(url, { headers: { accept: "text/plain" } }).catch(() => null);
   if (!res || !res.ok || !res.body) return null;

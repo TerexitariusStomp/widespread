@@ -14,6 +14,7 @@ import { DASHBOARD_HTML } from "./dash";
 import { handlePremiumExport } from "./premium";
 import { reviewOutstanding, runReview } from "./review";
 import { handleBotVerdict, type BotVerdictBody } from "./botverdict";
+import { attestClaim, ecosystem, openDispute } from "./ecosystem";
 import { deleteBounty, listBounties, listRecords, putBounty } from "./store";
 import type { Bounty, Env } from "./types";
 
@@ -223,6 +224,28 @@ export default {
         (list?.keys ?? []).map((k) => env.CLAIMS.get(k.name, "json").catch(() => null))
       );
       return json({ verdicts: records.filter(Boolean), total: records.filter(Boolean).length });
+    }
+    // Collaborator ecosystem feed — rails, funding pools, security boards,
+    // forges, workers, dispute/proof seams. All env-gated, all optional.
+    if (pathname === "/api/ecosystem" && req.method === "GET") {
+      return json(await ecosystem(env));
+    }
+    // Kleros dispute seam — binds claimHash+reason as arbitration evidence.
+    if (pathname === "/api/dispute" && req.method === "POST") {
+      const d = (await req.json().catch(() => ({}))) as {
+        repo?: string; market_id?: string; claim_hash?: string; reason?: string; responder?: string;
+      };
+      if (!d.repo || !d.claim_hash || !d.reason) return bad("need repo, claim_hash, reason", 400);
+      return json(await openDispute(env, {
+        repo: d.repo, marketId: d.market_id ?? "0", claimHash: d.claim_hash,
+        reason: d.reason, responder: d.responder,
+      }));
+    }
+    // Rekor attestation for a shipped commit — permanent public proof.
+    if (pathname === "/api/attest" && req.method === "POST") {
+      const a = (await req.json().catch(() => ({}))) as { repo?: string; sha?: string; note?: string };
+      if (!a.repo || !a.sha) return bad("need repo, sha", 400);
+      return json(await attestClaim(env, { repo: a.repo, sha: a.sha, note: a.note }));
     }
     const bountyDel = pathname.match(/^\/api\/bounties\/([a-z0-9-]+\/[a-z0-9-]+)$/i);
     if (bountyDel && req.method === "DELETE") {

@@ -173,6 +173,12 @@ export interface ReviewRecord {
   crosscheck: Crosscheck;
   bounty: Bounty | null;
   adjudication: Adjudication | null;
+  /** Derivative-use proof: a later upstream commit landed the same patch
+   * fingerprint — "used my code, never accepted" made checkable. */
+  derivative?: { sha: string; matched: boolean } | null;
+  /** Sigstore/Rekor hashedrekord attestation of the claimed commit —
+   *  permanent public proof, env-gated (ATTEST_*). */
+  attestation?: { uuid?: string; logIndex?: string; integratedTime?: number; skipped?: string } | null;
   payout: PayoutReceipt | null;
   writeback: Writeback | null;
   reviewed_at: number;

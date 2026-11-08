@@ -1,10 +1,11 @@
 // The pipeline: claim → evidence → AI verdict → PayPal payout → receipt.
 
 import { adjudicate } from "./adjudicator";
-import { crosscheck, gatherCommitEvidence } from "./evidence";
+import { crosscheck, findDerivative, gatherCommitEvidence, laterUpstreamFingerprints, upstreamFor } from "./evidence";
 import { oracleEnv, signVerdict } from "./oracle";
 import { fetchOpLog, verifyChain } from "./oplog";
 import { refreshBatch, sendPayout } from "./payouts";
+import { attestClaim } from "./ecosystem";
 import { getBounty, getRecord, putRecord } from "./store";
 import { writebackReceipt } from "./writeback";
 import type {
@@ -62,6 +63,18 @@ export async function runReview(
   );
   const check = crosscheck(claim, commits);
 
+  // Derivative-use scan: fingerprint the upstream repo's recent commits and
+  // check whether a later one landed this claim's exact patch — the
+  // "used my code, never merged the PR" proof, recorded on every review.
+  const upstream = upstreamFor(repo, env, bounty?.upstream);
+  const fp = commits.find((c) => c.patch_fingerprint)?.patch_fingerprint;
+  const derivative = upstream && fp
+    ? await findDerivative({
+        claimFingerprint: fp,
+        laterCommits: await laterUpstreamFingerprints(upstream),
+      }).catch(() => null)
+    : null;
+
   const adjudication = await adjudicate(env, {
     repo,
     entry,
@@ -96,6 +109,13 @@ export async function runReview(
     ).catch(() => ({ sig: "", pubkey: "" }));
     if (sig) adjudication.oracle_verdict_sig = sig;
   }
+
+  // Sigstore/Rekor: pin the claimed commit into the public transparency log.
+  // Env-gated — skipped with a reason when no ATTEST_* key is provisioned.
+  const attestation = claim.commits?.[0]
+    ? await attestClaim(env, { repo, sha: claim.commits[0], note: `ship-claim seq=${seq}` })
+        .catch(() => null)
+    : null;
 
   let payout: PayoutReceipt | null = null;
   if (accepted) {
@@ -154,6 +174,8 @@ export async function runReview(
     crosscheck: check,
     bounty,
     adjudication,
+    derivative,
+    attestation,
     payout,
     writeback,
     reviewed_at: Date.now(),
