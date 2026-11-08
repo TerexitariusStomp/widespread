@@ -12,6 +12,9 @@
     "WATCH_REPOS": "slop/slopdotcash,slop/protocol",
     // PayPal REST base — sandbox by default, flip to api-m.paypal.com for live.
     "PAYPAL_API_BASE": "https://api-m.sandbox.paypal.com",
+    // NEAR market contract — the on-chain source of truth for /api/markets.
+    "NEAR_CONTRACT": "wide-mkt-11561.testnet",
+    "NEAR_RPC_URL": "https://rpc.testnet.near.org",
     // Workers AI model for the adjudicator seat.
     "LLM_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
     // Minimum adjudicator confidence (0..1) required to release a payout.
