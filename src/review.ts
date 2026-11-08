@@ -2,6 +2,7 @@
 
 import { adjudicate } from "./adjudicator";
 import { crosscheck, gatherCommitEvidence } from "./evidence";
+import { oracleEnv, signVerdict } from "./oracle";
 import { fetchOpLog, verifyChain } from "./oplog";
 import { refreshBatch, sendPayout } from "./payouts";
 import { getBounty, getRecord, putRecord } from "./store";
@@ -76,6 +77,25 @@ export async function runReview(
     adjudication.verdict === "accept" &&
     adjudication.confidence >= minConfidence &&
     chain.valid;
+
+  // When the market lives on-chain (NEAR_CONTRACT set), the adjudicator's
+  // verdict is signed as an oracle proof — release() on the contract binds
+  // this sig to the registered oracle instead of trusting a payer click.
+  const oracle = oracleEnv(env as unknown as {
+    NEAR_CONTRACT?: string; NEAR_RPC_URL?: string;
+    ORACLE_ACCOUNT?: string; ORACLE_SECRET_KEY?: string;
+    ORACLE_SEED_HEX?: string; ORACLE_PUBKEY_HEX?: string;
+  });
+  if (oracle && accepted && claim.commits?.length) {
+    const { sig } = await signVerdict(
+      oracle,
+      claim.work_id ?? String(seq),
+      entry.hash ?? "",
+      "accept",
+      String(bounty?.work_id ?? ""),
+    ).catch(() => ({ sig: "", pubkey: "" }));
+    if (sig) adjudication.oracle_verdict_sig = sig;
+  }
 
   let payout: PayoutReceipt | null = null;
   if (accepted) {

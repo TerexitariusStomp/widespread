@@ -110,27 +110,82 @@ function extractJson(text: string): Record<string, unknown> | null {
  * missing output fails closed to reject so money never moves without a
  * verdict the service can show.
  */
-export async function adjudicate(env: Env, input: AdjudicatorInput): Promise<Adjudication> {
-  const model = env.LLM_MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
-  let raw = "";
-  try {
-    // Ai.run may return {response} or an OpenAI-style chat.completion
-    // envelope — unwrap whichever we get.
-    const out = (await env.AI.run(model as keyof AiModels, {
+/** NEAR AI Cloud signed inference — OpenAI-compatible chat with
+ * `signature_kind: "provider_tee"`: the model's TEE signs the exact
+ * request+response bytes; GET /v1/signature/<chat_id> returns the proof.
+ * Verifying that signature ties the verdict to TEE-executed inference —
+ * an operator can't fake which model ran or what it said. */
+async function nearAiCall(env: Env, input: AdjudicatorInput): Promise<{
+  raw: string; model: string; signature_id?: string; tee_signature?: unknown;
+}> {
+  const base = env.NEAR_AI_BASE || "https://cloud-api.near.ai/v1";
+  const model = env.NEAR_AI_MODEL || "deepseek-ai/DeepSeek-V3.1";
+  const res = await fetch(`${base}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${env.NEAR_AI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model,
       messages: [
         { role: "system", content: SYSTEM },
         { role: "user", content: buildPrompt(input) },
       ],
       max_tokens: 1024,
       temperature: 0,
-    })) as {
-      response?: string;
-      choices?: { message?: { content?: string } }[];
-    };
-    raw =
-      (typeof out?.response === "string" && out.response) ||
-      out?.choices?.[0]?.message?.content ||
-      JSON.stringify(out);
+      // Ask the model TEE to sign the exact in/out bytes.
+      signature_kind: "provider_tee",
+    }),
+  });
+  if (!res.ok) throw new Error(`near-ai ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const out = (await res.json()) as {
+    id?: string;
+    choices?: { message?: { content?: string } }[];
+    signature_kind?: string;
+  };
+  const raw = out?.choices?.[0]?.message?.content ?? JSON.stringify(out);
+  // Fetch the TEE signature over this exact completion (records expire
+  // ~60min — grab it now).
+  let tee_signature: unknown;
+  if (out.id) {
+    tee_signature = await fetch(`${base}/signature/${out.id}`, {
+      headers: { authorization: `Bearer ${env.NEAR_AI_API_KEY}` },
+    }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  }
+  return { raw, model, signature_id: out.id, tee_signature };
+}
+
+export async function adjudicate(env: Env, input: AdjudicatorInput): Promise<Adjudication> {
+  const useNearAi = !!(env as { NEAR_AI_API_KEY?: string }).NEAR_AI_API_KEY;
+  const model = useNearAi
+    ? (env.NEAR_AI_MODEL || "deepseek-ai/DeepSeek-V3.1")
+    : (env.LLM_MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast");
+  let raw = "";
+  let sig: { signature_id?: string; tee_signature?: unknown } = {};
+  try {
+    if (useNearAi) {
+      const r = await nearAiCall(env, input);
+      raw = r.raw; sig = { signature_id: r.signature_id, tee_signature: r.tee_signature };
+    } else {
+      // Ai.run may return {response} or an OpenAI-style chat.completion
+      // envelope — unwrap whichever we get.
+      const out = (await env.AI.run(model as keyof AiModels, {
+        messages: [
+          { role: "system", content: SYSTEM },
+          { role: "user", content: buildPrompt(input) },
+        ],
+        max_tokens: 1024,
+        temperature: 0,
+      })) as {
+        response?: string;
+        choices?: { message?: { content?: string } }[];
+      };
+      raw =
+        (typeof out?.response === "string" && out.response) ||
+        out?.choices?.[0]?.message?.content ||
+        JSON.stringify(out);
+    }
   } catch (e) {
     return {
       verdict: "reject",
@@ -157,6 +212,8 @@ export async function adjudicate(env: Env, input: AdjudicatorInput): Promise<Adj
     confidence,
     model,
     raw_excerpt: raw.slice(0, 500),
+    ...(sig.signature_id ? { signature_id: sig.signature_id } : {}),
+    ...(sig.tee_signature ? { tee_signature: sig.tee_signature } : {}),
     ...(parsed ? {} : { error: "unparseable-output" }),
   };
 }

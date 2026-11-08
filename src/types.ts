@@ -16,6 +16,17 @@ export interface Env {
   ADMIN_TOKEN?: string;
   DG_AGENT_DID?: string;
   DG_AGENT_KEY_PKCS8_B64?: string;
+  // NEAR on-chain market + oracle verdict signing
+  NEAR_CONTRACT?: string;
+  NEAR_RPC_URL?: string;
+  ORACLE_ACCOUNT?: string;
+  ORACLE_PUBKEY_HEX?: string;
+  ORACLE_SEED_HEX?: string;
+  ORACLE_SECRET_KEY?: string;
+  // NEAR AI Cloud signed inference (provider_tee verdicts)
+  NEAR_AI_API_KEY?: string;
+  NEAR_AI_BASE?: string;
+  NEAR_AI_MODEL?: string;
 }
 
 /** One row of GET /api/:owner/:repo/dg/oplog (snake_case over the wire). */
@@ -115,6 +126,13 @@ export interface Adjudication {
   /** First chars of raw model output, for transparency on the dashboard. */
   raw_excerpt?: string;
   error?: string;
+  /** NEAR AI Cloud provider_tee signature id — fetchable proof the exact
+   * request/response bytes ran inside the model's TEE. */
+  signature_id?: string;
+  /** The TEE signature payload returned by GET /v1/signature/<id>. */
+  tee_signature?: unknown;
+  /** Ed25519 oracle verdict envelope the market contract binds on-chain. */
+  oracle_verdict_sig?: string;
 }
 
 export interface PayoutReceipt {
