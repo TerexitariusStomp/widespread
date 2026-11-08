@@ -27,6 +27,57 @@ export interface Env {
   NEAR_AI_API_KEY?: string;
   NEAR_AI_BASE?: string;
   NEAR_AI_MODEL?: string;
+  // Unified bounty feed — source credentials + watchlists (all optional;
+  // each source degrades independently when unset/unreachable)
+  GITHUB_TOKEN?: string;
+  /** Comma-separated forge watchlist: github:owner/repo, gl:host/o/r,
+   *  forgejo:host/o/r, rad:<rid>, tangled:<repo-did> */
+  FORGE_WATCH?: string;
+  /** Per-source feed toggles: FEED_IMMUNEFI=1 etc. Default-on sources need no flag. */
+  FEED_IMMUNEFI?: string;
+  FEED_ALGORA?: string;
+  FEED_POLAR?: string;
+}
+
+/** Normalized discovery record — one funded work item from any source.
+ * Derived index only; canonical market truth stays on-chain / in KV. */
+export interface FeedRecord {
+  /** Stable dedupe key: `<source>:<sourceId>` e.g. "gh:owner/repo#12". */
+  id: string;
+  source: string;              // near-chain | kv-registry | github | github-thirdparty:<p> | tangled | radicle | forgejo | gitlab | external:<p>
+  forge: string;               // github | gitlab | forgejo | codeberg | tangled | radicle | deltagit | generic | near
+  kind: "bounty" | "task" | "gig";
+  repo?: string;               // owner/repo shorthand when forge-native
+  locator?: string;            // canonical repo locator/URL
+  title: string;
+  spec?: string;
+  amount?: string;
+  currency?: string;
+  est_usd?: number;            // rough USD estimate for sorting; null when unknown
+  escrow: {
+    state: "locked" | "label-only" | "external" | "none";
+    proof?: string;            // e.g. "near:wide-mkt-11561.testnet/7"
+    locked?: string;
+    deadline?: string;
+  };
+  payout?: { rails: string[]; note?: string };
+  verification?: { required: string; spec_hash?: string; acceptance_hash?: string };
+  url: string;                 // canonical source page
+  claim?: { how: string; grammar?: string };
+  execution?: { recommended: string; isolation: string; alternatives: string[]; note: string };
+  trust?: { repo_claims?: number; repo_paid?: number; repo_pass_rate?: number };
+  competition?: { pending_claims?: number; unique_claimants?: number; first_claim_age_h?: number };
+  /** Monetization path for non-Widespread funding — never implies our escrow. */
+  widespread_offer?: string;
+  created_at?: number;
+  updated_at: number;
+}
+
+/** Materialized feed document stored in KV — merged+normalized once per refresh. */
+export interface FeedDoc {
+  generated_at: number;
+  sources: Record<string, { ok: boolean; count: number; error?: string; fetched_at: number }>;
+  records: FeedRecord[];
 }
 
 /** One row of GET /api/:owner/:repo/dg/oplog (snake_case over the wire). */

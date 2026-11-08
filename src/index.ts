@@ -24,7 +24,12 @@ import { hatsOrg, hatsHat, hatsStanceCheck, hatsOpportunities,
          ERC8004_REGISTRIES } from "./hats";
 import { nearView } from "./near";
 import { deleteBounty, listBounties, listRecords, putBounty } from "./store";
-import type { Bounty, Env } from "./types";
+import {
+  feedDoc, queryFeed, feedRss, handleMcp, FEED_MD,
+  listRunners, registerRunner, refreshFeed,
+} from "./feed";
+import { putFeedDoc } from "./feedstore";
+import type { FeedRecord, Bounty, Env } from "./types";
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body, null, 2), {
@@ -308,6 +313,77 @@ export default {
           : null,
         scopeCheck: scope ? { scope, granted: has } : undefined,
       });
+    }
+    // Unified forge bounty feed — normalized cross-forge discovery index.
+    // JSON canonical · Atom RSS · minimal MCP · self-describing doc.
+    if (pathname === "/api/feed" && req.method === "GET") {
+      const doc = await feedDoc(env, ctx);
+      const q = {
+        forge: url.searchParams.get("forge") ?? undefined,
+        source: url.searchParams.get("source") ?? undefined,
+        repo: url.searchParams.get("repo") ?? undefined,
+        q: url.searchParams.get("q") ?? undefined,
+        min_usd: url.searchParams.get("min_usd") ? Number(url.searchParams.get("min_usd")) : undefined,
+        currency: url.searchParams.get("currency") ?? undefined,
+        escrow: url.searchParams.get("escrow") ?? undefined,
+        sort: (url.searchParams.get("sort") as "reward" | "newest" | "trust" | null) ?? undefined,
+        limit: url.searchParams.get("limit") ? Number(url.searchParams.get("limit")) : undefined,
+        cursor: url.searchParams.get("cursor") ?? undefined,
+        max_competition: url.searchParams.get("max_competition") ? Number(url.searchParams.get("max_competition")) : undefined,
+      };
+      const page = queryFeed(doc, q);
+      return json({
+        generated_at: doc.generated_at,
+        total: page.records.length,
+        next_cursor: page.next_cursor,
+        sources: doc.sources,
+        records: page.records,
+      });
+    }
+    if (pathname === "/api/feed.rss" && req.method === "GET") {
+      const doc = await feedDoc(env, ctx);
+      const base = env.PUBLIC_BASE ?? url.origin;
+      return new Response(feedRss(doc, base), {
+        headers: { "content-type": "application/rss+xml; charset=utf-8", "cache-control": "public, max-age=60" },
+      });
+    }
+    if (pathname === "/api/feed.md" && req.method === "GET") {
+      return new Response(FEED_MD, { headers: { "content-type": "text/markdown; charset=utf-8" } });
+    }
+    // MCP endpoint — minimal JSON-RPC: initialize/tools/list/tools/call/ping.
+    if (pathname === "/mcp" && req.method === "POST") {
+      const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+      const res = await handleMcp(env, body, ctx);
+      return res ?? new Response(null, { status: 202 });
+    }
+    // Push indexing — bots/relayers upsert records directly.
+    if (pathname === "/api/feed/index" && req.method === "POST") {
+      if (!isAuthorized(req, env)) return bad("unauthorized", 401);
+      const rec = (await req.json().catch(() => null)) as Partial<FeedRecord> | null;
+      if (!rec?.id || !rec.source || !rec.forge || !rec.title || !rec.url) {
+        return bad("need {id, source, forge, title, url}", 400);
+      }
+      const record: FeedRecord = { ...(rec as FeedRecord), updated_at: Date.now() };
+      const doc = await feedDoc(env, ctx);
+      const idx = doc.records.findIndex((r) => r.id === record.id);
+      if (idx >= 0) doc.records[idx] = record; else doc.records.unshift(record);
+      doc.records.sort((a, b) => (b.est_usd ?? 0) - (a.est_usd ?? 0)).splice(500);
+      await putFeedDoc(env, doc);
+      return json({ ok: true, id: record.id }, 201);
+    }
+    // Client-side execution directory — zero platform compute.
+    if (pathname === "/api/runners" && req.method === "GET") {
+      return json({ runners: await listRunners(env) });
+    }
+    if (pathname === "/api/runners" && req.method === "POST") {
+      const r = (await req.json().catch(() => null)) as Record<string, unknown> | null;
+      if (!r?.kind) return bad("need {kind, isolation, attestation, capabilities}", 400);
+      await registerRunner(env, r);
+      return json({ ok: true }, 201);
+    }
+    // Manual refresh — same opportunistic path, on demand.
+    if (pathname === "/api/feed/refresh" && req.method === "POST") {
+      return json(await refreshFeed(env));
     }
     // Poidh rail — live sponsor-protocol state on Base (read-only).
     if (pathname === "/api/poidh" && req.method === "GET") {
