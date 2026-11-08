@@ -338,7 +338,9 @@ export async function hatsPayoutQuote(
   // nep141-native assets, chain address for omft-wrapped origins.
   const isNearNative = origin.startsWith("nep141:") && !origin.includes(".omft.near");
   const refundTo = args.refundTo
-    ?? (isNearNative ? "wide-mkt-11561.testnet" : null);
+    // widespread.near is a registered NEAR account — contract accounts like
+    // wide-mkt-*.testnet get rejected upstream (observed HTTP 500).
+    ?? (isNearNative ? "widespread.near" : null);
   if (!refundTo)
     return { error: "need refundTo — must be a valid address on the ORIGIN chain (NEAR account for nep141, chain address for omft assets)" };
   const body = {
