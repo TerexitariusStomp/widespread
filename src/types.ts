@@ -94,11 +94,34 @@ export interface MirrorOffer {
   note: string;
 }
 
+/** Auto-generated mirror listing: an external bounty packaged as a
+ * marked-up Widespread market opportunity. Created for EVERY detected
+ * third-party record each refresh — status flips to "funded" when a
+ * market with the matching specHash appears on-chain. */
+export interface MirrorListing {
+  id: string;                    // mirror:<record_id>
+  record_id: string;
+  title: string;
+  url: string;
+  repo?: string;
+  original?: { amount?: string; currency?: string; est_usd?: number };
+  markup_bps: number;
+  marked_up?: { amount?: string; currency?: string; est_usd?: number };
+  spec: string;
+  spec_hash: string;
+  createMarketArgs: Record<string, unknown>;
+  status: "seeking-funder" | "funded";
+  funded_market_id?: string;
+  created_at: number;
+  updated_at: number;
+}
+
 /** Materialized feed document stored in KV — merged+normalized once per refresh. */
 export interface FeedDoc {
   generated_at: number;
   sources: Record<string, { ok: boolean; count: number; error?: string; fetched_at: number }>;
   records: FeedRecord[];
+  mirrors?: MirrorListing[];
 }
 
 /** One row of GET /api/:owner/:repo/dg/oplog (snake_case over the wire). */

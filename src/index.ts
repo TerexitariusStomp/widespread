@@ -395,6 +395,15 @@ export default {
       const u = url.searchParams.get("u") ?? "";
       return u ? json(resolveLocator(u)) : bad("need ?u=<locator>", 400);
     }
+    // Mirror board — every detected third-party bounty auto-listed at a
+    // marked-up price; status flips to funded when escrow lands on-chain.
+    if (pathname === "/api/mirrors" && req.method === "GET") {
+      const doc = await feedDoc(env, ctx);
+      const status = url.searchParams.get("status");
+      let mirrors = doc.mirrors ?? [];
+      if (status) mirrors = mirrors.filter((m) => m.status === status);
+      return json({ total: mirrors.length, mirrors });
+    }
     // Mirror an external/third-party bounty into a marked-up Widespread
     // market — returns createMarket args; platformBps skims our spread
     // on-chain at release.
