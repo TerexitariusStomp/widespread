@@ -3,6 +3,9 @@
 // registers itself, then POSTs /dg/ship with the signed x-dg-* envelope.
 // The forge verifies commits against the repo's upstream .patch endpoint.
 
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+
 const te = new TextEncoder();
 const toHex = (b) =>
   [...new Uint8Array(b instanceof Uint8Array ? b : new Uint8Array(b))]
@@ -11,6 +14,33 @@ const toHex = (b) =>
 const sha256Hex = async (d) => toHex(await crypto.subtle.digest("SHA-256", d));
 
 let cached = null; // {did, pair} — reuse the agent across the session
+
+/**
+ * Hardware-rooted environment proof: tpm2 PCR quote/values when a TPM is
+ * present (vTPM in omarchy-compartment VMs), container fallback markers
+ * otherwise. Best-effort — absence is reported, never faked.
+ */
+export function collectEnvAttestation() {
+  const out = { collected_at: new Date().toISOString(), runtime: "node" };
+  try {
+    const pcrs = execFileSync("tpm2_pcrread", ["sha256:0,1,2,3,4,7"], { timeout: 5000 }).toString();
+    out.tpm2_pcr_values = pcrs.trim();
+    out.tpm = true;
+  } catch {
+    try {
+      const q = execFileSync("tpm2_quote", ["--qualification"], { timeout: 5000 }).toString();
+      out.tpm2_quote = q.trim().slice(0, 8192);
+      out.tpm = true;
+    } catch {
+      out.tpm = false;
+      out.note = "no tpm2 — software seal only";
+    }
+  }
+  try {
+    out.container_id = readFileSync("/proc/self/cgroup", "utf8").trim().slice(0, 200);
+  } catch { /* bare host */ }
+  return out;
+}
 
 async function registerAgent(forgeBase, label) {
   if (cached) return cached;
@@ -49,6 +79,7 @@ export async function shipClaim({
     session_id: sessionId,
     tool,
     commits: commits.map((c) => c.toLowerCase()),
+    env_attestation: collectEnvAttestation(),
     ...extra,
   };
   const bodyBytes = te.encode(JSON.stringify(body));
