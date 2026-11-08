@@ -52,12 +52,27 @@ async function pollNearChain(env: Env): Promise<FeedRecord[]> {
   const acct = env.NEAR_CONTRACT;
   if (!acct) return [];
   const markets = (await nearView(env, acct, "listOpen", {})) as
-    { marketId: string; payer: string; spec: string; amount: string; locked: string; deadline: string; status: string }[] | null;
+    { marketId: string; payer: string; spec: string; specHash?: string; amount: string; locked: string; deadline: string; status: string }[] | null;
   if (!markets) return [];
   const yocto = 1e24;
+  // Competition signal: pending claims per market (bounded — ≤25 view calls)
+  const claimsByMarket = new Map<string, { pending: number; claimants: Set<string> }>();
+  await Promise.all(markets.slice(0, 25).map(async (m) => {
+    const c = await nearView(env, acct, "getClaims", { marketId: m.marketId }) as
+      { claims?: { claimant?: string; forgeUserId?: string; status?: string }[]; pending?: number } | null;
+    const claimants = new Set<string>();
+    let pending = 0;
+    for (const cl of c?.claims ?? []) {
+      if (cl.status && cl.status !== "pending") continue;
+      if (cl.claimant || cl.forgeUserId) claimants.add(String(cl.forgeUserId ?? cl.claimant));
+      pending++;
+    }
+    claimsByMarket.set(m.marketId, { pending: c?.pending ?? pending, claimants });
+  }));
   return markets.map((m) => {
     const near = Number(m.locked) / yocto;
     const repoMatch = m.spec.match(/github\.com\/([\w.-]+\/[\w.-]+)/);
+    const comp = claimsByMarket.get(m.marketId);
     return {
       id: `near:${acct}:${m.marketId}`,
       source: "near-chain", forge: "near", kind: "bounty",
@@ -71,10 +86,14 @@ async function pollNearChain(env: Env): Promise<FeedRecord[]> {
         locked: `${near.toFixed(4)} NEAR`,
         ...(m.deadline ? { deadline: m.deadline } : {}),
       },
-      payout: { rails: ["near", "intents", "paypal"], note: "oracle/payer verdict releases escrow; claimant self-settles" },
-      verification: { required: "dg-ship-1+adjudicator", spec_hash: undefined },
+      payout: { rails: ["near", "intents", "paypal"], note: "verdict names winningClaimId; oracle settles attested claims only" },
+      verification: { required: "attested-real-submission+oracle-verdict", ...(m.specHash ? { spec_hash: m.specHash } : {}) },
       url: `https://testnet.nearblocks.io/address/${acct}`,
-      claim: { how: "shipClaim on-chain via bridge /api/claims (attested real submission)", grammar: "@widespread <amount> <spec>" },
+      claim: { how: "POST /api/claims → shipClaimArgs → shipClaim on-chain (unbounded, free)", grammar: "@widespread <amount> <spec>" },
+      ...(comp && comp.pending > 0 ? { competition: {
+        pending_claims: comp.pending,
+        unique_claimants: comp.claimants.size,
+      } } : {}),
       execution: EXEC_BROWSER,
       updated_at: Date.now(),
     } satisfies FeedRecord;
@@ -742,11 +761,31 @@ widespread_offer?, created_at, updated_at}\`
 
 ## Claiming
 
-Widespread markets: \`@widespread <amount> <spec>\` grammar or on-chain
-\`shipClaim\` via \`POST /api/claims\` (bridge-validated real submissions
-only — forge artifact, author ID, commits, diff, spec-hash all verified
-before chain). External listings: mirror into a market via
-\`POST /api/bounties\` or the original forge's grammar.
+Widespread markets: \`@widespread <amount> <spec>\` grammar or
+\`POST /api/claims\`:
+
+\`\`\`json
+POST /api/claims
+{ "marketId": "7", "forgeRef": "https://github.com/o/r/pull/12",
+  "claimant": "<near-account>", "actor": "<agent-did>" }
+→ { "ok": true, "attested": true,
+    "verification": { "endpoint": "/api/claims/verify", "token": "…" },
+    "shipClaimArgs": { … } }
+\`\`\`
+
+The bridge validates the real submission (market open, forge artifact
+resolves, author = numeric forge ID — GitHub user ID is the anti-sybil
+key, NEAR account is payout-only, non-empty patch fingerprint, spec-hash
+binding) and returns \`shipClaimArgs\` + an HMAC \`attestation\` token.
+Broadcast \`shipClaim\` on the market contract from any NEAR account —
+claims are **unbounded** (no cap, no bond, no deposit). The verdict names
+\`winningClaimId\`; losers stay on-chain as \`outcompeted\` reputation
+records. \`GET /api/claims/verify?token=\` re-checks any attestation;
+oracle verdicts only settle \`attested:true\` claims — direct contract
+calls without a token are ineligible for reward.
+
+External listings: mirror into a market via \`POST /api/bounties\` or
+the original forge's grammar.
 
 ## Execution safety
 

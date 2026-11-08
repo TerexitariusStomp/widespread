@@ -29,6 +29,7 @@ import {
   listRunners, registerRunner, refreshFeed,
 } from "./feed";
 import { putFeedDoc } from "./feedstore";
+import { handleClaimPost, handleClaimVerify } from "./claims";
 import type { FeedRecord, Bounty, Env } from "./types";
 
 const json = (body: unknown, status = 200) =>
@@ -393,6 +394,14 @@ export default {
     if (pathname === "/api/locator" && req.method === "GET") {
       const u = url.searchParams.get("u") ?? "";
       return u ? json(resolveLocator(u)) : bad("need ?u=<locator>", 400);
+    }
+    // Attested real-submission claims — validate forge artifact, return
+    // shipClaim args + HMAC attestation token for on-chain broadcast.
+    if (pathname === "/api/claims" && req.method === "POST") {
+      return handleClaimPost(req, env);
+    }
+    if (pathname === "/api/claims/verify" && req.method === "GET") {
+      return handleClaimVerify(url, env);
     }
     // Kleros dispute seam — binds claimHash+reason as arbitration evidence.
     if (pathname === "/api/dispute" && req.method === "POST") {

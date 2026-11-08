@@ -37,6 +37,8 @@ export interface Env {
   FEED_IMMUNEFI?: string;
   FEED_ALGORA?: string;
   FEED_POLAR?: string;
+  /** HMAC secret for /api/claims attestation tokens (falls back to ADMIN_TOKEN). */
+  ATTEST_SECRET?: string;
 }
 
 /** Normalized discovery record — one funded work item from any source.
