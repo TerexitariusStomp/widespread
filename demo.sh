@@ -44,15 +44,20 @@ docker run --rm --network none --read-only \
   widespread-sandbox:latest -c 'wget -qO- https://example.com 2>&1 | head -2; echo "EXIT:$?"'
 sleep 2
 
-step "5 · The agent's commit exists — signed dg-ship-1 attestation next"
+step "5 · The agent's commit exists — ship it as a signed dg-ship-1 attestation"
 git -C "$RUN/repo" log --oneline -3
 say "→ POST $FORGE/api/$REPO_SLUG/dg/ship (ephemeral Ed25519 agent, x-dg-sig)"
+CLAIM_SHA=$(git -C "$RUN/repo" rev-parse upstream/HEAD 2>/dev/null || git -C "$RUN/repo" rev-parse origin/HEAD)
+SEQ=$(node ../widespread-bridge/scripts/ship-claim.mjs --repo "$REPO_SLUG" \
+  --commits "$CLAIM_SHA" --session "vultr-demo-$(date +%s)" --tool widespread-runner \
+  2>/dev/null | grep -oE '\(seq [0-9]+\)' | grep -oE '[0-9]+')
+say "claim landed at op-log seq $SEQ"
 sleep 3
 
 step "6 · Bridge replays hash chain, recomputes diff, AI adjudicates"
 say "→ POST $BRIDGE/review"
 curl -s -X POST "$BRIDGE/review" -H 'content-type: application/json' \
-  -d "{\"repo\":\"$REPO_SLUG\",\"seq\":0}" | \
+  -d "{\"repo\":\"$REPO_SLUG\",\"seq\":${SEQ:-0}}" | \
   python3 -c "import json,sys; d=json.load(sys.stdin); r=d['records'][0]; print('status:',r['status']); print('chain valid:',r['chain']['valid']); j=r.get('adjudication',{}); print('verdict:',j.get('verdict'),'| confidence:',j.get('confidence')); p=r.get('payout') or {}; print('payout:',p.get('batch_status','—'),'| batch:',p.get('batch_id',''))"
 sleep 4
 
