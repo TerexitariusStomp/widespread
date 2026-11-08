@@ -17,6 +17,9 @@ import { handleBotVerdict, type BotVerdictBody } from "./botverdict";
 import { attestClaim, ecosystem, openDispute } from "./ecosystem";
 import { resolveLocator } from "./locator";
 import { sponsorPage } from "./sponsor";
+import { poidhInfo } from "./poidh";
+import { hatsOrg, hatsHat, hatsStanceCheck, hatsOpportunities } from "./hats";
+import { nearView } from "./near";
 import { deleteBounty, listBounties, listRecords, putBounty } from "./store";
 import type { Bounty, Env } from "./types";
 
@@ -83,30 +86,10 @@ async function handleReview(req: Request, env: Env): Promise<Response> {
  * the state; KV is only a dev fallback when no contract is configured. */
 async function listOnchainMarkets(env: Env): Promise<unknown[] | null> {
   const acct = (env as { NEAR_CONTRACT?: string }).NEAR_CONTRACT;
-  const rpc = (env as { NEAR_RPC_URL?: string }).NEAR_RPC_URL
-    ?? "https://rpc.testnet.near.org";
   if (!acct) return null;
-  const res = await fetch(rpc, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0", id: "wide",
-      method: "query",
-      params: {
-        request_type: "call_function",
-        finality: "final",
-        account_id: acct,
-        method_name: "listOpen",
-        args_base64: btoa("{}"),
-      },
-    }),
-  });
-  const out = await res.json() as { result?: { result?: number[] } };
-  const bytes = out.result?.result;
-  if (!bytes) return null;
-  const markets = JSON.parse(
-    String.fromCharCode(...bytes),
-  ) as { marketId: string; payer: string; spec: string; amount: string; locked: string; deadline: string; status: string }[];
+  const markets = await nearView(env, acct, "listOpen", {}) as
+    { marketId: string; payer: string; spec: string; amount: string; locked: string; deadline: string; status: string }[] | null;
+  if (!markets) return null;
   return markets.map((m) => ({
     marketId: m.marketId, payer: m.payer, spec: m.spec,
     amount: m.amount, locked: m.locked, deadline: m.deadline,
@@ -233,6 +216,57 @@ export default {
     // forges, workers, dispute/proof seams. All env-gated, all optional.
     if (pathname === "/api/ecosystem" && req.method === "GET") {
       return json(await ecosystem(env));
+    }
+    // Foreguild futarchy — live governance proposals on the NEAR contract.
+    if (pathname === "/api/futarchy" && req.method === "GET") {
+      const acct = (env as { FUTARCHY_CONTRACT?: string }).FUTARCHY_CONTRACT;
+      if (!acct) return json({ proposals: [], total: 0,
+        error: "no FUTARCHY_CONTRACT configured" });
+      const proposals = await nearView(env, acct, "listProposals", {})
+        .catch(() => null) as unknown[] | null;
+      return json({ proposals: proposals ?? [], total: proposals?.length ?? 0,
+        contract: acct, source: "chain" });
+    }
+    // Intentional Hats — org charts, stance checks, ranked opportunities.
+    // All contract reads via nearView; writes happen on-chain by wearers.
+    if (pathname === "/api/hats" && req.method === "GET") {
+      const orgId = url.searchParams.get("org")
+        ?? (env as { HATS_ORG?: string }).HATS_ORG ?? "2";
+      return json(await hatsOrg(env, orgId));
+    }
+    if (pathname.startsWith("/api/hats/") && pathname.endsWith("/stance-check") && req.method === "POST") {
+      const hatId = pathname.split("/")[3];
+      const d = (await req.json().catch(() => ({}))) as { spec?: string };
+      if (!d.spec) return bad("need {spec}", 400);
+      return json(await hatsStanceCheck(env, hatId, d.spec));
+    }
+    if (pathname.startsWith("/api/hats/") && pathname.endsWith("/opportunities") && req.method === "GET") {
+      const hatId = pathname.split("/")[3];
+      const markets = (await listOnchainMarkets(env).catch(() => null)) as
+        { marketId: string; spec: string; locked: string }[] | null ?? [];
+      return json(await hatsOpportunities(env, hatId, markets));
+    }
+    if (pathname.startsWith("/api/hats/") && req.method === "GET") {
+      const hatId = pathname.split("/")[3];
+      const hat = await hatsHat(env, hatId);
+      if (!hat || ("error" in hat)) return bad("hat not found", 404);
+      const acct = (env as { HATS_CONTRACT?: string }).HATS_CONTRACT;
+      const scope = url.searchParams.get("scope");
+      const has = scope
+        ? await nearView(env, acct!, "hasScope", { hatId, scope }).catch(() => null)
+        : null;
+      return json({
+        ...hat, contract: acct,
+        foreign: hat.foreign
+          ? { ...hat.foreign, address: null,
+              note: "foreign address derives via v1.signer MPC from the stored path — query the signer contract or /api/hats/:id/foreign-address once wired" }
+          : null,
+        scopeCheck: scope ? { scope, granted: has } : undefined,
+      });
+    }
+    // Poidh rail — live sponsor-protocol state on Base (read-only).
+    if (pathname === "/api/poidh" && req.method === "GET") {
+      return json(await poidhInfo(env).catch((e) => ({ error: String(e) })));
     }
     // Sovereign repo layer — resolve any locator to its verification surface.
     if (pathname === "/api/locator" && req.method === "GET") {
