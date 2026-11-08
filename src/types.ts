@@ -44,6 +44,10 @@ export interface Env {
   CUT_BPS?: string;
   /** NEAR account that receives the platform cut (default: DAO sink). */
   CUT_SINK?: string;
+  /** Ops account that auto-escrows fiat-funded mirrors into NEAR markets.
+   * secretKey = ed25519:<base58> full-access key (NEAR_OPS_SECRET_KEY). */
+  NEAR_OPS_ACCOUNT?: string;
+  NEAR_OPS_SECRET_KEY?: string;
 }
 
 /** Normalized discovery record — one funded work item from any source.

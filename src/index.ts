@@ -30,7 +30,8 @@ import {
 } from "./feed";
 import { putFeedDoc } from "./feedstore";
 import { handleClaimPost, handleClaimVerify } from "./claims";
-import { createFiatOrder, captureFiatOrder } from "./fiat";
+import { createFiatOrder, captureFiatOrder, tryOpsEscrow } from "./fiat";
+import { handleMirrorClaimPost, handleMirrorClaimsList, handleMirrorVerdict, handleMirrorPayout } from "./mirrorclaims";
 import type { FeedRecord, Bounty, Env } from "./types";
 
 const json = (body: unknown, status = 200) =>
@@ -440,7 +441,31 @@ export default {
           `${base}/api/mirrors`, `${base}/api/mirrors`);
       }
       if (!b.order_id) return bad("order_id required", 400);
-      return captureFiatOrder(env, mirrorId, b.order_id);
+      return captureFiatOrder(env, mirrorId, b.order_id, mirror);
+    }
+    // Fiat-mirror claim lifecycle: claims → verdict → PYUSD/USD payout.
+    if (pathname === "/api/mirrors/claims" && req.method === "POST") {
+      return handleMirrorClaimPost(req, env, ctx);
+    }
+    if (pathname === "/api/mirrors/claims" && req.method === "GET") {
+      return handleMirrorClaimsList(url, env, ctx);
+    }
+    if (pathname === "/api/mirrors/verdict" && req.method === "POST") {
+      return handleMirrorVerdict(req, env, ctx);
+    }
+    if (pathname === "/api/mirrors/payout" && req.method === "POST") {
+      return handleMirrorPayout(req, env, ctx);
+    }
+    // Manual ops escrow — front NEAR for any mirror (crypto or fiat path).
+    if (pathname === "/api/mirrors/escrow" && req.method === "POST") {
+      const b = (await req.json().catch(() => ({}))) as Record<string, string>;
+      const mirror = (await feedDoc(env, ctx)).mirrors?.find((m) => m.id === b.mirror_id);
+      if (!mirror) return bad("mirror not found", 404);
+      try {
+        return json({ escrow: await tryOpsEscrow(env, mirror) });
+      } catch (e) {
+        return bad(`escrow failed: ${e instanceof Error ? e.message : e}`, 500);
+      }
     }
     // Mirror an external/third-party bounty into a Widespread market at
     // face value — platformBps is our percent cut at release.

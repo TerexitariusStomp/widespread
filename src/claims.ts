@@ -108,6 +108,12 @@ async function attestationToken(env: Env, payload: Record<string, unknown>): Pro
   return `${body}.${await hmac(secret, body)}`;
 }
 
+/** Attestation for fiat-mirror claims — same HMAC scheme, mirror-scoped
+ * payload so a token can't be replayed against a NEAR market claim. */
+export async function attestationForMirror(env: Env, payload: Record<string, unknown>): Promise<string | null> {
+  return attestationToken(env, { ...payload, scope: "mirror" });
+}
+
 export async function verifyAttestation(env: Env, token: string): Promise<
   { valid: boolean; payload?: Record<string, unknown>; reason?: string }> {
   const secret = env.ATTEST_SECRET ?? env.ADMIN_TOKEN;
@@ -134,6 +140,56 @@ export async function verifyAttestation(env: Env, token: string): Promise<
   }
 }
 
+/** Shared forge-artifact validation — used by both NEAR market claims and
+ * fiat mirror claims. Returns failures[] plus enriched evidence (patch
+ * fingerprint, forge ids) on success. */
+export async function validateForgeSubmission(
+  env: Env,
+  body: { forgeRef: string; forgeUserId?: string; commits?: string[]; evidence?: Record<string, unknown> },
+): Promise<{ failures: string[]; evidence: Record<string, unknown> }> {
+  const failures: string[] = [];
+  const evidence = { ...(body.evidence ?? {}) };
+  const ref = parseForgeRef(body.forgeRef);
+  if (!ref) {
+    return { failures: ["forgeRef must be a github.com owner/repo/(issues|pull)/N or owner/repo#N"], evidence };
+  }
+  const issueRes = await gh<GhIssue>(env, `/repos/${ref.owner}/${ref.repo}/issues/${ref.number}`);
+  const issue = issueRes.data;
+  if (!issue) {
+    failures.push(issueRes.error ?? "forge artifact not found");
+  } else {
+    if (issue.state !== "open" && ref.kind === "issue") failures.push(`issue is ${issue.state}`);
+    const authorId = String(issue.user?.id ?? "");
+    if (body.forgeUserId && body.forgeUserId !== authorId) {
+      failures.push(`forgeUserId mismatch: artifact author is ${authorId} (${issue.user?.login})`);
+    }
+    if (ref.kind === "pr") {
+      const pr = issue as GhPull;
+      const filesRes = await gh<GhFile[]>(env,
+        `/repos/${ref.owner}/${ref.repo}/pulls/${ref.number}/files?per_page=100`);
+      const files = filesRes.data;
+      const fp = files?.length ? await patchFingerprint(files) : null;
+      if (filesRes.error) failures.push(filesRes.error);
+      if (!fp) failures.push("PR has no computable patch (empty or >100-file diff)");
+      else {
+        evidence.patch_fingerprint = fp;
+        evidence.forge = "github";
+        evidence.forgeRef = `https://github.com/${ref.owner}/${ref.repo}/pull/${ref.number}`;
+        evidence.forgeUserId = authorId;
+        evidence.forgeLogin = issue.user?.login;
+        evidence.head_sha = pr.head?.sha;
+      }
+      if (!body.commits?.length && pr.head?.sha) body.commits = [pr.head.sha];
+    } else {
+      evidence.forge = "github";
+      evidence.forgeRef = `https://github.com/${ref.owner}/${ref.repo}/issues/${ref.number}`;
+      evidence.forgeUserId = authorId;
+      evidence.forgeLogin = issue.user?.login;
+    }
+  }
+  return { failures, evidence };
+}
+
 export async function handleClaimPost(req: Request, env: Env): Promise<Response> {
   const body = (await req.json().catch(() => null)) as ClaimBody | null;
   if (!body?.marketId || !body.forgeRef) {
@@ -153,55 +209,21 @@ export async function handleClaimPost(req: Request, env: Env): Promise<Response>
     failures.push("specHash does not match market specHash");
   }
 
-  // 2-4. forge artifact validation
-  const ref = parseForgeRef(body.forgeRef);
-  if (!ref) {
-    return Response.json({ ok: false, error: "forgeRef must be a github.com owner/repo/(issues|pull)/N or owner/repo#N" }, { status: 400 });
-  }
-  const issueRes = await gh<GhIssue>(env, `/repos/${ref.owner}/${ref.repo}/issues/${ref.number}`);
-  const issue = issueRes.data;
-  if (!issue) {
-    failures.push(issueRes.error ?? "forge artifact not found");
-  } else {
-    if (issue.state !== "open" && ref.kind === "issue") failures.push(`issue is ${issue.state}`);
-    // 3. forge-native identity: numeric GitHub user ID, not the login
-    const authorId = String(issue.user?.id ?? "");
-    if (body.forgeUserId && body.forgeUserId !== authorId) {
-      failures.push(`forgeUserId mismatch: artifact author is ${authorId} (${issue.user?.login})`);
-    }
-    if (ref.kind === "pr") {
-      const pr = issue as GhPull;
-      const filesRes = await gh<GhFile[]>(env,
-        `/repos/${ref.owner}/${ref.repo}/pulls/${ref.number}/files?per_page=100`);
-      const files = filesRes.data;
-      const fp = files?.length ? await patchFingerprint(files) : null;
-      if (filesRes.error) failures.push(filesRes.error);
-      if (!fp) failures.push("PR has no computable patch (empty or >100-file diff)");
-      else {
-        const ev = (body.evidence ??= {});
-        ev.patch_fingerprint = fp;
-        ev.forge = "github";
-        ev.forgeRef = `https://github.com/${ref.owner}/${ref.repo}/pull/${ref.number}`;
-        ev.forgeUserId = authorId;
-        ev.forgeLogin = issue.user?.login;
-        ev.head_sha = pr.head?.sha;
-      }
-      if (!body.commits?.length && pr.head?.sha) body.commits = [pr.head.sha];
-    } else {
-      const ev = (body.evidence ??= {});
-      ev.forge = "github";
-      ev.forgeRef = `https://github.com/${ref.owner}/${ref.repo}/issues/${ref.number}`;
-      ev.forgeUserId = authorId;
-      ev.forgeLogin = issue.user?.login;
-    }
-  }
-
-  if (failures.length) {
+  // 2-4. forge artifact validation (shared with fiat mirror claims)
+  const fv = await validateForgeSubmission(env, {
+    forgeRef: body.forgeRef,
+    forgeUserId: body.forgeUserId,
+    commits: body.commits,
+    evidence: body.evidence,
+  });
+  failures.push(...fv.failures);
+  const evidence = fv.evidence;
+  if (fv.failures.length) {
     return Response.json({ ok: false, attested: false, failures }, { status: 422 });
   }
 
   // 5. attestation token + ready-to-broadcast shipClaim args
-  const evidence: Record<string, unknown> = { ...(body.evidence ?? {}), claim_api: "v1" };
+  const fullEvidence: Record<string, unknown> = { ...evidence, claim_api: "v1" };
   const token = await attestationToken(env, {
     marketId: String(body.marketId),
     forgeRef: body.forgeRef,
@@ -209,14 +231,14 @@ export async function handleClaimPost(req: Request, env: Env): Promise<Response>
     patch_fingerprint: evidence.patch_fingerprint,
     specHash: body.specHash ?? market.specHash,
   });
-  if (token) evidence.attestation = token;
+  if (token) fullEvidence.attestation = token;
 
   const shipClaimArgs = {
     marketId: String(body.marketId),
-    claimHash: evidence.patch_fingerprint ?? `sha256:${await sha256Hex(JSON.stringify(evidence))}`,
-    actor: body.actor ?? evidence.forgeLogin ?? "agent",
+    claimHash: fullEvidence.patch_fingerprint ?? `sha256:${await sha256Hex(JSON.stringify(fullEvidence))}`,
+    actor: body.actor ?? fullEvidence.forgeLogin ?? "agent",
     commits: body.commits ?? [],
-    evidence,
+    evidence: fullEvidence,
     claimant: body.claimant ?? "",
     forgeId: "github",
     forgeUserId: String(evidence.forgeUserId ?? ""),

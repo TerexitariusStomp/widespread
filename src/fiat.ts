@@ -11,7 +11,8 @@
 // The custody window is the PayPal balance between capture and conversion —
 // minimized by auto-forwarding once a NEAR ops key is configured.
 
-import type { Env } from "./types";
+import type { Env, MirrorListing } from "./types";
+import { nearFunctionCall, nearPriceUsd } from "./nearops";
 
 const PAYPAL_API = (env: Env) => env.PAYPAL_API_BASE;
 
@@ -108,7 +109,8 @@ export async function createFiatOrder(env: Env, mirrorId: string, amountUsd: str
 
 /** Capture an approved order → mirror becomes fiat-funded. The ops step
  * (treasury NEAR escrow or PayPal-out settlement) keys off this record. */
-export async function captureFiatOrder(env: Env, mirrorId: string, orderId: string): Promise<Response> {
+export async function captureFiatOrder(env: Env, mirrorId: string, orderId: string,
+                                        mirror?: MirrorListing): Promise<Response> {
   const funding = await getFiatFunding(env, mirrorId);
   if (!funding || funding.order_id !== orderId) {
     return Response.json({ ok: false, error: "unknown order for this mirror" }, { status: 404 });
@@ -128,13 +130,49 @@ export async function captureFiatOrder(env: Env, mirrorId: string, orderId: stri
     funding.capture_id = captureId || undefined;
     funding.captured_at = Date.now();
     await env.CLAIMS.put(fiatKey(mirrorId), JSON.stringify(funding));
+    // Auto-escrow: convert the captured USD to NEAR at the Intents price
+    // and create the market from the ops account — the fiat→NEAR on-ramp.
+    const escrow = mirror
+      ? await tryOpsEscrow(env, mirror).catch((e) => ({ error: String(e) }))
+      : { skipped: "no mirror record" };
     return Response.json({
-      ok: true, funding,
-      next: "Fiat captured. Ops: front NEAR escrow via createMarket(platformBps=<cut_bps> — the cut is taken on-chain at release) OR PayPal-out the post-cut amount to the winner on verdict. Agents claim via POST /api/claims once the market is live.",
+      ok: true, funding, escrow,
+      next: "Market live on-chain — agents discover it via /api/feed and claim via POST /api/claims.",
     });
   }
   funding.status = status === "COMPLETED" ? "captured" : "approved";
   if (funding.status === "captured") funding.captured_at = Date.now();
   await env.CLAIMS.put(fiatKey(mirrorId), JSON.stringify(funding));
   return Response.json({ ok: false, error: `order status ${status} — not capturable`, funding }, { status: 409 });
+}
+
+/** Ops-account escrow: convert the mirror's USD face value to NEAR at the
+ * Intents price and broadcast createMarket from NEAR_OPS_ACCOUNT. This is
+ * the fiat→NEAR on-ramp — PayPal USD in, contract escrow out, platform
+ * cut taken on-chain at release. Returns tx hash or a skip reason. */
+export async function tryOpsEscrow(env: Env, mirror: MirrorListing): Promise<unknown> {
+  const acct = env.NEAR_OPS_ACCOUNT, key = env.NEAR_OPS_SECRET_KEY, contract = env.NEAR_CONTRACT;
+  if (!acct || !key || !contract) return { skipped: "NEAR_OPS_ACCOUNT/SECRET_KEY or NEAR_CONTRACT not configured" };
+  const usd = mirror.original?.est_usd;
+  if (!usd) return { skipped: "mirror has no USD price" };
+  const price = await nearPriceUsd();
+  if (!price) return { skipped: "NEAR price unavailable (intents /tokens)" };
+  const nearAmount = usd / price;
+  if (nearAmount <= 0.001) return { skipped: `converted ${nearAmount.toFixed(4)} NEAR below minimum` };
+  const deposit = BigInt(Math.round(nearAmount * 1e24));
+  const args = mirror.createMarketArgs as Record<string, unknown>;
+  const res = await nearFunctionCall(env,
+    { accountId: acct, secretKey: key }, contract,
+    {
+      methodName: "createMarket",
+      args: {
+        specHash: args.specHash, spec: args.spec,
+        deadline: args.deadline, acceptanceRule: args.acceptanceRule,
+        platformBps: args.platformBps, platformTo: args.platformTo,
+        payToHat: null, claimTtlNs: null, acceptanceHash: null,
+      },
+      gas: 50_000_000_000_000n, deposit,
+    });
+  return { escrowed: true, near_amount: nearAmount.toFixed(4), usd, near_price: price,
+           txHash: res.txHash, status: res.status };
 }
