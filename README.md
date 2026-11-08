@@ -12,7 +12,8 @@ Permissionless verified-work market on NEAR — `widespread` settlement leg.
 
 ```bash
 npm i
-npm run build          # → build/contract.js (WASM via near-sdk-js)
+npm i            # needs pnpm or allow postinstall — near-sdk-js pulls QJSC+clang
+npm run build      # → build/contract.wasm (SDK toolchain: rollup→QJSC→clang)
 near deploy <you>.testnet build/contract.js
 ```
 
