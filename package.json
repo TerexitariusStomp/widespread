@@ -3,14 +3,19 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Widespread on NEAR \u2014 permissionless verified-work market: payer locks FT escrow, attested verdict releases, contributor self-settles",
+  "description": "Widespread on NEAR — permissionless verified-work market: payer locks FT escrow, attested verdict releases, contributor self-settles",
   "scripts": {
     "build": "node node_modules/near-sdk-js/lib/cli/cli.js build src/contract.js build/contract.wasm",
     "validate": "node node_modules/near-sdk-js/lib/cli/cli.js validateContract src/contract.js",
     "demo": "node src/demo.js"
   },
   "dependencies": {
-    "near-sdk-js": "^2.0.0",
-    "esbuild": "^0.24.0"
+    "esbuild": "^0.24.0",
+    "near-api-js": "^7.4.0",
+    "near-sdk-js": "^2.0.0"
+  },
+  "allowScripts": {
+    "near-sdk-js": true,
+    "esbuild": true
   }
 }
