@@ -97,19 +97,39 @@ export async function nearFunctionCall(
     "monotonic",
   );
   const { signedTransaction } = await signer.signTransaction(tx);
-  // wait_until FINAL long-polls past public gateway limits (dRPC 408s);
-  // EXECUTED_OPTIMISTIC returns the receipts outcome as soon as the tx
-  // executes — all the reconciler needs, without a held connection.
-  const res = (await rpc.sendTransactionUntil(
-    signedTransaction, "EXECUTED_OPTIMISTIC",
-  )) as unknown as {
-    transaction?: { hash?: string };
+  // Public gateways 408/timeout on server-side long polls (send_tx
+  // wait_until FINAL/EXECUTED), so broadcast async and poll tx status
+  // ourselves with wait_until NONE. viewTransactionStatus can transiently
+  // return UNKNOWN_TRANSACTION right after broadcast — retry through it.
+  // send_tx wait_until NONE returns only {"final_execution_status":"NONE"}
+  // — no hash — so compute the tx hash locally: base58(SHA-256(borsh(tx))).
+  const txBytes = signedTransaction.transaction.encode();
+  const hashBytes = new Uint8Array(await crypto.subtle.digest("SHA-256", txBytes));
+  const txHash = base58.encode(hashBytes);
+  await rpc.sendTransactionAsync(signedTransaction);
+  interface TxStatusResponse {
     receipts_outcome?: { outcome?: { status?: unknown } }[];
     status?: unknown;
-  };
+  }
+  const deadline = Date.now() + 30_000;
+  let res: TxStatusResponse | null = null;
+  while (Date.now() < deadline) {
+    try {
+      res = (await rpc.viewTransactionStatusWithReceipts({
+        txHash,
+        accountId: ops.accountId,
+        waitUntil: "NONE",
+      })) as unknown as TxStatusResponse;
+    } catch {
+      res = null; // UNKNOWN_TRANSACTION — not yet visible; keep polling
+    }
+    const st = res?.status;
+    if (st !== "NotStarted" && st !== "Started" && st !== undefined) break;
+    await new Promise((r) => setTimeout(r, 1_000));
+  }
   const status =
-    res.receipts_outcome?.map((r) => r?.outcome?.status ?? r) ?? res.status ?? res;
-  return { txHash: res.transaction?.hash ?? "", status };
+    res?.receipts_outcome?.map((r) => r?.outcome?.status ?? r) ?? res?.status ?? res;
+  return { txHash, status };
 }
 
 /** Read-only contract call — returns the JSON-parsed result (null when the
