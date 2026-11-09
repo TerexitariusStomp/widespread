@@ -5,6 +5,13 @@
   "type": "module",
   "description": "GitHub App — @widespread mentions, merge=accept, payout receipts in repo history",
   "main": "index.js",
-  "scripts": { "test": "node --test test/" },
-  "dependencies": { "probot": "^13.0.0" }
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "probot": "^13.0.0"
+  },
+  "devDependencies": {
+    "@octokit/rest": "^22.0.1"
+  }
 }
