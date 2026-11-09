@@ -114,8 +114,8 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "delta-git",
-      "database_id": "72f2335d-7f97-415e-82b7-12cf8e80a1a5",
+      "database_name": "git-on-cloudflare",
+      "database_id": "b1300dc4-8177-4bba-8155-7798ccbfca24",
       "migrations_dir": "drizzle/d1"
     }
   ],
