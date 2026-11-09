@@ -15,6 +15,7 @@ import type { Env, MirrorListing } from "./types";
 import { getFeedDoc } from "./feedstore";
 import { validateForgeSubmission, attestationForMirror } from "./claims";
 import { GH_API, ghHeaders, sha256Hex } from "./forge";
+import { kv } from "./db";
 
 const MIRROR_SCAN_LIMIT = 10;
 const PR_SCAN_LIMIT = 15;
@@ -34,7 +35,7 @@ interface TimelineEvent {
 
 async function isFunded(env: Env, mirror: MirrorListing): Promise<boolean> {
   if (mirror.status === "funded" && mirror.funded_market_id) return true;
-  const f = await env.CLAIMS.get(`fiatfund:${mirror.id}`).then((v) => v ? JSON.parse(v) : null);
+  const f = await kv(env).get(`fiatfund:${mirror.id}`).then((v) => v ? JSON.parse(v) : null);
   return f?.status === "captured";
 }
 
@@ -80,7 +81,7 @@ export async function scanMirrorSubmissions(env: Env): Promise<{ scanned: number
       // We don't know the fingerprint until validation, so dedupe on a
       // per-PR marker key instead.
       const marker = `mclaimpr:${mirror.id}:${prNum}`;
-      if (await env.CLAIMS.get(marker)) continue;
+      if (await kv(env).get(marker)) continue;
       prChecks++;
 
       const fv = await validateForgeSubmission(env, { forgeRef });
@@ -89,7 +90,7 @@ export async function scanMirrorSubmissions(env: Env): Promise<{ scanned: number
         // rate limit on the same broken PR every scan. Transient errors
         // (rate limit text) still get retried next cycle? Keep it simple:
         // mark seen; a fixed PR produces a different fingerprint anyway.
-        await env.CLAIMS.put(marker, JSON.stringify({ at: Date.now(), failures: fv.failures }));
+        await kv(env).put(marker, JSON.stringify({ at: Date.now(), failures: fv.failures }));
         continue;
       }
       const evidence: Record<string, unknown> = {
@@ -99,7 +100,7 @@ export async function scanMirrorSubmissions(env: Env): Promise<{ scanned: number
       const fp = String(evidence.patch_fingerprint ?? "");
       const claimHash = fp || `sha256:${await sha256Hex(JSON.stringify(evidence))}`;
       const key = claimKey(mirror.id, claimHash);
-      if (await env.CLAIMS.get(key)) { await env.CLAIMS.put(marker, "1"); continue; }
+      if (await kv(env).get(key)) { await kv(env).put(marker, "1"); continue; }
 
       const token = await attestationForMirror(env, {
         mirror_id: mirror.id, forgeRef,
@@ -123,8 +124,8 @@ export async function scanMirrorSubmissions(env: Env): Promise<{ scanned: number
         created_at: Date.now(),
         status: "pending",
       };
-      await env.CLAIMS.put(key, JSON.stringify(claim));
-      await env.CLAIMS.put(marker, "1");
+      await kv(env).put(key, JSON.stringify(claim));
+      await kv(env).put(marker, "1");
       filed++;
     }
   }

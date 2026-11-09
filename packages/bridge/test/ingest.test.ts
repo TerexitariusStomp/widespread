@@ -14,6 +14,7 @@ import {
 import { ghHeaders, GH_API } from "../src/forge";
 import type { Env } from "../src/types";
 import type { MirrorListing } from "../src/types";
+import { kv } from "../src/db";
 
 const env = () => realEnv();
 
@@ -69,7 +70,7 @@ async function liveFixture(opts: { fund?: boolean } = {}): Promise<{
   mirror.id = `mirror:ingest-test:${stamp}`; // unique KV namespace per run
   await seedFeedDoc(e, [], [mirror]);
   if (opts.fund !== false) {
-    await e.CLAIMS.put(`fiatfund:${mirror.id}`, JSON.stringify({
+    await kv(e).put(`fiatfund:${mirror.id}`, JSON.stringify({
       mirror_id: mirror.id, order_id: `O-${stamp}`, amount: "10",
       currency: "USD", status: "captured", created_at: Date.now(),
     }));
@@ -82,9 +83,9 @@ async function filedClaims(mirrorId: string) {
   const out: Record<string, unknown>[] = [];
   let cursor: string | undefined;
   do {
-    const page = await e.CLAIMS.list({ prefix: `mclaim:${mirrorId}:`, cursor, limit: 100 });
+    const page = await kv(e).list({ prefix: `mclaim:${mirrorId}:`, cursor, limit: 100 });
     for (const k of page.keys) {
-      const v = await e.CLAIMS.get(k.name);
+      const v = await kv(e).get(k.name);
       if (v) out.push(JSON.parse(v) as Record<string, unknown>);
     }
     cursor = page.list_complete ? undefined : page.cursor;

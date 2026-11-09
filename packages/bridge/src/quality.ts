@@ -15,6 +15,7 @@
 // get quality undefined, never a fabricated 0.
 
 import type { Env, FeedRecord } from "./types";
+import { kv } from "./db";
 
 const INDEX_KEY = "quality/index.json";
 const EMBED_INDEX_KEY = "quality/embeds.json";
@@ -253,9 +254,9 @@ async function repoMeta(env: Env, forge: string, repo: string): Promise<RepoMeta
  * so coverage scales with traffic — no cron, no caps on the repo set.
  */
 export async function fillQuality(env: Env): Promise<{ computed: number; indexed: number }> {
-  const last = Number(await env.CLAIMS.get(LASTFILL_KEY).catch(() => null));
+  const last = Number(await kv(env).get(LASTFILL_KEY).catch(() => null));
   if (last && Date.now() - last < FILL_GATE_MS) return { computed: 0, indexed: 0 };
-  await env.CLAIMS.put(LASTFILL_KEY, String(Date.now()), { expirationTtl: 3600 });
+  await kv(env).put(LASTFILL_KEY, String(Date.now()), { expirationTtl: 3600 });
 
   const { getFeedDoc } = await import("./feedstore");
   const doc = await getFeedDoc(env);

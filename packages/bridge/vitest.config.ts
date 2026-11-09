@@ -134,6 +134,7 @@ export default defineConfig({
   ],
   test: {
     include: ["test/**/*.test.ts"],
+    setupFiles: ["test/setup.ts"],
     testTimeout: 60000,
     hookTimeout: 60000,
     // Files share one real KV namespace (singleWorker); serialize them so

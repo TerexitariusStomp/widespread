@@ -7,6 +7,7 @@ import { oracleEnv, signVerdict } from "./oracle";
 import { sendPayout } from "./payouts";
 import { writebackReceipt } from "./writeback";
 import type { Env, PayoutReceipt } from "./types";
+import { kv } from "./db";
 
 export interface BotVerdictBody {
   repo?: string;
@@ -50,7 +51,7 @@ export async function handleBotVerdict(env: Env, body: BotVerdictBody): Promise<
   }
 
   // Idempotent: same market + head → return the stored verdict, never re-pay.
-  const prior = await env.CLAIMS.get<BotVerdictRecord>(verdictKey(repo, issue), "json").catch(() => null);
+  const prior = await kv(env).get<BotVerdictRecord>(verdictKey(repo, issue), "json").catch(() => null);
   if (prior && prior.head_sha === headSha && prior.verdict === verdict) {
     return Response.json({ status: prior.payout?.batch_id ? "accepted_paid" : "duplicate", record: prior });
   }
@@ -116,7 +117,7 @@ export async function handleBotVerdict(env: Env, body: BotVerdictBody): Promise<
     writeback,
     reviewed_at: Date.now(),
   };
-  await env.CLAIMS.put(verdictKey(repo, issue), JSON.stringify(record));
+  await kv(env).put(verdictKey(repo, issue), JSON.stringify(record));
 
   return Response.json({
     status: verdict === "reject" ? "rejected" : payout?.batch_id ? "accepted_paid" : "accepted_unpaid",

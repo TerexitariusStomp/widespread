@@ -9,6 +9,7 @@ import { createFiatOrder, captureFiatOrder, tryOpsEscrow } from "../fiat";
 import { handleMirrorClaimPost, handleMirrorClaimsList, handleMirrorVerdict, handleMirrorPayout } from "../mirrorclaims";
 import type { Env } from "../types";
 import { bad, execCtx, json } from "./shared";
+import { kv } from "../db";
 
 export function mirrorRoutes() {
   const app = new Hono<{ Bindings: Env }>();
@@ -29,10 +30,10 @@ export function mirrorRoutes() {
     let mirrors = doc.mirrors ?? [];
     // Overlay fiat pay-in state — funding records live in KV, mirrors
     // are rebuilt each refresh so state can't live on the listing.
-    const fiatKeys = await c.env.CLAIMS.list({ prefix: "fiatfund:", limit: 100 }).catch(() => null);
+    const fiatKeys = await kv(c.env).list({ prefix: "fiatfund:", limit: 100 }).catch(() => null);
     const fiatByMirror = new Map<string, { status: string; amount: string; payer_email?: string }>();
     for (const k of fiatKeys?.keys ?? []) {
-      const f = await c.env.CLAIMS.get<{ mirror_id: string; status: string; amount: string; payer_email?: string }>(k.name, "json").catch(() => null);
+      const f = await kv(c.env).get<{ mirror_id: string; status: string; amount: string; payer_email?: string }>(k.name, "json").catch(() => null);
       if (f?.status === "captured") fiatByMirror.set(f.mirror_id, f);
     }
     mirrors = mirrors.map((m) => {

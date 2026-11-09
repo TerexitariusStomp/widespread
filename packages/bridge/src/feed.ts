@@ -20,6 +20,7 @@ import {
   putSourceStamp, releaseFeedLock, FEED_TTL_MS, type SourceStamp,
 } from "./feedstore";
 import type { Env, FeedDoc, FeedRecord, MirrorListing, MirrorOffer } from "./types";
+import { kv } from "./db";
 
 const UA = { "user-agent": "widespread-feed/1.0", accept: "application/json" };
 const FETCH_TIMEOUT_MS = 8000;
@@ -1125,14 +1126,14 @@ const RUNNERS = [
 ] as const;
 
 export async function listRunners(env: Env): Promise<unknown[]> {
-  const custom = await env.CLAIMS.get<unknown[]>("feed:runners", "json").catch(() => null);
+  const custom = await kv(env).get<unknown[]>("feed:runners", "json").catch(() => null);
   return [...RUNNERS, ...(custom ?? [])];
 }
 
 export async function registerRunner(env: Env, runner: Record<string, unknown>): Promise<void> {
-  const list = (await env.CLAIMS.get<unknown[]>("feed:runners", "json").catch(() => null)) ?? [];
+  const list = (await kv(env).get<unknown[]>("feed:runners", "json").catch(() => null)) ?? [];
   list.push({ ...runner, registered_at: Date.now() });
-  await env.CLAIMS.put("feed:runners", JSON.stringify(list.slice(-100)));
+  await kv(env).put("feed:runners", JSON.stringify(list.slice(-100)));
 }
 
 // ---------------------------------------------------------------- feed.md

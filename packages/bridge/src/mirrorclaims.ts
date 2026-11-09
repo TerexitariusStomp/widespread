@@ -20,6 +20,7 @@ import { feedDoc } from "./feed";
 import { sendPayout } from "./payouts";
 import { resolvePayout } from "./routes/payouts";
 import { bumpFunderRep, repIndex, spamLikely, claimRank, writeVerdictRep } from "./rep";
+import { kv } from "./db";
 
 const claimKey = (mirrorId: string, hash: string) => `mclaim:${mirrorId}:${hash}`;
 const claimsPrefix = (mirrorId: string) => `mclaim:${mirrorId}:`;
@@ -34,9 +35,9 @@ async function listClaims(env: Env, mirrorId: string): Promise<Record<string, un
   const out: Record<string, unknown>[] = [];
   let cursor: string | undefined;
   do {
-    const page = await env.CLAIMS.list({ prefix: claimsPrefix(mirrorId), cursor, limit: 100 });
+    const page = await kv(env).list({ prefix: claimsPrefix(mirrorId), cursor, limit: 100 });
     for (const k of page.keys) {
-      const v = await env.CLAIMS.get(k.name);
+      const v = await kv(env).get(k.name);
       if (v) out.push(JSON.parse(v) as Record<string, unknown>);
     }
     cursor = page.list_complete ? undefined : page.cursor;
@@ -56,7 +57,7 @@ export async function handleMirrorClaimPost(req: Request, env: Env, ctx?: Execut
   if (!mirror) return Response.json({ ok: false, error: "mirror not found" }, { status: 404 });
 
   // Fiat mirrors must be funded before claims count — no escrow, no work.
-  const funding = await env.CLAIMS.get(`fiatfund:${mirrorId}`).then((v) => v ? JSON.parse(v) : null);
+  const funding = await kv(env).get(`fiatfund:${mirrorId}`).then((v) => v ? JSON.parse(v) : null);
   if (funding?.status !== "captured") {
     return Response.json({
       ok: false,
@@ -97,7 +98,7 @@ export async function handleMirrorClaimPost(req: Request, env: Env, ctx?: Execut
     created_at: Date.now(),
     status: "pending",
   };
-  await env.CLAIMS.put(claimKey(mirrorId, claimHash), JSON.stringify(claim));
+  await kv(env).put(claimKey(mirrorId, claimHash), JSON.stringify(claim));
 
   return Response.json({
     ok: true, attested: !!token, claim,
@@ -141,12 +142,12 @@ export async function handleMirrorVerdict(req: Request, env: Env, ctx?: Executio
   // final. The old check looked for status==="settled" which is never
   // written — a second verdict could overwrite the winner and re-open
   // the payout path for a double-spend.
-  const prior = await env.CLAIMS.get(settleKey(mirrorId)).then((v) => v ? JSON.parse(v) : null);
+  const prior = await kv(env).get(settleKey(mirrorId)).then((v) => v ? JSON.parse(v) : null);
   if (prior) {
     return Response.json({ ok: true, status: "already_decided", settlement: prior });
   }
 
-  const claim = await env.CLAIMS.get(claimKey(mirrorId, claimHash)).then((v) => v ? JSON.parse(v) : null);
+  const claim = await kv(env).get(claimKey(mirrorId, claimHash)).then((v) => v ? JSON.parse(v) : null);
   if (!claim) return Response.json({ ok: false, error: "claim not found" }, { status: 404 });
   if (!claim.attested) {
     return Response.json({ ok: false, error: "claim is unattested — ineligible for verdict" }, { status: 409 });
@@ -182,9 +183,9 @@ export async function handleMirrorVerdict(req: Request, env: Env, ctx?: Executio
     decided_at: Date.now(),
     status: accept ? "won" : "rejected",
   };
-  await env.CLAIMS.put(settleKey(mirrorId), JSON.stringify(settlement));
+  await kv(env).put(settleKey(mirrorId), JSON.stringify(settlement));
   claim.status = accept ? "won" : "rejected";
-  await env.CLAIMS.put(claimKey(mirrorId, claimHash), JSON.stringify(claim));
+  await kv(env).put(claimKey(mirrorId, claimHash), JSON.stringify(claim));
   // Contributor rep — reject-heavy identities flag spam-likely for payers.
   if (claim.forgeUserId) {
     await writeVerdictRep(env, claim.forgeUserId, accept ? "win" : "reject").catch(() => undefined);
@@ -198,7 +199,7 @@ export async function handleMirrorPayout(req: Request, env: Env, ctx?: Execution
   const body = (await req.json().catch(() => null)) as Record<string, unknown> | null;
   const mirrorId = String(body?.mirror_id ?? "");
   if (!mirrorId) return Response.json({ ok: false, error: "mirror_id required" }, { status: 400 });
-  const settlement = await env.CLAIMS.get(settleKey(mirrorId)).then((v) => v ? JSON.parse(v) : null);
+  const settlement = await kv(env).get(settleKey(mirrorId)).then((v) => v ? JSON.parse(v) : null);
   if (!settlement || settlement.status !== "won") {
     return Response.json({ ok: false, error: "no winning settlement for this mirror" }, { status: 409 });
   }
@@ -214,7 +215,7 @@ export async function handleMirrorPayout(req: Request, env: Env, ctx?: Execution
     return Response.json({ ok: true, status: "payout_in_progress", settlement });
   }
   settlement.payout = { status: "sending", attempted_at: Date.now() };
-  await env.CLAIMS.put(settleKey(mirrorId), JSON.stringify(settlement));
+  await kv(env).put(settleKey(mirrorId), JSON.stringify(settlement));
 
   try {
     // USD rail: PayPal Payouts to the winner's PayPal email — PayPal is the
@@ -226,10 +227,10 @@ export async function handleMirrorPayout(req: Request, env: Env, ctx?: Execution
         currency: "USD", note: `Widespread mirror bounty ${mirrorId} — verified winning claim`,
       });
       settlement.payout = { rail: "paypal-payouts", ...receipt };
-      await env.CLAIMS.put(settleKey(mirrorId), JSON.stringify(settlement));
+      await kv(env).put(settleKey(mirrorId), JSON.stringify(settlement));
       // Funder rep — pays out. Wash guard: don't credit a funder who paid
       // their own claim (payer email == winner's payout email).
-      const funding = await env.CLAIMS.get(`fiatfund:${mirrorId}`).then((v) => v ? JSON.parse(v) : null).catch(() => null);
+      const funding = await kv(env).get(`fiatfund:${mirrorId}`).then((v) => v ? JSON.parse(v) : null).catch(() => null);
       const payer = funding?.payer_email;
       if (payer && payer.toLowerCase() !== settlement.paypal_usd.to?.toLowerCase()) {
         await bumpFunderRep(env, payer, "paid").catch(() => undefined);
@@ -242,7 +243,7 @@ export async function handleMirrorPayout(req: Request, env: Env, ctx?: Execution
     // A thrown rail call must not leave the settlement stuck in "sending".
     settlement.payout = { status: "failed",
       error: e instanceof Error ? e.message : String(e) };
-    await env.CLAIMS.put(settleKey(mirrorId), JSON.stringify(settlement));
+    await kv(env).put(settleKey(mirrorId), JSON.stringify(settlement));
     return Response.json({ ok: false, error: settlement.payout.error, settlement }, { status: 500 });
   }
 }

@@ -4,6 +4,7 @@
 // All adapters are thin: existing public APIs/OSS clients, no custody.
 
 import type { Env } from "./types";
+import { kv } from "./db";
 
 /* ---------- Sigstore / Rekor — append-only attestation of ship claims ---- */
 
@@ -80,7 +81,7 @@ export async function openDispute(
     "SHA-256", new TextEncoder().encode(`${opts.repo}|${opts.marketId}|${opts.claimHash}|${opts.reason}`),
   ).then((b) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, "0")).join(""));
   const disputeId = `wide-${opts.repo.replace(/\//g, "-")}-${opts.marketId}-${Date.now().toString(36)}`;
-  await env.CLAIMS.put(`dispute:${disputeId}`, JSON.stringify({
+  await kv(env).put(`dispute:${disputeId}`, JSON.stringify({
     ...opts, court, evidenceHash, opened_at: Date.now(),
     status: "open", note: "arbitrate via kleros court contracts — evidenceHash binds claim+reason",
   }));

@@ -38,6 +38,19 @@
       "id": "8b4e482c9fe045da900792b76fbbc846"
     }
   ],
+  // D1 claim/settlement store — kv() in src/db.ts prefers DB, falls back
+  // to CLAIMS so a deploy without this binding keeps working. Before
+  // production deploy: `wrangler d1 create widespread-bridge-db` and put
+  // the returned database_id here (placeholder works for local dev/tests
+  // — miniflare auto-creates it in memory).
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "widespread-bridge-db",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
   "ai": {
     "binding": "AI",
     "remote": true

@@ -15,6 +15,7 @@ import {
   realEnv, createIssue, createPr, seedFeedDoc, sandboxMirror, SANDBOX,
 } from "./helpers";
 import { ghHeaders, GH_API } from "../src/forge";
+import { kv } from "../src/db";
 
 const stamp = Date.now().toString(36);
 const env = () => realEnv();
@@ -66,7 +67,7 @@ async function liveMirror(opts: { fundStatus?: string } = {}): Promise<{
   mirror.claimant_share = { est_usd: 90 };
   await seedFeedDoc(e, [], [mirror]);
   const status = opts.fundStatus ?? "captured";
-  await e.CLAIMS.put(`fiatfund:${mirror.id}`, JSON.stringify({
+  await kv(e).put(`fiatfund:${mirror.id}`, JSON.stringify({
     mirror_id: mirror.id, order_id: `O-${stamp}`, amount: "100",
     currency: "USD", status, created_at: Date.now(),
   }));
@@ -163,7 +164,7 @@ describe("handleMirrorVerdict", () => {
     const { mirrorId } = await liveMirror();
     // Plant an unattested claim directly in real KV — a state the claim
     // endpoint can never produce, exercising the guard honestly.
-    await env().CLAIMS.put(`mclaim:${mirrorId}:h1`, JSON.stringify({
+    await kv(env()).put(`mclaim:${mirrorId}:h1`, JSON.stringify({
       mirror_id: mirrorId, claim_hash: "h1", attested: false, status: "pending",
     }));
     const res = await handleMirrorVerdict(post("/api/mirrors/verdict", {

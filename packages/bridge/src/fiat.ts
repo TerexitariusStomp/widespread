@@ -15,6 +15,7 @@ import type { Env, MirrorListing } from "./types";
 import { nearFunctionCall, nearPriceUsd, nearViewCall } from "./nearops";
 import { paypalAccessToken, paypalApi } from "./paypal";
 import { bumpFunderRep } from "./rep";
+import { kv } from "./db";
 
 
 async function pp(env: Env, method: string, path: string, body?: unknown): Promise<Record<string, unknown>> {
@@ -48,7 +49,7 @@ export interface FiatFunding {
 const fiatKey = (mirrorId: string) => `fiatfund:${mirrorId}`;
 
 export async function getFiatFunding(env: Env, mirrorId: string): Promise<FiatFunding | null> {
-  return env.CLAIMS.get<FiatFunding>(fiatKey(mirrorId), "json");
+  return kv(env).get<FiatFunding>(fiatKey(mirrorId), "json");
 }
 
 /** Create a PayPal Checkout order for the mirror's face-value USD price.
@@ -85,7 +86,7 @@ export async function createFiatOrder(env: Env, mirrorId: string, amountUsd: str
     mirror_id: mirrorId, order_id: id, amount: amountUsd, currency: "USD",
     status: "created", created_at: Date.now(),
   };
-  await env.CLAIMS.put(fiatKey(mirrorId), JSON.stringify(funding));
+  await kv(env).put(fiatKey(mirrorId), JSON.stringify(funding));
   return Response.json({ ok: true, order_id: id, approve_url: approve, funding }, { status: 201 });
 }
 
@@ -111,7 +112,7 @@ export async function captureFiatOrder(env: Env, mirrorId: string, orderId: stri
     funding.payer_email = payer;
     funding.capture_id = captureId || undefined;
     funding.captured_at = Date.now();
-    await env.CLAIMS.put(fiatKey(mirrorId), JSON.stringify(funding));
+    await kv(env).put(fiatKey(mirrorId), JSON.stringify(funding));
     // Funder rep: they put real money in.
     await bumpFunderRep(env, payer, "funded").catch(() => undefined);
     // Auto-escrow: convert the captured USD to NEAR at the Intents price
@@ -126,7 +127,7 @@ export async function captureFiatOrder(env: Env, mirrorId: string, orderId: stri
   }
   funding.status = status === "COMPLETED" ? "captured" : "approved";
   if (funding.status === "captured") funding.captured_at = Date.now();
-  await env.CLAIMS.put(fiatKey(mirrorId), JSON.stringify(funding));
+  await kv(env).put(fiatKey(mirrorId), JSON.stringify(funding));
   return Response.json({ ok: false, error: `order status ${status} — not capturable`, funding }, { status: 409 });
 }
 
@@ -151,12 +152,12 @@ const escrowKey = (mirrorId: string) => `escrowstate:${mirrorId}`;
 const PENDING_RETRY_MS = 10 * 60 * 1000;
 
 async function getEscrowState(env: Env, mirrorId: string): Promise<EscrowState | null> {
-  return env.CLAIMS.get<EscrowState>(escrowKey(mirrorId), "json");
+  return kv(env).get<EscrowState>(escrowKey(mirrorId), "json");
 }
 
 async function putEscrowState(env: Env, s: EscrowState): Promise<void> {
   s.updated_at = Date.now();
-  await env.CLAIMS.put(escrowKey(s.mirror_id), JSON.stringify(s));
+  await kv(env).put(escrowKey(s.mirror_id), JSON.stringify(s));
 }
 
 /** Locate the market this mirror's specHash created, if any. listAll is

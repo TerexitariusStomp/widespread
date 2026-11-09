@@ -10,6 +10,7 @@ import {
   escrowPill, pill, bountyHref, trustLine, competitionLine, cardAmount,
 } from "./format";
 import { verifyAttestation } from "../claims";
+import { kv } from "../db";
 
 // ------------------------------------------------------------- shared bits
 
@@ -332,9 +333,9 @@ ${record?.claim?.how ? "" : ""}`;
 // ------------------------------------------------------------- fund status
 
 export async function fundPage(env: Env, ctx: ExecutionContext | undefined, id: string): Promise<Response> {
-  const funding = await env.CLAIMS.get(`fiatfund:${id}`, "json") as
+  const funding = await kv(env).get(`fiatfund:${id}`, "json") as
     { order_id?: string; status?: string; amount?: string; payer_email?: string; captured_at?: number } | null;
-  const escrow = await env.CLAIMS.get(`escrowstate:${id}`, "json") as
+  const escrow = await kv(env).get(`escrowstate:${id}`, "json") as
     { status?: string; txHash?: string; marketId?: string; near_amount?: string; usd?: string; error?: string } | null;
   const doc = await feedDoc(env, ctx);
   const mirror = (doc.mirrors ?? []).find((m) => m.id === id);
@@ -377,8 +378,8 @@ export async function receiptPage(env: Env, mirrorId: string | null, claimHash: 
                                  repo: string | null, seq: number | null): Promise<Response> {
   // Mirror-claim receipt: settlement + claim + attestation verify.
   if (mirrorId && claimHash) {
-    const settlement = await env.CLAIMS.get(`msettle:${mirrorId}`, "json") as Record<string, unknown> | null;
-    const claim = await env.CLAIMS.get(`mclaim:${mirrorId}:${claimHash}`, "json") as MirrorClaim | null;
+    const settlement = await kv(env).get(`msettle:${mirrorId}`, "json") as Record<string, unknown> | null;
+    const claim = await kv(env).get(`mclaim:${mirrorId}:${claimHash}`, "json") as MirrorClaim | null;
     if (!claim && !settlement) {
       return html(pageShell({ title: "Receipt not found", body: `<div class="empty"><div class="big">No claim or settlement for that key</div></div>` }));
     }

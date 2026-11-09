@@ -14,6 +14,7 @@ import { tryOpsEscrow, getFiatFunding } from "../src/fiat";
 import { nearViewCall } from "../src/nearops";
 import { realEnv } from "./helpers";
 import type { Env, MirrorListing } from "../src/types";
+import { kv } from "../src/db";
 
 const LIVE = process.env.E2E_LIVE === "1";
 const stamp = Date.now().toString(36);
@@ -58,7 +59,7 @@ describe("tryOpsEscrow", () => {
   it("returns already:true for a confirmed prior attempt (real KV, no chain call)", async () => {
     const e = realEnv();
     const m = mirror();
-    await e.CLAIMS.put(escrowStateKey(m.id), JSON.stringify({
+    await kv(e).put(escrowStateKey(m.id), JSON.stringify({
       mirror_id: m.id, status: "confirmed", usd: "10",
       near_price: 3.5, near_amount: "2.857", deposit_yocto: "2857",
       txHash: `live-test-${stamp}`, marketId: "15", attempts: 1, updated_at: Date.now(),
@@ -81,7 +82,7 @@ describe("tryOpsEscrow", () => {
     const r = await tryOpsEscrow(e, m) as Record<string, unknown>;
     expect(r).toMatchObject({ escrowed: true, reconciled: true, market_id: hit!.marketId });
     // The confirmed state was written to real KV.
-    const state = await e.CLAIMS.get(escrowStateKey(m.id), "json") as
+    const state = await kv(e).get(escrowStateKey(m.id), "json") as
       { status?: string; marketId?: string } | null;
     expect(state?.status).toBe("confirmed");
     expect(state?.marketId).toBe(hit!.marketId);
@@ -90,7 +91,7 @@ describe("tryOpsEscrow", () => {
   it("refuses to stack broadcasts inside the pending window", async () => {
     const e = realEnv();
     const m = mirror(); // specHash guaranteed absent on-chain (unique per run)
-    await e.CLAIMS.put(escrowStateKey(m.id), JSON.stringify({
+    await kv(e).put(escrowStateKey(m.id), JSON.stringify({
       mirror_id: m.id, status: "pending", usd: "10",
       near_price: 3.5, near_amount: "2.857", deposit_yocto: "2857",
       txHash: `inflight-${stamp}`, attempts: 1, updated_at: Date.now(),
@@ -107,7 +108,7 @@ describe("tryOpsEscrow", () => {
     const r = await tryOpsEscrow(e, m) as Record<string, unknown>;
     // Real outcomes only: either the market confirmed on-chain, or the tx
     // failed/pended with the state recorded in real KV.
-    const state = await e.CLAIMS.get(escrowStateKey(m.id), "json") as
+    const state = await kv(e).get(escrowStateKey(m.id), "json") as
       { status?: string; marketId?: string; txHash?: string } | null;
     expect(state, "escrowstate record missing").toBeTruthy();
     expect(state!.status).toMatch(/confirmed|pending|failed/);
@@ -128,7 +129,7 @@ describe("getFiatFunding (real KV)", () => {
   it("round-trips a real fiatfund record", async () => {
     const e = realEnv();
     const id = `mirror:fiat-test:funding-${stamp}`;
-    await e.CLAIMS.put(`fiatfund:${id}`, JSON.stringify({
+    await kv(e).put(`fiatfund:${id}`, JSON.stringify({
       mirror_id: id, order_id: "O1", amount: "10", currency: "USD",
       status: "captured", created_at: Date.now(),
     }));

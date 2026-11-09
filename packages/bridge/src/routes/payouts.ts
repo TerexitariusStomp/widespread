@@ -10,6 +10,7 @@ import { Hono } from "hono";
 import type { Env } from "../types";
 import { json } from "./shared";
 import { repIndex, spamLikely, exportRep, funderRep } from "../rep";
+import { kv } from "../db";
 
 const NONCE_TTL = 600;
 const nonceKey = (id: string) => `payout:nonce:${id}`;
@@ -36,7 +37,7 @@ export async function resolvePayout(
     return { rail: "paypal", paypal_email: claimPayout.paypal_email, source: "claim" };
   }
   if (forgeUserId) {
-    const raw = await env.CLAIMS.get(bindKey(forgeUserId)).catch(() => null);
+    const raw = await kv(env).get(bindKey(forgeUserId)).catch(() => null);
     if (raw) {
       const b = JSON.parse(raw) as PayoutBinding;
       if (b.chain === "near") return { rail: "near", near_account: b.address, source: "bound" };
@@ -53,7 +54,7 @@ export function payoutRoutes() {
     const id = new URL(c.req.url).searchParams.get("forgeUserId");
     if (!id) return json({ error: "forgeUserId required" }, 400);
     const nonce = crypto.randomUUID();
-    await c.env.CLAIMS.put(nonceKey(id), nonce, { expirationTtl: NONCE_TTL });
+    await kv(c.env).put(nonceKey(id), nonce, { expirationTtl: NONCE_TTL });
     return json({ forgeUserId: id, nonce, ttl: NONCE_TTL,
       message: `widespread payout bind | github:${id} | ${nonce}` });
   });
@@ -72,7 +73,7 @@ export function payoutRoutes() {
       return json({ error: "invalid near account" }, 400);
     }
     // Anti-replay: nonce must exist, match, and be inside the signed message.
-    const nonce = await c.env.CLAIMS.get(nonceKey(id));
+    const nonce = await kv(c.env).get(nonceKey(id));
     if (!nonce || !message.includes(nonce)) {
       return json({ error: "stale or missing nonce" }, 409);
     }
@@ -91,21 +92,21 @@ export function payoutRoutes() {
     } catch (e) { return json({ error: `sig verify: ${String(e)}` }, 400); }
     if (!valid) return json({ error: "signature invalid" }, 403);
     // 1:1 — wallet already bound to a different identity?
-    const existing = await c.env.CLAIMS.get(walletKey(address));
+    const existing = await kv(c.env).get(walletKey(address));
     if (existing && existing !== id) {
       return json({ error: "wallet already bound to another identity" }, 409);
     }
     const binding: PayoutBinding = { forgeUserId: id, chain, address, bound_at: Date.now(), sig: signature, message };
-    await c.env.CLAIMS.put(bindKey(id), JSON.stringify(binding));
-    await c.env.CLAIMS.put(walletKey(address), id);
-    await c.env.CLAIMS.delete(nonceKey(id));
+    await kv(c.env).put(bindKey(id), JSON.stringify(binding));
+    await kv(c.env).put(walletKey(address), id);
+    await kv(c.env).delete(nonceKey(id));
     return json({ ok: true, binding: { forgeUserId: id, chain, address, bound_at: binding.bound_at } });
   });
 
   // Contributor identity: bound payout rail + rep counters + spam flag.
   app.get("/api/payouts/:forgeUserId", async (c) => {
     const id = c.req.param("forgeUserId");
-    const raw = await c.env.CLAIMS.get(bindKey(id));
+    const raw = await kv(c.env).get(bindKey(id));
     const b = raw ? JSON.parse(raw) as PayoutBinding : null;
     const idx = await repIndex(c.env);
     const rep = idx.contrib[id];

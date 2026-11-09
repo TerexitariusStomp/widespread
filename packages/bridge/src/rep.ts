@@ -17,6 +17,7 @@
 // signed, portable, verifiable offline against ORACLE_PUBKEY_HEX.
 
 import type { Env } from "./types";
+import { kv } from "./db";
 
 const EVENT_PREFIX = "rep:event:";
 const CTR_PREFIX = "rep:ctr:";
@@ -156,7 +157,7 @@ const fundKey = (payerId: string) => `rep:funder:${payerId.toLowerCase().slice(0
 export interface FunderRep { funded: number; paid: number; release_rate: number }
 
 export async function funderRep(env: Env, payerId: string): Promise<FunderRep | null> {
-  const raw = await env.CLAIMS.get(fundKey(payerId)).catch(() => null);
+  const raw = await kv(env).get(fundKey(payerId)).catch(() => null);
   if (!raw) return null;
   const r = JSON.parse(raw) as { funded: number; paid: number };
   return { ...r, release_rate: r.funded ? Math.round((r.paid / r.funded) * 100) / 100 : 0 };
@@ -165,7 +166,7 @@ export async function funderRep(env: Env, payerId: string): Promise<FunderRep | 
 export async function bumpFunderRep(env: Env, payerId: string | undefined, kind: "funded" | "paid"): Promise<void> {
   if (!payerId) return;
   const k = fundKey(payerId);
-  const r = JSON.parse(await env.CLAIMS.get(k).catch(() => null) ?? "{}") as { funded: number; paid: number };
+  const r = JSON.parse(await kv(env).get(k).catch(() => null) ?? "{}") as { funded: number; paid: number };
   r[kind] = (r[kind] ?? 0) + 1;
-  await env.CLAIMS.put(k, JSON.stringify({ funded: r.funded ?? 0, paid: r.paid ?? 0 }));
+  await kv(env).put(k, JSON.stringify({ funded: r.funded ?? 0, paid: r.paid ?? 0 }));
 }

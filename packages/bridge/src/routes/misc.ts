@@ -8,6 +8,7 @@ import { ecosystem } from "../ecosystem";
 import { nearView } from "../near";
 import type { Env } from "../types";
 import { json } from "./shared";
+import { kv } from "../db";
 
 export function miscRoutes() {
   const app = new Hono<{ Bindings: Env }>();
@@ -20,9 +21,9 @@ export function miscRoutes() {
   // Public audit feed of PR-bot oracle verdicts (who verified, what score,
   // where the money went) — the "they're the verifier, we're the money" trail.
   app.get("/api/bot-verdicts", async (c) => {
-    const list = await c.env.CLAIMS.list({ prefix: "botverdict:" }).catch(() => null);
+    const list = await kv(c.env).list({ prefix: "botverdict:" }).catch(() => null);
     const records = await Promise.all(
-      (list?.keys ?? []).map((k) => c.env.CLAIMS.get(k.name, "json").catch(() => null))
+      (list?.keys ?? []).map((k) => kv(c.env).get(k.name, "json").catch(() => null))
     );
     return json({ verdicts: records.filter(Boolean), total: records.filter(Boolean).length });
   });
@@ -93,9 +94,9 @@ export function miscRoutes() {
     try {
       let cursor: string | undefined;
       do {
-        const page = await c.env.CLAIMS.list({ prefix: "rep:funder:", cursor, limit: 200 });
+        const page = await kv(c.env).list({ prefix: "rep:funder:", cursor, limit: 200 });
         for (const k of page.keys) {
-          const raw = await c.env.CLAIMS.get(k.name).catch(() => null);
+          const raw = await kv(c.env).get(k.name).catch(() => null);
           if (!raw) continue;
           const r = JSON.parse(raw) as { funded: number; paid: number };
           funders.push({ payer: k.name.slice(10), funded: r.funded ?? 0, paid: r.paid ?? 0,
@@ -119,9 +120,9 @@ export function miscRoutes() {
     try {
       let cursor: string | undefined;
       do {
-        const page = await c.env.CLAIMS.list({ prefix: "msettle:", cursor, limit: 200 });
+        const page = await kv(c.env).list({ prefix: "msettle:", cursor, limit: 200 });
         for (const k of page.keys) {
-          const raw = await c.env.CLAIMS.get(k.name).catch(() => null);
+          const raw = await kv(c.env).get(k.name).catch(() => null);
           if (!raw) continue;
           const s = JSON.parse(raw) as {
             status: string; face_usd?: number; platform_cut_usd?: number;
@@ -141,7 +142,7 @@ export function miscRoutes() {
     try {
       let cursor: string | undefined;
       do {
-        const page = await c.env.CLAIMS.list({ prefix: "fiatfund:", cursor, limit: 200 });
+        const page = await kv(c.env).list({ prefix: "fiatfund:", cursor, limit: 200 });
         for (const k of page.keys) fundedFiat += 1;
         cursor = page.list_complete ? undefined : page.cursor;
       } while (cursor);

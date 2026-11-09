@@ -9,6 +9,9 @@ import type { ChainVerification, OpLogEntry } from "@widespread/protocol";
 /** Runtime environment — bindings + vars + secrets (see wrangler.jsonc). */
 export interface Env {
   CLAIMS: KVNamespace;
+  /** D1 claim/settlement store — kv() prefers DB, falls back to CLAIMS
+   *  so a deploy without the binding keeps working. */
+  DB?: D1Database;
   AI: Ai;
   QUALITY: R2Bucket;
   EMBED: VectorizeIndex;
