@@ -204,10 +204,13 @@ export interface Bounty {
 }
 
 export interface Adjudication {
-  verdict: "accept" | "reject";
+  verdict: "accept" | "reject" | "cannot_assess";
   reasoning: string;
   confidence: number;
   model: string;
+  /** Rubric-decomposed per-criterion verdicts (atomic, auditable). */
+  criteria?: { criterion: string; pass: boolean | "cannot_assess";
+    reason: string; confidence: number; signature_id?: string }[];
   /** First chars of raw model output, for transparency on the dashboard. */
   raw_excerpt?: string;
   error?: string;

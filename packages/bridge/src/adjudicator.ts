@@ -11,22 +11,44 @@ import type {
   Env,
 } from "./types";
 
-const SYSTEM = `You are the adjudicator for Widespread, a contributor reward pool.
+// Rubric-decomposed adjudication per the LLM-judge reliability literature
+// (AutoRubric, arXiv 2603.00077; "All Verdicts are Not Equal", 2610.12083):
+// atomic per-criterion binary judgments beat one holistic prompt — no
+// criterion conflation, position-invariant (each axis judged on its own
+// terms), and CANNOT_ASSESS abstention instead of forced guesses.
+const CRITERIA_SYSTEM = `You are ONE criterion judge in a verified-work adjudication.
 An AI agent claims it shipped work to a git forge; the forge issued a signed,
-hash-chained attestation (kind "dg-ship-1"). You are shown the claim, the
-independently recomputed evidence, and the bounty spec it was claimed against.
+hash-chained attestation (kind "dg-ship-1"). You see the claim, the
+independently recomputed evidence, and the bounty spec.
 
-Decide whether the contributor's bounty should be released.
-
-Weigh:
-- spec-fit: does the actual diff plausibly deliver what the bounty spec asks?
-- evidence integrity: does recomputed work match the claim (files, line counts)?
-- substance: is the diff real work, not a no-op, whitespace shuffle, or gibberish?
-- provenance: the op-log hash chain result is given; a broken chain is disqualifying.
+Judge ONLY your assigned criterion — do not weigh the overall outcome.
 
 Reply with ONLY a JSON object, no prose, no markdown fence:
-{"verdict":"accept"|"reject","reasoning":"<2-4 sentences citing concrete evidence>","confidence":<0..1>}
-confidence is your own calibrated certainty in the verdict.`;
+{"pass":true|false|"cannot_assess","reason":"<1-2 sentences citing concrete evidence>","confidence":<0..1>}
+Use cannot_assess when the evidence shown cannot decide your criterion —
+abstaining is honest; guessing is not.`;
+
+interface CriterionSpec { id: string; disqualifying?: boolean; ask: string }
+
+const CRITERIA: CriterionSpec[] = [
+  {
+    id: "provenance",
+    disqualifying: true,
+    ask: "Hash-chain integrity: the forge op-log verification result is in hash_chain — is the attestation chain valid and does the claim hash match? A broken chain fails this criterion (and disqualifies the claim).",
+  },
+  {
+    id: "evidence_integrity",
+    ask: "Evidence integrity: does the independently recomputed evidence (file names, line counts, head_sha, patch fingerprint) match what the claim asserts? Judge consistency only — a mismatch fails.",
+  },
+  {
+    id: "substance",
+    ask: "Substance: is the diff real work? Judge only whether changes are substantive — fail no-ops, whitespace shuffles, generated noise, or gibberish.",
+  },
+  {
+    id: "spec_fit",
+    ask: "Spec-fit: does the diff plausibly deliver what bounty_spec asks? Judge fit-to-spec only — real but off-spec work fails; partial delivery fails only if it misses the spec's core ask.",
+  },
+];
 
 interface AdjudicatorInput {
   repo: string;
@@ -118,7 +140,7 @@ function extractJson(text: string): Record<string, unknown> | null {
  * request+response bytes; GET /v1/signature/<chat_id> returns the proof.
  * Verifying that signature ties the verdict to TEE-executed inference —
  * an operator can't fake which model ran or what it said. */
-async function nearAiCall(env: Env, input: AdjudicatorInput): Promise<{
+async function nearAiCall(env: Env, input: AdjudicatorInput, system: string): Promise<{
   raw: string; model: string; signature_id?: string; tee_signature?: unknown;
 }> {
   const base = env.NEAR_AI_BASE || "https://cloud-api.near.ai/v1";
@@ -132,7 +154,7 @@ async function nearAiCall(env: Env, input: AdjudicatorInput): Promise<{
     body: JSON.stringify({
       model,
       messages: [
-        { role: "system", content: SYSTEM },
+        { role: "system", content: system },
         { role: "user", content: buildPrompt(input) },
       ],
       // Reasoning models (DeepSeek-V4.x) spend part of the budget on
@@ -162,64 +184,82 @@ async function nearAiCall(env: Env, input: AdjudicatorInput): Promise<{
   return { raw, model, signature_id: out.id, tee_signature };
 }
 
+export interface CriterionResult {
+  criterion: string;
+  pass: boolean | "cannot_assess";
+  reason: string;
+  confidence: number;
+  signature_id?: string;
+}
+
+/** One atomic criterion judgment — its own model call, its own binary
+ * verdict, its own calibrated confidence. Errors abstain (cannot_assess):
+ * a judge that didn't run is not a judge that rejected. */
+async function judgeCriterion(env: Env, input: AdjudicatorInput, crit: CriterionSpec,
+  model: string, useNearAi: boolean): Promise<CriterionResult> {
+  const system = `${CRITERIA_SYSTEM}\n\nYour criterion — ${crit.id}: ${crit.ask}`;
+  try {
+    let raw = "";
+    let signature_id: string | undefined;
+    if (useNearAi) {
+      const r = await nearAiCall(env, input, system);
+      raw = r.raw; signature_id = r.signature_id;
+    } else {
+      const out = (await env.AI.run(model as keyof AiModels, {
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: buildPrompt(input) },
+        ],
+        max_tokens: 1024,
+        temperature: 0,
+      })) as { response?: string; choices?: { message?: { content?: string } }[] };
+      raw = (typeof out?.response === "string" && out.response) ||
+        out?.choices?.[0]?.message?.content || JSON.stringify(out);
+    }
+    const parsed = extractJson(raw);
+    const pass = parsed?.pass === true ? true
+      : parsed?.pass === false ? false : "cannot_assess";
+    return {
+      criterion: crit.id,
+      pass,
+      reason: typeof parsed?.reason === "string" && parsed.reason.trim()
+        ? parsed.reason.trim() : "judge returned no parseable verdict",
+      confidence: typeof parsed?.confidence === "number" && Number.isFinite(parsed.confidence)
+        ? Math.max(0, Math.min(1, parsed.confidence)) : 0,
+      ...(signature_id ? { signature_id } : {}),
+    };
+  } catch (e) {
+    return { criterion: crit.id, pass: "cannot_assess",
+      reason: `judge unavailable: ${String(e)}`, confidence: 0 };
+  }
+}
+
 export async function adjudicate(env: Env, input: AdjudicatorInput): Promise<Adjudication> {
   const useNearAi = !!(env as { NEAR_AI_API_KEY?: string }).NEAR_AI_API_KEY;
   const model = useNearAi
     ? (env.NEAR_AI_MODEL || "deepseek-ai/DeepSeek-V4.1-Flash-1017")
     : (env.LLM_MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast");
-  let raw = "";
-  let sig: { signature_id?: string; tee_signature?: unknown } = {};
-  try {
-    if (useNearAi) {
-      const r = await nearAiCall(env, input);
-      raw = r.raw; sig = { signature_id: r.signature_id, tee_signature: r.tee_signature };
-    } else {
-      // Ai.run may return {response} or an OpenAI-style chat.completion
-      // envelope — unwrap whichever we get.
-      const out = (await env.AI.run(model as keyof AiModels, {
-        messages: [
-          { role: "system", content: SYSTEM },
-          { role: "user", content: buildPrompt(input) },
-        ],
-        max_tokens: 1024,
-        temperature: 0,
-      })) as {
-        response?: string;
-        choices?: { message?: { content?: string } }[];
-      };
-      raw =
-        (typeof out?.response === "string" && out.response) ||
-        out?.choices?.[0]?.message?.content ||
-        JSON.stringify(out);
-    }
-  } catch (e) {
-    return {
-      verdict: "reject",
-      reasoning: `adjudicator unavailable: ${String(e)}`,
-      confidence: 0,
-      model,
-      error: "model-call-failed",
-    };
-  }
 
-  const parsed = extractJson(raw);
-  const verdict = parsed?.verdict === "accept" ? "accept" : "reject";
-  const confidence =
-    typeof parsed?.confidence === "number" && Number.isFinite(parsed.confidence)
-      ? Math.max(0, Math.min(1, parsed.confidence))
-      : 0;
-  const reasoning =
-    typeof parsed?.reasoning === "string" && parsed.reasoning.trim().length > 0
-      ? parsed.reasoning.trim()
-      : "adjudicator returned no parseable verdict";
+  // Per-criterion parallel calls — independent judgments, then aggregate.
+  const criteria = await Promise.all(
+    CRITERIA.map((c) => judgeCriterion(env, input, c, model, useNearAi)));
+
+  // Aggregation per the rubric: disqualifying criterion fails → reject;
+  // any abstention → cannot_assess (money doesn't move, but we don't claim
+  // a rejection the judge never made); else all-pass → accept.
+  const disq = criteria.find(
+    (c) => c.pass === false && CRITERIA.find((k) => k.id === c.criterion)?.disqualifying);
+  const abstains = criteria.filter((c) => c.pass === "cannot_assess");
+  const anyFail = criteria.some((c) => c.pass === false);
+  const verdict: Adjudication["verdict"] = disq ? "reject"
+    : abstains.length ? "cannot_assess"
+    : anyFail ? "reject" : "accept";
+  const confidence = Math.min(...criteria.map((c) => c.confidence));
+  const reasoning = criteria.map((c) => `${c.criterion}: ${c.reason}`).join(" ");
+  const errored = criteria.some((c) => c.reason.startsWith("judge unavailable"));
+
   return {
-    verdict,
-    reasoning,
-    confidence,
-    model,
-    raw_excerpt: raw.slice(0, 500),
-    ...(sig.signature_id ? { signature_id: sig.signature_id } : {}),
-    ...(sig.tee_signature ? { tee_signature: sig.tee_signature } : {}),
-    ...(parsed ? {} : { error: "unparseable-output" }),
+    verdict, reasoning, confidence, model, criteria,
+    ...(errored ? { error: "adjudication-incomplete" } : {}),
   };
 }
