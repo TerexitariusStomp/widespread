@@ -81,7 +81,9 @@ export class WidespreadMarket {
   refund({ marketId }) {
     const m = this.markets[marketId];
     assert(m && m.status === OPEN, "market not open");
-    const expired = near.blockTimestamp() > BigInt(m.deadline);
+    // deadline may be null (open-ended market) — BigInt(null) throws, so
+    // guard explicitly; null means "never expires", not "expired now".
+    const expired = m.deadline != null && near.blockTimestamp() > BigInt(m.deadline);
     const noPending = !this._pendingClaims(marketId).length;
     // payer can pull unclaimed funds any time; anyone can pull expired —
     // a payer can't hostage a market forever (timeout auto-release).
