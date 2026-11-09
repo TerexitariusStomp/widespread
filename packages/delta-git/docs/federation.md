@@ -12,7 +12,7 @@ enqueues a `federate` task that pushes the new tip to configured mirror targets.
 - **Mirror → readers**: mirrors are read-only endpoints (Tangled knot, Radicle
   seed). They never write back; the op-log + DSSE attestations exported via
   `GET /dg/export` are the provenance of record if a mirror diverges.
-- **Repo DIDs**: every repo gets `did:dg:repo:<sha256(namespace/slug)>` at
+- **Repo DIDs**: every repo gets `did:repo:<sha256(namespace/slug)>` at
   creation (D1 `repositories.did`). Stable across renames; this is the
   federation-addressable identifier appviews index on.
 
@@ -49,7 +49,7 @@ the relay; egress auth stays off the worker).
 ## Read surface — `sh.tangled.*` XRPC
 
 `src/worker/routes/xrpc.ts` exposes read-only lexicon-shaped endpoints for
-appviews/indexers. Repo lookup accepts `repoDid=did:dg:repo:<hash>` or the
+appviews/indexers. Repo lookup accepts `repoDid=did:repo:<hash>` or the
 `owner/repo` shorthand; only public repos are visible (private repos return
 the same 404 as missing ones).
 

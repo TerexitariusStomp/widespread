@@ -1705,9 +1705,8 @@ describe("namespace quotas", () => {
 });
 
 describe("DID resolution /1.0/identifiers", () => {
-  it("resolves did:key + legacy did:dg deterministically, rejects malformed", async () => {
+  it("resolves did:key deterministically, rejects malformed", async () => {
     const { didKeyFromPubkey, pubkeyFromDidKey } = await import("@/worker/agent/atpauth/didkey");
-    const { bytesToHex } = await import("@/worker/common/hex");
     const pubkey = crypto.getRandomValues(new Uint8Array(32));
     const did = didKeyFromPubkey(pubkey, "ed25519");
 
@@ -1728,13 +1727,6 @@ describe("DID resolution /1.0/identifiers", () => {
     const decoded = decodeKeyMultibase(body.didDocument.verificationMethod[0].publicKeyMultibase);
     expect(decoded?.pubkey).toEqual(pubkey);
     expect(pubkeyFromDidKey(did)?.pubkey).toEqual(pubkey);
-
-    // Legacy did:dg resolves and points at its did:key canonical spelling.
-    const legacy = await get(`/1.0/identifiers/did:dg:${bytesToHex(pubkey)}`);
-    expect(legacy.status).toBe(200);
-    const dgDoc = (legacy.body as { didDocument: { id: string; alsoKnownAs: string[] } })
-      .didDocument;
-    expect(dgDoc.alsoKnownAs).toContain(did);
 
     const bad = await get("/1.0/identifiers/did:key:not-base58!!!");
     expect(bad.status).toBe(400);

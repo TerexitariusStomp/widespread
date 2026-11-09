@@ -166,9 +166,6 @@ export const SignIn: FC = () => {
           <a href="https://github.com/TerexitariusStomp/delta-git" className="no-underline hover:underline">
             Source
           </a>
-          <a href="https://wpcloud.delta-git.workers.dev" className="no-underline hover:underline">
-            Apps
-          </a>
           <a
             href="https://limic.dev"
             target="_blank"

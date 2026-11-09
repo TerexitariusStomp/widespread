@@ -5,7 +5,7 @@ import { applyUnifiedPatch } from "@/worker/agent/patch";
 import { attemptMerge } from "@/worker/merge/engine";
 import { writeServerPack } from "@/worker/merge/packWriter";
 import { doPrefix, packIndexKey, r2PackKey } from "@/worker/keys";
-import { registerAgent } from "@/worker/agent/auth";
+import { registerAgent, didForPubkeyHex } from "@/worker/agent/auth";
 import { createDb } from "@/worker/db/d1/client";
 import { bytesToHex } from "@/worker/common/hex";
 
@@ -24,6 +24,7 @@ import { bytesToHex } from "@/worker/common/hex";
 
 const MODEL = "@cf/meta/llama-3.1-8b-instruct";
 const OVERNIGHT_PUBKEY_HEX = "11".repeat(32); // deterministic platform agent
+const OVERNIGHT_DID = didForPubkeyHex(OVERNIGHT_PUBKEY_HEX);
 const MAX_IDEAS_PER_PASS = 3;
 const DEFAULT_QUORUM_K = 3;
 
@@ -83,7 +84,7 @@ export async function runOvernightPass(
     model: MODEL,
   }).catch(() => undefined);
   const actor =
-    registered && "did" in registered ? registered.did : `did:dg:${OVERNIGHT_PUBKEY_HEX}`;
+    registered && "did" in registered ? registered.did : OVERNIGHT_DID;
 
   const ideas = msg.workIntentId
     ? [await stub.getWorkIntent(msg.workIntentId)].filter((r) => r !== undefined)

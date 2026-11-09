@@ -29,7 +29,7 @@ async function stubForge() {
       seen.agents = JSON.parse(body.toString());
       // did:key = base58btc(multicodec(0xed01) + pubkey) — we only need
       // a stable unique string; the runner treats it opaquely.
-      return json({ did: `did:dg:${seen.agents.pubkey.slice(0, 16)}` });
+      return json({ did: `did:key:${seen.agents.pubkey.slice(0, 16)}` });
     }
     if (req.url.endsWith('/dg/ship') && req.method === 'POST') {
       seen.ship = {

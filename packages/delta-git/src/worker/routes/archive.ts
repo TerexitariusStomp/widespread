@@ -11,7 +11,7 @@ import { isTreeMode, parseTree } from "@/worker/git/core/tree";
 import { parseCommitText, parseTagTarget } from "@/worker/git/core";
 
 // Repository archive export — the seam that makes forge-hosted repos deployable
-// by downstream consumers (wp-cloud sites, CI, mirrors).
+// by downstream consumers (static hosts, CI, mirrors).
 //
 //   GET /:owner/:repo/-/archive/<ref>.tar
 //
@@ -248,7 +248,7 @@ export async function openRepoTar(args: {
 // ---- route ----
 
 export function registerArchiveRoutes(router: AppRouter): void {
-  // Lightweight ref→commit resolution for consumers that poll (wp-cloud's
+  // Lightweight ref→commit resolution for consumers that poll (e.g. a
   // forge-sync cron) — archive fetch does the same resolution but streams a
   // whole tar; HEAD would still pay the tree walk.
   router.get("/:owner/:repo/-/resolve/*", async (c) => {

@@ -38,13 +38,12 @@ CF_ACCOUNT_ID=00000000000000000000000000000000
 # Hermes browser-agent origin for /embed/hermes (embed.js source).
 HERMES_ORIGIN=http://localhost:8471
 
-# Shared secret for cross-app sign-in handoffs (dg_token JWT signing). Must
-# match the same-named secret on the wpcloud worker. Production:
-# `wrangler secret put DG_SESSION_SECRET`.
+# Shared secret for cross-app sign-in handoffs (dg_token JWT signing).
+# Production: `wrangler secret put DG_SESSION_SECRET`.
 DG_SESSION_SECRET=local-dg-session-secret-change-me
 
 # Hosts allowed as `return_to` targets on /auth/oauth/start (comma-separated
-# bare hostnames). Production: wpcloud.delta-git.workers.dev.
+# bare hostnames).
 
 # Node signing key for dg-rep-cert-1 reputation certificates (JWK Ed25519
 # private key). Production: `wrangler secret put DG_NODE_ED25519_JWK`.

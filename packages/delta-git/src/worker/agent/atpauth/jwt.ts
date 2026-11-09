@@ -18,7 +18,7 @@ export interface DidSessionClaims {
 }
 
 /**
- * Generic HS256 JWT signer — used for the wp-cloud SSO handoff token
+ * Generic HS256 JWT signer — used for cross-app SSO handoff tokens
  * (dg_token): aud-bound, short-lived, verified by the receiving app with the
  * shared DG_SESSION_SECRET rather than SESSION_SECRET so each side can
  * rotate its own session key independently.

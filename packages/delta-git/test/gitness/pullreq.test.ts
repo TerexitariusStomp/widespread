@@ -39,7 +39,7 @@ const baseIntent: MergeIntentRow = {
   baseOid: "a".repeat(40),
   deltaRef: "refs/delta/mi-abc123",
   deltaOid: "b".repeat(40),
-  actor: "did:dg:agent:xyz",
+  actor: "did:test:agent-xyz",
   status: "conflict",
   conflicts: "src/a.ts,src/b.ts",
   resultOid: null,

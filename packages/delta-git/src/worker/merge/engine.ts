@@ -377,7 +377,6 @@ export async function attemptMerge(args: {
       doId: stub.id.toString(),
       repoId,
       intentId,
-      seatDid: "did:dg:workers-ai",
     }).catch(() => {});
     return { kind: "conflict", intentId, conflicts: treeMerge.conflicts };
   }

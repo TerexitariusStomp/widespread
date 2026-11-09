@@ -87,7 +87,6 @@ export const AdjudicateQueueMessageSchema = z.object({
   doId: z.string(),
   repoId: z.string().optional(),
   intentId: z.string(),
-  seatDid: z.string(),
 });
 
 export type AdjudicateQueueMessage = z.infer<typeof AdjudicateQueueMessageSchema>;

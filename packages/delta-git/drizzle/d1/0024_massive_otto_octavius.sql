@@ -1,1 +1,0 @@
-ALTER TABLE `repositories` ADD `is_gist` integer DEFAULT 0 NOT NULL;

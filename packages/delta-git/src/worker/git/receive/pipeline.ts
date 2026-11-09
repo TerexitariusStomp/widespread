@@ -612,7 +612,7 @@ export async function executeReceivePipeline(
           })
         );
       }
-      // Repo webhook subscribers (e.g. wp-cloud push→redeploy) get a `push`
+      // Repo webhook subscribers (e.g. a hosting app's push→redeploy) get a `push`
       // event per advanced heads ref — same fan-out path as agent pushes.
       args.ctx.waitUntil(
         deliverWebhookEvent(args.env, args.repoId, args.stub, {

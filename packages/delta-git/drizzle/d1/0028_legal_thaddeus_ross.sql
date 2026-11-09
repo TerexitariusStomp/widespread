@@ -1,1 +1,0 @@
-ALTER TABLE `chaos_experiments` ADD `last_report` text;

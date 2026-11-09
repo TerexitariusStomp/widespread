@@ -22,7 +22,7 @@ describe("sh.tangled.* XRPC", () => {
     expect(res.status).toBe(200);
     expect(res.body.repo.name).toBe(repo);
     expect(res.body.repo.owner).toBe(owner);
-    expect(res.body.repo.did).toMatch(/^did:dg:repo:/);
+    expect(res.body.repo.did).toMatch(/^did:repo:/);
     expect(res.body.repo.knot).toBe("delta-git");
     expect(res.body.repo.visibility).toBe("public");
   });

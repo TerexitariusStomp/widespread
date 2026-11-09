@@ -1,1 +1,0 @@
-ALTER TABLE `repositories` ADD `forked_from_id` text;

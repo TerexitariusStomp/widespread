@@ -6,6 +6,5 @@ build/
 coverage/
 worker-configuration.d.ts
 wrangler.jsonc
-# Subtree-merged project keeps its own formatting + toolchain.
-wpcloud/
+# Vendored SPA keeps its own formatting + toolchain.
 frontend/

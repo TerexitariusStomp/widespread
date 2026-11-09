@@ -3,9 +3,9 @@ import { check, index, integer, sqliteTable, text, uniqueIndex } from "drizzle-o
 
 // delta-git agent registry — global, cross-repo identity.
 //
-// Agents authenticate with ed25519 signatures over request envelopes. New
-// registrations mint standard `did:key` identifiers; legacy `did:dg:<hex>`
-// rows remain readable (dual-format lookup in getAgent). Reputation is
+// Agents authenticate with ed25519 signatures over request envelopes and
+// are identified by standard `did:key` DIDs — the only supported format.
+// Reputation is
 // earned by correct adjudication votes and slashed on minority/malicious
 // votes; it gates the `merge`/`verify` lanes and rep-protected ref updates.
 export const agents = sqliteTable(

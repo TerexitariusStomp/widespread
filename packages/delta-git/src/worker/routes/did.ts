@@ -6,8 +6,6 @@
 //
 //   did:key:*  → deterministic document derived from the identifier
 //                (no lookup needed — the key IS the identifier)
-//   did:dg:*   → legacy agent format; the pubkey hex is inlined the same
-//                way, so it resolves deterministically too
 //   did:plc:/did:web:/other → proxied through the canonical resolver
 //                chain (plc.directory → did:web → PDS resolveDid)
 //
@@ -21,11 +19,9 @@ import type { AppRouter } from "./hono";
 import { toBase58Btc } from "@atcute/multibase";
 import {
   pubkeyFromDidKey,
-  didKeyFromPubkey,
   type DecodedDidKey,
 } from "@/worker/agent/atpauth/didkey";
 import { resolveDidDocument } from "@/worker/agent/atpauth/pds";
-import { hexToBytesSafe } from "@/worker/agent/auth";
 
 const DID_JSON = "application/did+json";
 
@@ -103,25 +99,6 @@ export function registerDidRoutes(router: AppRouter) {
       return c.json(
         {
           didDocument: buildDidDocument(did, key),
-          didDocumentMetadata: {},
-          didResolutionMetadata: { contentType: DID_JSON },
-        },
-        200
-      );
-    }
-
-    if (did.startsWith("did:dg:")) {
-      const pubkey = hexToBytesSafe(did.slice("did:dg:".length));
-      if (!pubkey || pubkey.length !== 32) return resolutionError(c, 400, "invalidDid");
-      const key: DecodedDidKey = { curve: "ed25519", pubkey };
-      return c.json(
-        {
-          didDocument: {
-            ...buildDidDocument(did, key),
-            // Cross-reference the canonical did:key spelling of the same
-            // key material so consumers can correlate registrations.
-            alsoKnownAs: [didKeyFromPubkey(pubkey, "ed25519")],
-          },
           didDocumentMetadata: {},
           didResolutionMetadata: { contentType: DID_JSON },
         },

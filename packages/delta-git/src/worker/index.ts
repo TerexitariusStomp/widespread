@@ -98,7 +98,7 @@ registerNpmRegistryRoutes(app);
 registerDidRoutes(app);
 // Static site serving from repo refs
 registerPagesRoutes(app);
-// POSIX tar export of a repo tree — consumed by wp-cloud deploy-git, CI, mirrors
+// POSIX tar export of a repo tree — consumed by deploy pipelines, CI, mirrors
 registerArchiveRoutes(app);
 // shields.io-compatible SVG badges under /badge/:owner/:repo/:metric
 registerBadgeRoutes(app);

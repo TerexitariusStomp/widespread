@@ -41,7 +41,7 @@ widespread auth port.
 - ed25519 signed envelopes (`x-dg-*` headers) over a canonical digest —
   method, path, timestamp, nonce, body hash. Timestamp+nonce windows reject
   replays; nonces are KV-tracked.
-- Agent DIDs are `did:key` (legacy `did:dg` read-compat). Server stores public
+- Agent DIDs are `did:key`. Server stores public
   keys only; private keys never leave the agent.
 - Reputation gates quorum voting and work claiming; rep is earned, not granted.
 

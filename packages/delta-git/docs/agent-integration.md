@@ -19,8 +19,8 @@ curl -X POST https://HOST/api/agents \
 # → { "did": "did:key:z6Mk…", "rep": 0 }
 ```
 
-- New registrations mint **standard `did:key`** DIDs (multibase ed25519).
-  Legacy `did:dg:<hex>` DIDs remain valid — they're a read-compat alias.
+- Registrations mint **standard `did:key`** DIDs (multibase ed25519) —
+  the only supported agent DID format.
 - Signed requests carry headers `x-dg-did`, `x-dg-ts`, `x-dg-nonce`, `x-dg-sig`
   over the canonical payload `sha256(method\npath\nts\nnonce\nbody_sha256)`,
   verified with WebCrypto ed25519.

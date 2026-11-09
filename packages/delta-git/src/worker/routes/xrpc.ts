@@ -11,7 +11,7 @@ import { findNamespaceBySlug, findRepositoryByNamespaceAndSlug } from "@/worker/
 // Implements the `sh.tangled.*` read methods against delta-git state so any
 // atproto client that speaks Tangled's lexicons can enumerate and inspect
 // public repos here. `repoDid` params accept either the federation DID
-// (`did:dg:repo:<hash>`) or the `owner/repo` shorthand — only public repos
+// (`did:repo:<hash>`) or the `owner/repo` shorthand — only public repos
 // are visible; private repos return the same not-found as missing ones.
 //
 // Pinned to the sh.tangled.repo v0 shape used by knot1 clients:
@@ -33,7 +33,7 @@ interface RepoRef {
 async function resolveRepoDid(c: AppContext): Promise<RepoRef | null> {
   const repoDid = c.req.query("repoDid") ?? c.req.query("repo") ?? "";
   const db = c.var.db;
-  if (repoDid.startsWith("did:dg:repo:")) {
+  if (repoDid.startsWith("did:repo:")) {
     const rows = await db.select().from(repositories).where(eq(repositories.did, repoDid)).limit(1);
     const row = rows[0];
     if (!row || row.visibility !== "public") return null;

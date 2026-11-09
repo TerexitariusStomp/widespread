@@ -5,7 +5,7 @@ import { applyManifest } from "@/worker/agent/patch";
 import { attemptMerge } from "@/worker/merge/engine";
 import { writeServerPack } from "@/worker/merge/packWriter";
 import { doPrefix, packIndexKey, r2PackKey } from "@/worker/keys";
-import { registerAgent } from "@/worker/agent/auth";
+import { registerAgent, didForPubkeyHex } from "@/worker/agent/auth";
 import { createDb } from "@/worker/db/d1/client";
 import { bytesToHex } from "@/worker/common/hex";
 import { readObject } from "@/worker/git/object-store/store";
@@ -26,6 +26,7 @@ import {
 // the site lands on a delta ref and the merge/quorum machinery decides.
 
 const SITE_SMITH_PUBKEY_HEX = "22".repeat(32); // deterministic platform seat
+const SITE_SMITH_DID = didForPubkeyHex(SITE_SMITH_PUBKEY_HEX);
 const DEFAULT_QUORUM_K = 3;
 const MAX_PROMPT_PATHS = 100;
 
@@ -127,7 +128,7 @@ export async function runSiteSmithPass(
     model: SITE_SMITH_MODEL,
   }).catch(() => undefined);
   const actor =
-    registered && "did" in registered ? registered.did : `did:dg:${SITE_SMITH_PUBKEY_HEX}`;
+    registered && "did" in registered ? registered.did : SITE_SMITH_DID;
 
   const intent = await stub.getWorkIntent(msg.workIntentId);
   if (!intent) return { detail: "intent-missing" };

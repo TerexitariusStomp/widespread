@@ -107,7 +107,7 @@ describe("merge adjudication", () => {
       async (stub) =>
         await stub.castMergeVote({
           intentId: intent.id,
-          voterDid: "did:dg:agent-1",
+          voterDid: "did:test:agent-1",
           resolutionDigest: digestA,
           signature: "sig1",
           quorumK,
@@ -125,7 +125,7 @@ describe("merge adjudication", () => {
       async (stub) =>
         await stub.castMergeVote({
           intentId: intent.id,
-          voterDid: "did:dg:agent-1",
+          voterDid: "did:test:agent-1",
           resolutionDigest: digestA,
           signature: "sig1b",
           quorumK,
@@ -138,7 +138,7 @@ describe("merge adjudication", () => {
       async (stub) =>
         await stub.castMergeVote({
           intentId: intent.id,
-          voterDid: "did:dg:agent-2",
+          voterDid: "did:test:agent-2",
           resolutionDigest: digestB,
           signature: "sig2",
           quorumK,
@@ -153,7 +153,7 @@ describe("merge adjudication", () => {
       async (stub) =>
         await stub.castMergeVote({
           intentId: intent.id,
-          voterDid: "did:dg:hermes-3",
+          voterDid: "did:test:hermes-3",
           resolutionDigest: digestA,
           signature: "sig3",
           quorumK,
@@ -171,7 +171,7 @@ describe("merge adjudication", () => {
       async (stub) =>
         await stub.castMergeVote({
           intentId: intent.id,
-          voterDid: "did:dg:agent-4",
+          voterDid: "did:test:agent-4",
           resolutionDigest: digestA,
           signature: "sig4",
           quorumK,

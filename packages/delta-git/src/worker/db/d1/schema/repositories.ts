@@ -31,7 +31,7 @@ export const repositories = sqliteTable(
       .references(() => users.id, { onDelete: "restrict" }),
     slug: text("slug").notNull(),
     doName: text("do_name").notNull(),
-    // Federation-addressable repo DID (`did:dg:repo:<hash>`), minted at
+    // Federation-addressable repo DID (`did:repo:<hash>`), minted at
     // creation. Stable across renames; NULL for repos predating the column
     // (minted lazily on first federation touch).
     did: text("did"),

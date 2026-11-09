@@ -5,7 +5,7 @@ import { readObject } from "@/worker/git/object-store/store";
 import { resolvePathEntry } from "@/worker/agent/patch";
 import { isTreeMode } from "@/worker/git/core/tree";
 import { parseCommitText } from "@/worker/git/core";
-import { registerAgent } from "@/worker/agent/auth";
+import { registerAgent, didForPubkeyHex } from "@/worker/agent/auth";
 import { doPrefix } from "@/worker/keys";
 import { createDb } from "@/worker/db/d1/client";
 import { findRepositoryById } from "@/worker/db/d1/dal/repositories";
@@ -26,6 +26,8 @@ import { CLEF_MODEL, clefProbability, runClef } from "@/worker/agent/clef";
 const td = new TextDecoder();
 const WORKERS_AI_DID_PUBKEY = "00".repeat(32); // deterministic platform did
 const CLEF_DID_PUBKEY = "11".repeat(32); // clef verdict seat
+const WORKERS_AI_DID = didForPubkeyHex(WORKERS_AI_DID_PUBKEY);
+const CLEF_DID = didForPubkeyHex(CLEF_DID_PUBKEY);
 const DEFAULT_QUORUM_K = 3;
 const MODEL = "@cf/meta/llama-3.1-8b-instruct";
 // A Clef verdict needs every preservation question to clear this bar
@@ -114,7 +116,7 @@ export async function runWorkersAiAdjudication(
     kind: "workers-ai",
   }).catch(() => undefined);
   const did =
-    registered && "did" in registered ? registered.did : `did:dg:${WORKERS_AI_DID_PUBKEY}`;
+    registered && "did" in registered ? registered.did : WORKERS_AI_DID;
 
   const conflicts: string[] = intent.conflicts ? JSON.parse(intent.conflicts) : [];
   const files: Record<string, { content_b64?: string; delete?: boolean }> = {};
@@ -266,7 +268,7 @@ export async function runWorkersAiAdjudication(
       const clefDid =
         clefRegistered && "did" in clefRegistered
           ? clefRegistered.did
-          : `did:dg:${CLEF_DID_PUBKEY}`;
+          : CLEF_DID;
       const fmt = (p: number) => p.toFixed(2);
       const clefOutcome = await stub
         .castMergeVote({

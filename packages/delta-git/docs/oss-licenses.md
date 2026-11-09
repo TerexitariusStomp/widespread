@@ -1,10 +1,7 @@
 # OSS License Inventory
 
-Combined audit of delta-git and wp-cloud (the first-party app deployed at
-`wpcloud.delta-git.workers.dev`, merged into this repo as the `wpcloud/`
-subtree). Verified against installed package `license` fields and
-wp-cloud's `licenses.yaml`; Trivy's license scanner runs in the deploy
-gate as the ongoing check.
+Audit of delta-git. Verified against installed package `license` fields;
+Trivy's license scanner runs in the deploy gate as the ongoing check.
 
 ## Provenance
 
@@ -48,7 +45,7 @@ call sites if a permissive alternative lands.
 | @atcute/oauth-node-client                               | 0BSD                        | atproto OAuth (PAR/PKCE/DPoP)   |
 | @atcute/identity, identity-resolver, lexicons           | 0BSD                        | handle/DID/PDS resolution       |
 | @modelcontextprotocol/server                            | MIT → Apache-2.0 transition | MCP JSON-RPC/SSE transport      |
-| modern-tar                                              | MIT                         | Archive writer; wpcloud reader  |
+| modern-tar                                              | MIT                         | Archive writer                  |
 | badge-maker                                             | CC0-1.0                     | shields.io SVG badge generator  |
 | @simplewebauthn/server                                  | MIT                         | WebAuthn passkey ceremonies     |
 | graphql                                                 | MIT                         | /api/graphql v4-shaped subset   |
@@ -108,40 +105,6 @@ S0.6 audit: 220 vendored deps — 190 MIT, 17 Apache-2.0, remainder
 ISC/BSD/MIT-0. The only flagged package is `gitness@0.1.0` itself, covered by
 the repo's Apache-2.0 root LICENSE. No GPL/AGPL anywhere in the subtree.
 
-## wp-cloud Worker runtime
-
-| Component            | License                        | Context                                |
-| -------------------- | ------------------------------ | -------------------------------------- |
-| aws4fetch            | MIT                            | R2 S3 presigning                       |
-| itty-router          | MIT                            | API routing                            |
-| viem                 | MIT                            | SIWE wallet verification, USDC watcher |
-| modern-tar           | MIT                            | deploy-git tar reader                  |
-| typescript, wrangler | Apache-2.0 / MIT OR Apache-2.0 | Build                                  |
-
-## wp-cloud container lane (tenant WordPress images)
-
-Pulled at image build time — nothing is vendored into the repo.
-
-| Component                            | License             | Commercial posture                                                                                                 |
-| ------------------------------------ | ------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| WordPress + wordpress.org plugins    | GPL-2.0+            | Hosted use fine. **Distributing the container image = GPL distribution** — requires source-offer + license notices |
-| WooCommerce                          | GPL-3.0             | Same obligations as above                                                                                          |
-| MariaDB / MySQL 8                    | GPL-2.0             | Sidecar use fine                                                                                                   |
-| FrankenPHP                           | MIT                 | Clean                                                                                                              |
-| Apache HTTPD                         | Apache-2.0          | Clean                                                                                                              |
-| PHP                                  | PHP-3.01            | Clean                                                                                                              |
-| SQLite / sqlite-database-integration | Public domain / MIT | Clean                                                                                                              |
-| runit                                | BSD-3-Clause        | Clean                                                                                                              |
-| php-wasm                             | Apache-2.0          | Clean                                                                                                              |
-| adnanh/webhook, ttyd                 | MIT                 | Clean                                                                                                              |
-| Adminer                              | Apache-2.0          | Clean                                                                                                              |
-| WP-CLI                               | MIT                 | Clean                                                                                                              |
-| rclone, tigrisfs                     | MIT / Apache-2.0    | Clean                                                                                                              |
-| htmx                                 | BSD-2-Clause        | Clean                                                                                                              |
-| pagefind                             | MIT                 | Clean                                                                                                              |
-| S3-Uploads (humanmade)               | GPL-2.0+            | GPL obligations on image distribution                                                                              |
-| isomorphic-git                       | MIT                 | Clean                                                                                                              |
-
 ## Flagged — restricted or conditional
 
 | Component                 | License                          | Rule                                                                                                 |
@@ -179,9 +142,6 @@ implementations of their mechanics:
 4. AGPL code never enters the repo or the bundle.
 5. Model weights with upstream terms stay opt-in behind a per-site flag.
 
-`wp-cloud/licenses.yaml` is the machine-readable source for the container
-lane and stays in sync with this document.
-
 ## Custom-code share (LOC report, 2026-10-06)
 
 Line counts over `git ls-files` (cloc equivalent; blank/comment lines not
@@ -195,7 +155,6 @@ stripped, so figures are conservative upper bounds):
 | `cli/` + `scripts/`                              | 5     | 1,993   |
 | `drizzle/` (generated migrations — not authored) | 79    | 80,813  |
 | `frontend/` (vendored Gitness SPA, Apache-2.0)   | 1,920 | 416,913 |
-| `wpcloud/` (first-party app subtree)             | 50    | 4,819   |
 
 Authored product code (`src` + `cli` + `scripts`, minus vendored
 widespread and generated drizzle) is ~75.5k lines ≈ **12% of the tracked
