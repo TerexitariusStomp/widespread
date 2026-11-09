@@ -1,0 +1,184 @@
+import { FC, useEffect, useState } from 'react'
+
+import {
+  authLog,
+  getAuthLog,
+  pendingAuthorizeUrl,
+  signInWithBluesky
+} from '../delta/bsky-oauth'
+
+/**
+ * Sign-in — the primary auth surface, styled after the SSR /auth page layout
+ * (header/footer chrome + centered card) but keeping the Bluesky OAuth flow
+ * fully client-side: PAR + PKCE + DPoP run in the browser via
+ * @atproto/oauth-client-browser, tokens live in IndexedDB, and the dg_session
+ * cookie is bound to the key-custody worker's non-extractable DPoP key. The
+ * server never sees OAuth tokens or account keys.
+ *
+ * The did:* challenge lane stays on /auth — device keys and agents sign a
+ * one-time challenge there (also client-side key custody).
+ */
+export const SignIn: FC = () => {
+  // /auth's island forwards handles here (client-side OAuth is the only
+  // Bluesky lane) — prefill so the bounce doesn't lose the typed handle.
+  const [identifier, setIdentifier] = useState(
+    () => new URLSearchParams(window.location.search).get('handle') ?? ''
+  )
+
+  // The OAuth consent page bounces unsigned users here with ?return_to=
+  // pointing back at /oauth/authorize?…. Stash it — the authorize URL's
+  // query can't ride through the atproto redirect, so the callback page
+  // (oauth-callback.tsx) reads it back out of sessionStorage. Restricted to
+  // the authorize path: a generic return_to would be an open-redirect
+  // gadget.
+  const returnTo = new URLSearchParams(window.location.search).get('return_to')
+  if (returnTo?.startsWith('/oauth/authorize')) {
+    sessionStorage.setItem('dg-oauth-return', returnTo)
+  }
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  // If a previous attempt navigated-out but the browser never left (or this
+  // page was bfcache-restored mid-flow), the pending authorize URL is still
+  // in sessionStorage — offer it as a manual link.
+  const [fallbackUrl, setFallbackUrl] = useState<string | null>(() => pendingAuthorizeUrl())
+
+  useEffect(() => {
+    // bfcache restore leaves React state (busy) frozen at true with a dead
+    // button — pageshow.persisted is the only signal that we came back.
+    const onPageShow = (e: PageTransitionEvent) => {
+      if (e.persisted) {
+        setBusy(false)
+        setFallbackUrl(pendingAuthorizeUrl())
+      }
+    }
+    window.addEventListener('pageshow', onPageShow)
+    return () => window.removeEventListener('pageshow', onPageShow)
+  }, [])
+
+  const onContinue = async () => {
+    const id = identifier.trim()
+    setError(null)
+    // DIDs aren't OAuth accounts — the did:* challenge lives on /auth.
+    if (id.startsWith('did:')) {
+      authLog('signin:did-lane', { did: id })
+      window.location.assign(`/auth?did=${encodeURIComponent(id)}`)
+      return
+    }
+    authLog('signin:submit', { handle: id })
+    setBusy(true)
+    setFallbackUrl(null)
+    try {
+      // Same-tab redirect: resolves never on success (the page navigates to
+      // the authorization server); /oauth/callback finishes the sign-in.
+      // If the navigation stalls, it resolves with the authorize URL so the
+      // user can click through manually.
+      const stalled = await signInWithBluesky(id)
+      if (stalled) {
+        setFallbackUrl(stalled.href)
+        setBusy(false)
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setError(msg)
+      setBusy(false)
+      setFallbackUrl(pendingAuthorizeUrl())
+    }
+  }
+
+  return (
+    <div className="flex min-h-screen flex-col bg-cn-1">
+      <header className="w-full border-b border-cn-2">
+        <div className="flex w-full items-center gap-3 px-4 py-3 sm:px-6">
+          <a href="/" className="flex items-center gap-2.5 no-underline hover:no-underline">
+            <img src="/logo-widespread.png" alt="" className="block h-8 w-auto" aria-hidden="true" />
+            <span className="hidden sm:block">
+              <strong className="block text-sm font-semibold text-cn-1">Widespread</strong>
+              <small className="block text-xs text-cn-2">Code forge</small>
+            </span>
+          </a>
+        </div>
+      </header>
+
+      <main id="main-content" className="mx-auto w-full max-w-md flex-1 px-4 py-10">
+        <h1 className="mb-2 text-3xl font-semibold text-cn-1">Sign in</h1>
+        <p className="mb-6 text-sm text-cn-2">
+          Sign in with your Bluesky account, or prove a DID by signing a one-time challenge.
+        </p>
+
+        <div className="rounded-cn-2 border border-cn-2 bg-cn-2 p-6">
+          <div className="flex flex-col gap-1.5 text-sm">
+            <label htmlFor="signin-handle" className="block text-sm font-semibold text-cn-1">
+              Handle or DID
+            </label>
+            <input
+              id="signin-handle"
+              type="text"
+              placeholder="alice.bsky.social or did:plc:…"
+              value={identifier}
+              disabled={busy}
+              onChange={e => setIdentifier(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') void onContinue()
+              }}
+              className="w-full rounded-cn-2 border border-cn-2 bg-cn-1 px-3 py-2 text-sm text-cn-1"
+            />
+          </div>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void onContinue()}
+            className="mt-4 flex w-full items-center justify-center gap-2 rounded-cn-2 bg-cn-success-primary px-3 py-2 text-sm font-medium text-cn-success-primary disabled:opacity-50"
+          >
+            {busy ? 'Waiting for Bluesky…' : 'Continue with Bluesky'}
+          </button>
+          {fallbackUrl && (
+            <p className="mt-4 text-sm text-cn-2">
+              Didn&apos;t get redirected?{' '}
+              <a
+                href={fallbackUrl}
+                className="text-cn-1 underline underline-offset-2 hover:text-cn-2"
+              >
+                Continue to Bluesky →
+              </a>
+            </p>
+          )}
+          {error && <p className="mt-4 text-sm text-cn-danger">{error}</p>}
+          <details className="mt-4 text-xs text-cn-3">
+            <summary className="cursor-pointer select-none">Debug log</summary>
+            <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-cn-2 border border-cn-2 bg-cn-1 p-2">
+              {getAuthLog().slice(-20).join('\n') || 'no auth events yet'}
+            </pre>
+          </details>
+          <div className="mt-4 text-center">
+            <a href="/auth" className="text-xs text-cn-3 underline underline-offset-2 hover:text-cn-2">
+              Sign with an atproto key instead
+            </a>
+          </div>
+        </div>
+      </main>
+
+      <footer className="shrink-0 border-t border-cn-2">
+        <div className="mx-auto flex max-w-6xl items-center gap-6 px-4 py-4 text-xs text-cn-3 sm:px-6">
+          <a href="/" className="flex items-center gap-1.5 no-underline hover:no-underline">
+            <img src="/logo-widespread.png" alt="" className="block h-5 w-auto" aria-hidden="true" />
+            <span>Widespread</span>
+          </a>
+          <a href="https://github.com/TerexitariusStomp/delta-git" className="no-underline hover:underline">
+            Source
+          </a>
+          <a href="https://wpcloud.delta-git.workers.dev" className="no-underline hover:underline">
+            Apps
+          </a>
+          <a
+            href="https://limic.dev"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="no-underline hover:underline"
+          >
+            limic.dev
+          </a>
+        </div>
+      </footer>
+    </div>
+  )
+}

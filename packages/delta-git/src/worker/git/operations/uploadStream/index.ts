@@ -1,0 +1,184 @@
+import type { CacheContext } from "@/worker/cache";
+import type { ServeUploadPackPlan } from "../fetch/types";
+
+import { pktLine } from "@/worker/git/core";
+import { responseCacheControl } from "@/worker/cache/policy";
+import { createLogger } from "@/worker/common";
+import { getLimiter, countSubrequest } from "../limits";
+import { parseFetchArgs } from "../args";
+import { findCommonHaves } from "../closure";
+import { buildAckOnlyResponse, buildShallowInfoSection } from "../fetch/protocol";
+import { repositoryNotReadyResponse } from "../fetch/responses";
+import {
+  buildServeUploadPackPlan,
+  FetchPlanRetryError,
+  loadUploadPackSnapshot,
+} from "../fetch/plan";
+import { resolvePackStreamResult } from "../fetch/execute";
+import {
+  SidebandProgressMux,
+  emitProgress,
+  emitFatal,
+  pipePackWithSideband,
+} from "../fetch/sideband";
+
+export * from "../fetch/types";
+
+function fetchPlanRetryResponse(error: FetchPlanRetryError): Response {
+  return new Response("Repository fetch planning is not ready, please retry in a few moments.\n", {
+    status: 503,
+    headers: {
+      "Retry-After": String(error.retryAfterSeconds),
+      "Content-Type": "text/plain; charset=utf-8",
+      "X-Git-Error": error.reason,
+    },
+  });
+}
+
+export async function handleFetchV2Streaming(
+  env: Env,
+  repoId: string,
+  body: Uint8Array,
+  signal?: AbortSignal,
+  cacheCtx?: CacheContext
+): Promise<Response> {
+  const fetchArgs = parseFetchArgs(body);
+  const { wants, haves, done } = fetchArgs;
+  const log = createLogger(env.LOG_LEVEL, { service: "StreamFetchV2", repoId });
+
+  if (signal?.aborted) {
+    return new Response("client aborted\n", { status: 499 });
+  }
+
+  if (wants.length === 0) {
+    return buildAckOnlyResponse([], cacheCtx);
+  }
+
+  // Client shallow markers participate in negotiation exactly like haves.
+  const negotiateHaves =
+    fetchArgs.clientShallows.length > 0 ? [...haves, ...fetchArgs.clientShallows] : haves;
+
+  if (!done) {
+    let ackOids: string[] = [];
+    if (negotiateHaves.length > 0) {
+      ackOids = await findCommonHaves(env, repoId, negotiateHaves, cacheCtx);
+      log.debug("stream:fetch:negotiation", {
+        haves: negotiateHaves.length,
+        acks: ackOids.length,
+      });
+    }
+    return buildAckOnlyResponse(ackOids, cacheCtx);
+  }
+
+  // Keep fetch readiness ahead of the response so clients still receive the
+  // current 503 + Retry-After signal while the repository is not yet fetchable.
+  const snapshotStart = Date.now();
+  const snapshotLoad = await loadUploadPackSnapshot(env, repoId, cacheCtx);
+  if (snapshotLoad.type === "RepositoryNotReady") {
+    log.warn("stream:fetch:repository-not-ready", { reason: snapshotLoad.reason });
+    return repositoryNotReadyResponse();
+  }
+  const snapshot = snapshotLoad.snapshot;
+
+  log.info("stream:fetch:snapshot-ready", {
+    wants: wants.length,
+    haves: haves.length,
+    packs: snapshot.packs.length,
+    timeMs: Date.now() - snapshotStart,
+  });
+
+  const planStart = Date.now();
+  log.info("stream:fetch:planning-start", {
+    wants: wants.length,
+    haves: haves.length,
+  });
+  let plan: ServeUploadPackPlan;
+  try {
+    plan = await buildServeUploadPackPlan(
+      env,
+      repoId,
+      snapshot,
+      wants,
+      haves,
+      signal,
+      cacheCtx,
+      undefined,
+      {
+        deepen: fetchArgs.deepen,
+        deepenNot: fetchArgs.deepenNot,
+        clientShallows: fetchArgs.clientShallows,
+        filter: fetchArgs.filter,
+      }
+    );
+  } catch (error) {
+    if (error instanceof FetchPlanRetryError) {
+      log.warn("stream:fetch:planning-retry", { reason: error.reason });
+      return fetchPlanRetryResponse(error);
+    }
+    throw error;
+  }
+  log.info("stream:fetch:planning-complete", {
+    needed: plan.neededOids.length,
+    timeMs: Date.now() - planStart,
+  });
+
+  const responseStream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const streamLog = createLogger(env.LOG_LEVEL, { service: "StreamFetchV2", repoId });
+      try {
+        if (plan.shallowInfo) {
+          for (const chunk of buildShallowInfoSection(plan.shallowInfo)) {
+            controller.enqueue(chunk);
+          }
+        }
+        controller.enqueue(pktLine("packfile\n"));
+        // Once the response body has started, later failures must travel over
+        // Git sideband because the HTTP status line is already committed.
+        emitProgress(controller, "Preparing pack...\n");
+
+        const progressMux = new SidebandProgressMux();
+        const limiter = getLimiter(plan.cacheCtx);
+        const packResult = await resolvePackStreamResult(env, plan, {
+          signal: plan.signal,
+          limiter,
+          countSubrequest: (n?: number) => countSubrequest(plan.cacheCtx, n),
+          onProgress: (msg) => progressMux.push(msg),
+        });
+
+        if (packResult.status !== "ok") {
+          streamLog.warn("stream:fetch:assemble-unavailable", {
+            needed: plan.neededOids.length,
+            reason: packResult.failure.reason,
+            retryable: packResult.failure.retryable,
+            details: packResult.failure.details,
+          });
+          emitFatal(controller, `Unable to assemble pack: ${packResult.failure.reason}`);
+          controller.close();
+          return;
+        }
+
+        await pipePackWithSideband(packResult.stream, controller, {
+          signal: plan.signal,
+          progressMux,
+          log: streamLog,
+        });
+
+        controller.close();
+      } catch (error) {
+        streamLog.error("stream:response:error", { error: String(error) });
+        try {
+          emitFatal(controller, String(error));
+        } catch {}
+        controller.error(error);
+      }
+    },
+  });
+
+  return new Response(responseStream, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/x-git-upload-pack-result",
+      "Cache-Control": responseCacheControl(cacheCtx),
+    },
+  });
+}

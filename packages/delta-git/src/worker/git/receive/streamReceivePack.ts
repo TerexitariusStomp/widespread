@@ -1,0 +1,510 @@
+import type { CacheContext } from "@/worker/cache";
+import type { Logger } from "@/worker/common/logger";
+import type { RepoDurableObject } from "@/worker/do";
+import type { PackCatalogRow } from "@/worker/do/repo/db/schema";
+import type { ReceiveStatus } from "@/worker/git/operations/validation";
+
+import { clientAbortedResponse, createLogger, getRepoStub } from "@/worker/common";
+import { canDivergeStatuses } from "@/worker/do/repo/catalog/diverge";
+import type { BeginReceiveResult } from "@/worker/do/repo/catalog/shared";
+import {
+  MAX_SIMULTANEOUS_CONNECTIONS,
+  SubrequestLimiter,
+  countSubrequest,
+} from "@/worker/git/operations/limits";
+import { isValidRefName, validateReceiveCommands } from "@/worker/git/operations/validation";
+import { logOnce } from "@/worker/git/object-store/support";
+import { executeReceivePipeline, ReceivePipelineHttpError } from "./pipeline";
+import { readPktSectionStream } from "./pktSectionStream";
+import {
+  parseReceiveRequest,
+  type ParsedReceiveRequest,
+  type ReceiveCommandList,
+  type ReceiveNegotiatedCapabilities,
+} from "./request";
+import {
+  buildReceiveResultResponse,
+  ReceiveSidebandWriter,
+  type ReceiveResponseMode,
+} from "./response";
+import {
+  buildReceiveReportStatus,
+  buildReceiveUnpackFailureReport,
+  isReceiveAbort,
+  throwIfReceiveAborted,
+} from "./support";
+
+const RECEIVE_SUBREQUEST_BUDGET = 5_000;
+
+// How long a blocked receive waits in line for a lease before giving up.
+// Stock git doesn't retry 503s, so a busy repo used to be a hard failure —
+// now the worker holds the request briefly and the sibling receive almost
+// always finishes inside the window. 25s sits comfortably under the
+// subrequest and CPU budgets while covering real receive durations.
+const LEASE_WAIT_BUDGET_MS = 25_000;
+
+type RepoStub = DurableObjectStub<RepoDurableObject>;
+type RepoStateChangeHandler = (change: {
+  changed: boolean;
+  empty: boolean;
+}) => Promise<void> | void;
+
+function countReceiveSubrequest(cacheCtx: CacheContext, log: Logger, op: string, n = 1) {
+  if (countSubrequest(cacheCtx, n)) return;
+  logOnce(cacheCtx, `receive-soft-budget:${op}`, () => {
+    log.warn("soft-budget-exhausted", { op });
+  });
+}
+
+function logReceiveEnd(log: Logger, status: number, extra?: Record<string, unknown>) {
+  log.info("receive:end", { status, ...extra });
+}
+
+/**
+ * Acquire a receive lease, waiting in line when the repo already has
+ * MAX_CONCURRENT_RECEIVES staged or a compaction is holding the catalog.
+ * Returns the last `ok:false` result once the wait budget is spent —
+ * the caller still emits the 503, but stock git almost never sees it now.
+ */
+async function beginReceiveWithWait(args: {
+  stub: RepoStub;
+  request: Request;
+  cacheCtx: CacheContext;
+  log: Logger;
+  /** Wait budget override — tests shrink this so the busy path is fast. */
+  waitBudgetMs?: number | undefined;
+}): Promise<BeginReceiveResult> {
+  const { stub, request, cacheCtx, log } = args;
+  const waitBudgetMs = args.waitBudgetMs ?? LEASE_WAIT_BUDGET_MS;
+  countReceiveSubrequest(cacheCtx, log, "do:begin-receive");
+  let begin = await stub.beginReceive();
+  if (begin.ok) return begin;
+
+  const started = Date.now();
+  let attempts = 0;
+  let delay = 250;
+  while (Date.now() - started < waitBudgetMs) {
+    if (request.signal.aborted) break;
+    // Jittered backoff — sibling receives finish at unrelated times, so a
+    // fixed cadence just adds contention.
+    await new Promise((resolve) => setTimeout(resolve, delay + Math.floor(Math.random() * delay)));
+    delay = Math.min(Math.floor(delay * 1.6), 2_000);
+    attempts++;
+    countReceiveSubrequest(cacheCtx, log, "do:begin-receive");
+    begin = await stub.beginReceive();
+    if (begin.ok) {
+      log.info("receive:lease-wait", { attempts, waitedMs: Date.now() - started });
+      return begin;
+    }
+  }
+  log.warn("receive:lease-wait-exhausted", {
+    attempts,
+    waitedMs: Date.now() - started,
+    aborted: request.signal.aborted,
+  });
+  return begin;
+}
+
+function buildReceiveCacheContext(
+  request: Request,
+  ctx: ExecutionContext,
+  repoId: string
+): { cacheCtx: CacheContext; limiter: SubrequestLimiter } {
+  const limiter = new SubrequestLimiter(MAX_SIMULTANEOUS_CONNECTIONS);
+  return {
+    cacheCtx: {
+      req: request,
+      ctx,
+      memo: {
+        repoId,
+        limiter,
+        subreqBudget: RECEIVE_SUBREQUEST_BUDGET,
+      },
+    },
+    limiter,
+  };
+}
+
+function selectReceiveResponseMode(
+  capabilities: ReceiveNegotiatedCapabilities
+): ReceiveResponseMode {
+  return capabilities.sideBand64k ? "side-band-64k" : "plain";
+}
+
+function scheduleRepoStateChange(
+  ctx: ExecutionContext,
+  onRepoStateChanged: RepoStateChangeHandler | undefined,
+  change: {
+    changed: boolean;
+    empty: boolean;
+  }
+): void {
+  if (!onRepoStateChanged || !change.changed) return;
+  ctx.waitUntil(Promise.resolve().then(() => onRepoStateChanged(change)));
+}
+
+function buildInvalidRefResponse(args: {
+  mode: ReceiveResponseMode;
+  commands: ReceiveCommandList;
+}): Response {
+  return buildReceiveResultResponse({
+    mode: args.mode,
+    reportStatusBody: buildReceiveUnpackFailureReport(args.commands, "invalid-ref", "invalid"),
+    changed: false,
+    empty: false,
+  });
+}
+
+function buildPreflightConflictResponse(args: {
+  mode: ReceiveResponseMode;
+  commands: ReceiveCommandList;
+  statuses: ReceiveStatus[];
+}): Response {
+  return buildReceiveResultResponse({
+    mode: args.mode,
+    reportStatusBody: buildReceiveReportStatus({
+      unpackOk: true,
+      commands: args.commands,
+      statuses: args.statuses,
+    }),
+    changed: false,
+    empty: false,
+  });
+}
+
+function getErrorStatus(error: unknown): number {
+  if (error instanceof ReceivePipelineHttpError) {
+    return error.status;
+  }
+
+  const message = String(error);
+  const lower = message.toLowerCase();
+  if (lower.includes("unsupported pack version") || lower.includes("pack header")) {
+    return 415;
+  }
+  if (
+    lower.includes("malformed") ||
+    lower.includes("missing") ||
+    lower.includes("ended before") ||
+    lower.includes("could not be resolved") ||
+    lower.includes("delta")
+  ) {
+    return 400;
+  }
+  return 500;
+}
+
+function createSidebandReceiveResponse(args: {
+  env: Env;
+  repoId: string;
+  namespaceId?: string | undefined;
+  request: Request;
+  ctx: ExecutionContext;
+  stub: RepoStub;
+  log: Logger;
+  cacheCtx: CacheContext;
+  limiter: SubrequestLimiter;
+  leaseToken: string;
+  activeCatalog: PackCatalogRow[];
+  commands: ParsedReceiveRequest["commands"];
+  /** "owner/repo" slug carried into `push` webhook payloads. */
+  repoSlug?: string | undefined;
+  pushOptions: string[];
+  capabilities: ReceiveNegotiatedCapabilities;
+  packStream: ReadableStream<Uint8Array>;
+  bytesConsumed: number;
+  onRepoStateChanged?: RepoStateChangeHandler | undefined;
+  /** Pusher identity recorded on divergent merge intents. */
+  actor?: string | undefined;
+}): Response {
+  const responseStream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const writer = new ReceiveSidebandWriter(controller);
+      const onProgress = args.capabilities.quiet
+        ? undefined
+        : (message: string) => writer.progress(message);
+      let closed = false;
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        controller.close();
+      };
+
+      try {
+        const result = await executeReceivePipeline({
+          env: args.env,
+          repoId: args.repoId,
+          namespaceId: args.namespaceId,
+          repoSlug: args.repoSlug,
+          request: args.request,
+          ctx: args.ctx,
+          packStream: args.packStream,
+          bytesConsumed: args.bytesConsumed,
+          stub: args.stub,
+          leaseToken: args.leaseToken,
+          activeCatalog: args.activeCatalog,
+          commands: args.commands,
+          pushOptions: args.pushOptions,
+          log: args.log,
+          cacheCtx: args.cacheCtx,
+          limiter: args.limiter,
+          countSubrequest: (op, n = 1) => countReceiveSubrequest(args.cacheCtx, args.log, op, n),
+          onProgress,
+          actor: args.actor,
+        });
+
+        scheduleRepoStateChange(args.ctx, args.onRepoStateChanged, {
+          changed: result.changed,
+          empty: result.empty,
+        });
+        writer.reportStatus(result.reportStatusBody);
+        logReceiveEnd(args.log, 200, {
+          changed: result.changed,
+          empty: result.empty,
+          packKey: result.packKey,
+          packBytes: result.packBytes,
+        });
+      } catch (error) {
+        if (isReceiveAbort(args.request, error)) {
+          logReceiveEnd(args.log, 499, { reason: "client-aborted" });
+          close();
+          return;
+        }
+
+        args.log.error("receive:error", { error: String(error) });
+        writer.reportStatus(
+          buildReceiveUnpackFailureReport(
+            args.commands,
+            error instanceof ReceivePipelineHttpError ? error.message : String(error)
+          )
+        );
+        logReceiveEnd(args.log, 200, { reason: "sideband-unpack-error" });
+      } finally {
+        close();
+      }
+    },
+  });
+
+  return new Response(responseStream, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/x-git-receive-pack-result",
+      // Credentialed mutating path; never share in caches.
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+export async function handleStreamingReceivePackPOST(
+  env: Env,
+  repoId: string,
+  request: Request,
+  ctx: ExecutionContext,
+  options?: {
+    onRepoStateChanged?: RepoStateChangeHandler | undefined;
+    actor?: string | undefined;
+    namespaceId?: string | undefined;
+    /** "owner/repo" slug carried into `push` webhook payloads. */
+    repoSlug?: string | undefined;
+    /**
+     * Lease wait-budget override in ms — test hook so the busy path can be
+     * exercised without a real 25s wait. Production callers omit it.
+     */
+    waitBudgetMs?: number | undefined;
+  }
+): Promise<Response> {
+  const stub = getRepoStub(env, repoId);
+  const log = createLogger(env.LOG_LEVEL, {
+    service: "StreamingReceivePack",
+    repoId,
+  });
+  log.info("receive:start", { mode: "streaming" });
+
+  if (!request.body) {
+    logReceiveEnd(log, 400, { reason: "missing-body" });
+    return new Response("Missing receive-pack request body\n", { status: 400 });
+  }
+  if (request.signal.aborted) {
+    logReceiveEnd(log, 499, { reason: "client-aborted" });
+    return clientAbortedResponse();
+  }
+
+  const { cacheCtx, limiter } = buildReceiveCacheContext(request, ctx, repoId);
+
+  const begin = await beginReceiveWithWait({
+    stub,
+    request,
+    cacheCtx,
+    log,
+    waitBudgetMs: options?.waitBudgetMs,
+  });
+  if (!begin.ok) {
+    log.warn("receive:block-busy", { retryAfter: begin.retryAfter, mode: "streaming" });
+    logReceiveEnd(log, 503, { reason: "receive-lease-active" });
+    return new Response("Repository is busy receiving; please retry shortly.\n", {
+      status: 503,
+      headers: {
+        "Retry-After": String(begin.retryAfter),
+        "Content-Type": "text/plain; charset=utf-8",
+      },
+    });
+  }
+  if (request.signal.aborted) {
+    // The client went away while we waited in line — release the lease
+    // immediately so it doesn't occupy a slot for its full TTL.
+    countReceiveSubrequest(cacheCtx, log, "do:abort-receive");
+    await stub.abortReceive(begin.lease.token).catch(() => {});
+    logReceiveEnd(log, 499, { reason: "client-aborted-after-wait" });
+    return clientAbortedResponse();
+  }
+
+  let pipelineStarted = false;
+  try {
+    const commandSection = await readPktSectionStream(request.body);
+    throwIfReceiveAborted(request, log, "read-command-section");
+
+    const parsedRequest = parseReceiveRequest(commandSection.lines);
+
+    // With push-options negotiated, git sends the option pkt-lines as a
+    // *second* section: commands + flush + options + flush + PACK. Read the
+    // option section out of the remainder so the pack stream starts at the
+    // PACK magic.
+    let packStream = commandSection.packStream;
+    let bytesConsumed = commandSection.bytesConsumed;
+    let pushOptionLines = parsedRequest.options;
+    if (parsedRequest.capabilities.pushOption) {
+      const optionsSection = await readPktSectionStream(commandSection.packStream);
+      pushOptionLines = [...pushOptionLines, ...optionsSection.lines];
+      packStream = optionsSection.packStream;
+      bytesConsumed += optionsSection.bytesConsumed;
+    }
+    const responseMode = selectReceiveResponseMode(parsedRequest.capabilities);
+
+    const invalidCommand = parsedRequest.commands.find((command) => !isValidRefName(command.ref));
+    if (invalidCommand) {
+      countReceiveSubrequest(cacheCtx, log, "do:abort-receive");
+      await stub.abortReceive(begin.lease.token).catch(() => {});
+      log.warn("receive:invalid-ref", { ref: invalidCommand.ref });
+      const response = buildInvalidRefResponse({
+        mode: responseMode,
+        commands: parsedRequest.commands,
+      });
+      logReceiveEnd(log, response.status, { reason: "invalid-ref", changed: false, empty: false });
+      return response;
+    }
+
+    const preflightStatuses = validateReceiveCommands(begin.refs, parsedRequest.commands);
+    if (
+      !preflightStatuses.every((status) => status.ok) &&
+      !canDivergeStatuses(parsedRequest.commands, preflightStatuses)
+    ) {
+      countReceiveSubrequest(cacheCtx, log, "do:abort-receive");
+      await stub.abortReceive(begin.lease.token).catch(() => {});
+      log.warn("receive:ref-conflict", {
+        conflictCount: preflightStatuses.filter((status) => !status.ok).length,
+        stage: "preflight",
+      });
+      const response = buildPreflightConflictResponse({
+        mode: responseMode,
+        commands: parsedRequest.commands,
+        statuses: preflightStatuses,
+      });
+      logReceiveEnd(log, response.status, { reason: "preflight-ref-conflict", changed: false });
+      return response;
+    }
+
+    if (responseMode === "side-band-64k") {
+      return createSidebandReceiveResponse({
+        env,
+        repoId,
+        namespaceId: options?.namespaceId,
+        repoSlug: options?.repoSlug,
+        request,
+        ctx,
+        stub,
+        log,
+        cacheCtx,
+        limiter,
+        leaseToken: begin.lease.token,
+        activeCatalog: begin.activeCatalog,
+        commands: parsedRequest.commands,
+        pushOptions: pushOptionLines,
+        capabilities: parsedRequest.capabilities,
+        packStream,
+        bytesConsumed,
+        onRepoStateChanged: options?.onRepoStateChanged,
+        actor: options?.actor,
+      });
+    }
+
+    pipelineStarted = true;
+    const result = await executeReceivePipeline({
+      env,
+      repoId,
+      namespaceId: options?.namespaceId,
+      repoSlug: options?.repoSlug,
+      request,
+      ctx,
+      packStream,
+      bytesConsumed,
+      stub,
+      leaseToken: begin.lease.token,
+      activeCatalog: begin.activeCatalog,
+      commands: parsedRequest.commands,
+      pushOptions: pushOptionLines,
+      log,
+      cacheCtx,
+      limiter,
+      countSubrequest: (op, n = 1) => countReceiveSubrequest(cacheCtx, log, op, n),
+      actor: options?.actor,
+    });
+
+    scheduleRepoStateChange(ctx, options?.onRepoStateChanged, {
+      changed: result.changed,
+      empty: result.empty,
+    });
+
+    const response = buildReceiveResultResponse({
+      mode: "plain",
+      reportStatusBody: result.reportStatusBody,
+      changed: result.changed,
+      empty: result.empty,
+    });
+    logReceiveEnd(log, response.status, {
+      changed: result.changed,
+      empty: result.empty,
+      packKey: result.packKey,
+      packBytes: result.packBytes,
+    });
+    return response;
+  } catch (error) {
+    if (!pipelineStarted) {
+      countReceiveSubrequest(cacheCtx, log, "do:abort-receive");
+      await stub.abortReceive(begin.lease.token).catch(() => {});
+    }
+
+    if (isReceiveAbort(request, error)) {
+      log.info("receive:aborted", { error: String(error) });
+      logReceiveEnd(log, 499, { reason: "client-aborted" });
+      return clientAbortedResponse();
+    }
+
+    log.error("receive:error", { error: String(error) });
+
+    if (error instanceof ReceivePipelineHttpError) {
+      const response = new Response(`${error.message}\n`, {
+        status: error.status,
+        headers: { "Content-Type": "text/plain; charset=utf-8" },
+      });
+      logReceiveEnd(log, response.status, { reason: error.reason });
+      return response;
+    }
+
+    const response = new Response(`${String(error)}\n`, {
+      status: getErrorStatus(error),
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
+    });
+    logReceiveEnd(log, response.status, { reason: "error" });
+    return response;
+  }
+}

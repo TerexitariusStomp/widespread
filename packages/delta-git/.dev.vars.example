@@ -1,0 +1,65 @@
+# Local development values used by `wrangler types`.
+# Copy this file to `.dev.vars` and replace placeholders as needed.
+
+# Repo Durable Object idle cleanup threshold in minutes.
+REPO_DO_IDLE_MINUTES=30
+
+# Logging level: debug|info|warn|error.
+LOG_LEVEL=debug
+
+# Local goc browser session cookie sealing secret. Generate a real value with
+# `openssl rand -hex 32`, then set production with
+# `wrangler secret put SESSION_SECRET`; never commit a real production value.
+SESSION_SECRET=local-goc-session-secret-change-me
+
+# tessera OIDC issuer override for local dev. Production value lives in
+# wrangler.jsonc.vars (https://auth.limic.dev). Loopback HTTP is allowed for
+# the issuer because tessera dev runs on http://localhost:5174.
+TESSERA_OIDC_ISSUER=http://localhost:5174
+
+# tessera OIDC client credentials. These are runtime/deployment-specific.
+# Production should use `wrangler secret put TESSERA_OIDC_CLIENT_SECRET` (and
+# either `wrangler secret put` or env-specific vars for the client id);
+# never commit a real production value to wrangler.jsonc.vars.
+TESSERA_OIDC_CLIENT_ID=local-goc
+TESSERA_OIDC_CLIENT_SECRET=local-goc-dev-secret-change-me
+
+# delta-git key encryption key for repo secrets (AES-256-GCM, 32-byte hex).
+# Production: `wrangler secret put DG_KEK`.
+DG_KEK=0000000000000000000000000000000000000000000000000000000000000001
+
+# Cloudflare API token for the deploy-on-commit lane (workers+pages edit).
+# Production: `wrangler secret put CF_API_TOKEN`.
+CF_API_TOKEN=local-placeholder
+
+# Cloudflare account id for the deploy lane (not a secret).
+CF_ACCOUNT_ID=00000000000000000000000000000000
+
+# Hermes browser-agent origin for /embed/hermes (embed.js source).
+HERMES_ORIGIN=http://localhost:8471
+
+# Shared secret for cross-app sign-in handoffs (dg_token JWT signing). Must
+# match the same-named secret on the wpcloud worker. Production:
+# `wrangler secret put DG_SESSION_SECRET`.
+DG_SESSION_SECRET=local-dg-session-secret-change-me
+
+# Hosts allowed as `return_to` targets on /auth/oauth/start (comma-separated
+# bare hostnames). Production: wpcloud.delta-git.workers.dev.
+ALLOWED_RETURN_HOSTS=localhost,127.0.0.1
+
+# Node signing key for dg-rep-cert-1 reputation certificates (JWK Ed25519
+# private key). Production: `wrangler secret put DG_NODE_ED25519_JWK`.
+DG_NODE_ED25519_JWK={"kty":"OKP","crv":"Ed25519","x":"","d":"","key_ops":["sign"]}
+
+# Bearer token for the outbound notification mail API (EMAIL_API_URL in
+# wrangler.jsonc). Production: `wrangler secret put EMAIL_API_KEY`. A static
+# placeholder is fine for local dev since EMAIL_API_URL defaults to empty
+# (email delivery disabled).
+EMAIL_API_KEY=local-email-api-key-change-me
+
+# Bearer token the compute pool uses to dispatch jobs to the localchimera
+# coordinator (COMPUTE_COORDINATOR in wrangler.jsonc). Matches a slug in the
+# coordinator's PROJECT_TOKENS map. Production: `wrangler secret put
+# COMPUTE_DISPATCH_TOKEN`. Placeholder is fine locally — the pool path is
+# inert while COMPUTE_COORDINATOR is empty.
+COMPUTE_DISPATCH_TOKEN=local-compute-token-change-me

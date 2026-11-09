@@ -1,0 +1,961 @@
+import type { HeadInfo, Ref } from "@/worker/git";
+import type { CacheContext } from "@/worker/cache/cache";
+
+import {
+  capabilityAdvertisement,
+  parseV2Command,
+  pktLine,
+  flushPkt,
+  concatChunks,
+  getHeadAndRefs,
+} from "@/worker/git";
+import { loadPeeledTagTargets } from "@/worker/git/object-store";
+import { handleFetchV2Streaming } from "@/worker/git/operations/uploadStream";
+import { handleObjectInfoCommand } from "@/worker/git/operations/objectInfo";
+import { handleBundleGet, handleBundleUriCommand } from "@/worker/git/operations/bundle";
+import {
+  hasHttpSignature,
+  HTTP_SIG_MAX_BODY_BYTES,
+  signatureChallenge,
+  verifyHttpSignature,
+} from "@/worker/auth/httpSignature";
+import { handleStreamingReceivePackPOST } from "@/worker/git/receive/streamReceivePack";
+import { asBodyInit, gunzip, requestOrigin } from "@/worker/common";
+import { bytesToHex } from "@/worker/common/hex";
+import { createDigestStream } from "@/worker/common/webtypes";
+import { doPrefix } from "@/worker/keys";
+import { chargeStorageQuota } from "@/worker/agent/abuse";
+import { buildCacheKeyFrom, cacheDeleteJSON, cacheOrLoadJSONForRequest } from "@/worker/cache";
+import { markRequestPrivate, responseCacheControl } from "@/worker/cache/policy";
+import { isValidOwnerRepo } from "@/shared/web";
+import { resolveRepositoryRoute, type RepositoryRoute } from "@/worker/repositories/route";
+import { hasOAuthScope, OAUTH_SCOPES } from "@/worker/auth/oauth";
+import {
+  authenticateGitRequest,
+  getBasicCredentials,
+  scheduleTouchPatLastUsedAt,
+  type GitAuthResult,
+} from "@/worker/auth/gitAuth";
+import type { Db } from "@/worker/db/d1/client";
+import type { Logger } from "@/worker/common/logger";
+import { touchRepositoryUpdatedAt } from "@/worker/db/d1/dal/repositories";
+import { recordClone } from "@/worker/traffic";
+import { workerExecutionContext, type AppContext, type AppRouter } from "./hono";
+import { gitCorsPreflight, withGitCors } from "./cors";
+
+type GitService = "git-upload-pack" | "git-receive-pack";
+type PatTouchOp = "read" | "write";
+
+// Realm string emitted on Basic auth challenges so git CLI prompts the user
+// with a recognisable label.
+const GIT_BASIC_REALM = 'Basic realm="git", charset="UTF-8"';
+
+function basicChallenge(): Response {
+  return new Response("Authentication required\n", {
+    status: 401,
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "WWW-Authenticate": GIT_BASIC_REALM,
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+function forbidden(message = "Forbidden\n"): Response {
+  return new Response(message, {
+    status: 403,
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+// Strict-E2E repos carry no plaintext objects server-side — the smart-HTTP
+// surface has nothing to serve. Point clients at the encrypted chunk plane
+// (`/api/v1/repos/{ref}/objects/*`) via the dg remote helper instead.
+function encryptedRepoRefusal(route: { encrypted: boolean }): Response | null {
+  if (!route.encrypted) return null;
+  return new Response("This repository is end-to-end encrypted; use the dg:// remote helper\n", {
+    status: 403,
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+function gitNotFound(): Response {
+  return new Response("Not found\n", {
+    status: 404,
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+// Git LFS speaks JSON (`Accept: application/vnd.git-lfs+json`); errors and
+// 401 challenges use the same media type so git-lfs surfaces the message.
+const LFS_MEDIATYPE = "application/vnd.git-lfs+json; charset=utf-8";
+
+function lfsError(status: number, message: string): Response {
+  return new Response(JSON.stringify({ message }), {
+    status,
+    headers: { "Content-Type": LFS_MEDIATYPE, "Cache-Control": "no-store" },
+  });
+}
+
+async function decodeUploadPackBody(request: Request): Promise<Uint8Array | Response> {
+  const rawBody = new Uint8Array(await request.arrayBuffer());
+  const contentEncoding = (request.headers.get("Content-Encoding") || "").trim().toLowerCase();
+
+  if (!contentEncoding || contentEncoding === "identity") {
+    return rawBody;
+  }
+
+  if (contentEncoding !== "gzip") {
+    return new Response(`Unsupported Content-Encoding: ${contentEncoding}\n`, {
+      status: 415,
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
+    });
+  }
+
+  try {
+    return await gunzip(rawBody);
+  } catch {
+    return new Response("Invalid gzip request body\n", {
+      status: 400,
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
+    });
+  }
+}
+
+/**
+ * Handles Git upload-pack (fetch) POST requests.
+ * Supports both protocol v2 and legacy protocol based on Git-Protocol header.
+ */
+async function handleUploadPackPOST(
+  env: Env,
+  route: RepositoryRoute,
+  request: Request,
+  cacheCtx: CacheContext
+) {
+  const decodedBody = await decodeUploadPackBody(request);
+  if (decodedBody instanceof Response) return decodedBody;
+  const body = decodedBody;
+  const gitProto = request.headers.get("Git-Protocol") || "";
+  const { command } = parseV2Command(body);
+  // Accept either explicit v2 header or a v2-formatted body (contains command=...)
+  if (!/version=2/.test(gitProto) && !command) {
+    return new Response("Expected Git protocol v2 (set Git-Protocol: version=2)\n", {
+      status: 400,
+    });
+  }
+
+  if (command === "ls-refs") {
+    const loader = async (): Promise<{ head: HeadInfo | undefined; refs: Ref[] } | null> => {
+      try {
+        const result = await getHeadAndRefs(env, route.doName, cacheCtx);
+        return { head: result.head, refs: result.refs };
+      } catch {
+        return null;
+      }
+    };
+    const cacheKeyRefs = buildCacheKeyFrom(request, "/_cache/refs", { repo: route.doName });
+    const refsData = await cacheOrLoadJSONForRequest<{ head: HeadInfo | undefined; refs: Ref[] }>(
+      cacheCtx,
+      cacheKeyRefs,
+      loader,
+      60
+    );
+    const { head, refs } = refsData || { refs: [] };
+
+    // Parse ls-refs arguments (reuse already-read body to avoid double-read of the stream)
+    const { args } = parseV2Command(body);
+    const refPrefixes: string[] = [];
+    let wantPeel = false;
+    for (const a of args) {
+      if (a === "peel") wantPeel = true;
+      else if (a.startsWith("ref-prefix ")) refPrefixes.push(a.slice("ref-prefix ".length));
+    }
+
+    let filteredRefs = refs;
+    if (refPrefixes.length > 0) {
+      filteredRefs = refs.filter((r) => refPrefixes.some((p) => r.name.startsWith(p)));
+    }
+
+    let peeledByRef = new Map<string, string>();
+    if (wantPeel) {
+      try {
+        const tagRefs = filteredRefs.filter((r) => r.name.startsWith("refs/tags/"));
+        if (tagRefs.length > 0) {
+          peeledByRef = await loadPeeledTagTargets(env, route.doName, tagRefs, cacheCtx);
+        }
+      } catch {}
+    }
+
+    const chunks: Uint8Array[] = [];
+    if (head && head.target) {
+      const t =
+        filteredRefs.find((r) => r.name === head.target) ||
+        refs.find((r) => r.name === head.target);
+      const headOid = head.oid ?? t?.oid;
+      const headLineAttrs: string[] = [];
+      headLineAttrs.push(`symref-target:${head.target}`);
+      if (headOid) {
+        const base = [`${headOid} HEAD`, ...headLineAttrs].join(" ");
+        chunks.push(pktLine(base + "\n"));
+      } else {
+        const base = ["unborn HEAD", ...headLineAttrs].join(" ");
+        chunks.push(pktLine(base + "\n"));
+      }
+    }
+
+    for (const r of filteredRefs) {
+      const attrs: string[] = [];
+      if (wantPeel) {
+        const peeled = peeledByRef.get(r.name);
+        if (peeled) attrs.push(`peeled:${peeled}`);
+      }
+      const line =
+        attrs.length > 0 ? `${r.oid} ${r.name} ${attrs.join(" ")}` : `${r.oid} ${r.name}`;
+      chunks.push(pktLine(line + "\n"));
+    }
+    chunks.push(flushPkt());
+    return new Response(asBodyInit(concatChunks(chunks)), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-result",
+        "Cache-Control": responseCacheControl(cacheCtx),
+      },
+    });
+  }
+
+  if (command === "fetch") {
+    return handleFetchV2Streaming(env, route.doName, body, request.signal, cacheCtx);
+  }
+
+  if (command === "object-info") {
+    return handleObjectInfoCommand(env, route.doName, body, cacheCtx);
+  }
+
+  if (command === "bundle-uri") {
+    return handleBundleUriCommand(env, route, request, cacheCtx);
+  }
+
+  return new Response("Unsupported command or malformed request\n", { status: 400 });
+}
+
+async function handleReceivePackPOST(
+  env: Env,
+  route: RepositoryRoute,
+  request: Request,
+  ctx: ExecutionContext,
+  db: Db,
+  log: Logger,
+  actor?: string
+) {
+  return await handleStreamingReceivePackPOST(env, route.doName, request, ctx, {
+    namespaceId: route.namespaceId,
+    repoSlug: `${route.routeNamespaceSlug}/${route.routeRepoSlug}`,
+    actor,
+    onRepoStateChanged: async ({ changed }) => {
+      if (!changed) return;
+      // A landed push must invalidate the 60s ls-refs snapshot — otherwise a
+      // clone racing the push replays the pre-push ref list for a minute.
+      await cacheDeleteJSON(buildCacheKeyFrom(request, "/_cache/refs", { repo: route.doName }));
+      try {
+        await touchRepositoryUpdatedAt(db, route.repositoryId, Date.now());
+        log.debug("receive:repo-updated-at-touched", { repositoryId: route.repositoryId });
+      } catch (error) {
+        log.warn("receive:repo-updated-at-failed", {
+          repositoryId: route.repositoryId,
+          error: String(error),
+        });
+      }
+    },
+  });
+}
+
+// Validate URL slug shape before any DB/DO/R2 work. Mirrors `repoKey` validity.
+function validateRouteSlugs(owner: string, repo: string): boolean {
+  return isValidOwnerRepo(owner) && isValidOwnerRepo(repo);
+}
+
+function normalizeGitRouteRepoSlug(repo: string): string {
+  // Git clients append Smart HTTP endpoints to the clone URL. Accept
+  // clone-style `/repo.git/...` URLs while resolving storage against the
+  // canonical repository slug.
+  return repo.endsWith(".git") ? repo.slice(0, -".git".length) : repo;
+}
+
+function gitRequestAllowsD1Fallback(request: Request): boolean {
+  const credentials = getBasicCredentials(request);
+  return credentials !== null && credentials.password.length > 0;
+}
+
+async function resolveGitRoute(
+  c: AppContext,
+  owner: string,
+  repo: string
+): Promise<RepositoryRoute | null> {
+  return await resolveRepositoryRoute(c.env, owner, repo, {
+    mode: gitRequestAllowsD1Fallback(c.req.raw) ? "allow-d1-fallback" : "route-cache-only",
+    db: c.var.db,
+    log: c.var.logFor({ service: "RepoRoute" }),
+  });
+}
+
+type ResolveGitRouteResult =
+  | { kind: "ok"; route: RepositoryRoute }
+  | { kind: "response"; response: Response };
+
+async function resolveGitRouteForRequest(
+  c: AppContext,
+  owner: string,
+  repo: string,
+  service: GitService,
+  isDiscovery: boolean
+): Promise<ResolveGitRouteResult> {
+  const route = await resolveGitRoute(c, owner, repo);
+  if (route) return { kind: "ok", route };
+
+  // Git sends the first receive-pack discovery request before it has
+  // credentials. If the route cache has no candidate yet (or the repo is
+  // private and intentionally absent from ROUTES), challenge so the client
+  // can retry with Basic/PAT. A request that already carried a Basic
+  // password has used D1 fallback and remains a real 404 when unresolved.
+  if (service === "git-receive-pack" && !gitRequestAllowsD1Fallback(c.req.raw)) {
+    return {
+      kind: "response",
+      response: challengeUnresolvedPushRoute(c, owner, repo, isDiscovery),
+    };
+  }
+  return { kind: "response", response: gitNotFound() };
+}
+
+function challengeUnresolvedPushRoute(
+  c: AppContext,
+  owner: string,
+  repo: string,
+  isDiscovery: boolean
+): Response {
+  const log = c.var.logFor({ service: "GitAcl" });
+  log.info("git-acl:push-route-miss-401-challenge", {
+    owner,
+    repo,
+    discovery: isDiscovery,
+  });
+  return basicChallenge();
+}
+
+// 401 challenge for bearer clients — git clients that sent an OAuth token
+// get a Bearer realm (not Basic) so they know which scheme to retry with.
+function bearerChallenge(): Response {
+  return new Response("Unauthorized", {
+    status: 401,
+    headers: {
+      "WWW-Authenticate": 'Bearer realm="delta-git", error="invalid_token"',
+    },
+  });
+}
+
+function gateD1FallbackGitAuth(
+  c: AppContext,
+  route: RepositoryRoute,
+  auth: GitAuthResult
+): Response | null {
+  if (route.source !== "d1") return null;
+  if (auth.kind === "pat") return null;
+  if (auth.kind === "oauth" && auth.verified.member) return null;
+  const log = c.var.logFor({ service: "GitAcl", repoId: route.doName });
+  if (auth.kind === "pat-rejected" && auth.reason === "grant-missing") {
+    log.info("git-acl:d1-fallback-grant-missing", { reason: auth.reason });
+    return forbidden();
+  }
+  if (auth.kind === "oauth" && !auth.verified.member) {
+    log.info("git-acl:d1-fallback-oauth-nonmember", { userId: auth.verified.userId });
+    return forbidden();
+  }
+  if (auth.kind === "oauth-rejected") {
+    log.info("git-acl:d1-fallback-oauth-rejected", {});
+    return bearerChallenge();
+  }
+  log.info("git-acl:d1-fallback-unauthorized", { reason: auth.kind });
+  return basicChallenge();
+}
+
+// Decide whether a Git read (info-refs upload-pack, git-upload-pack) is
+// allowed for the resolved route given the authenticated principal. Returns
+// `null` when allowed, otherwise the response to send.
+function gateGitRead(c: AppContext, route: RepositoryRoute, auth: GitAuthResult): Response | null {
+  if (route.visibility === "public") return null;
+  const log = c.var.logFor({ service: "GitAcl", repoId: route.doName });
+  switch (auth.kind) {
+    case "anonymous":
+      // Discovery hop on private upload-pack: 404 to avoid leaking existence.
+      log.info("git-acl:private-404", { reason: "anonymous-read" });
+      return gitNotFound();
+    case "missing-credentials":
+      log.info("git-acl:private-401-challenge", { reason: "missing-credentials" });
+      return basicChallenge();
+    case "pat-rejected":
+      // Any PAT failure on a read is reported as 401 so the client can retry
+      // with fresh creds, EXCEPT grant-missing which is 403 (the user has
+      // proven their identity but lacks access).
+      if (auth.reason === "grant-missing") {
+        log.info("git-acl:pat-rejected", { reason: auth.reason });
+        return forbidden();
+      }
+      log.info("git-acl:pat-rejected", { reason: auth.reason });
+      return basicChallenge();
+    case "pat":
+      return null;
+    case "oauth":
+      // Private-repo read needs both the scope and namespace membership.
+      if (!auth.verified.member || !hasOAuthScope(auth.verified.scopes, OAUTH_SCOPES.REPO_READ)) {
+        log.info("git-acl:oauth-read-denied", {
+          userId: auth.verified.userId,
+          member: auth.verified.member,
+          scopes: auth.verified.scopes.join(","),
+        });
+        return forbidden();
+      }
+      return null;
+    case "oauth-rejected":
+      log.info("git-acl:oauth-rejected", {});
+      return bearerChallenge();
+  }
+}
+
+// Push (receive-pack) requires a PAT with `level === "push"` regardless of
+// repo visibility. Public repos do NOT fall through to anonymous push: the
+// resolved D1 row is the only authority, and it has no per-repo "anyone can
+// push" toggle. Treat any non-PAT-push principal as an auth challenge or
+// 403 by reason.
+async function gateGitPush(
+  c: AppContext,
+  route: RepositoryRoute,
+  auth: GitAuthResult,
+  isDiscovery: boolean
+): Promise<Response | null> {
+  const log = c.var.logFor({ service: "GitAcl", repoId: route.doName });
+  if (auth.kind === "pat") {
+    if (auth.verified.level !== "push") {
+      log.info("git-acl:push-pull-only", { patId: auth.verified.patId });
+      return forbidden();
+    }
+    return null;
+  }
+  if (auth.kind === "pat-rejected") {
+    if (auth.reason === "grant-missing") {
+      log.info("git-acl:pat-rejected", { reason: auth.reason });
+      return forbidden();
+    }
+    log.info("git-acl:pat-rejected", { reason: auth.reason });
+    return basicChallenge();
+  }
+  if (auth.kind === "oauth") {
+    // Push needs the write scope AND namespace membership — the OAuth
+    // analog of a PAT's namespace-scoped grant at `level === "push"`.
+    if (auth.verified.member && hasOAuthScope(auth.verified.scopes, OAUTH_SCOPES.REPO_WRITE)) {
+      return null;
+    }
+    log.info("git-acl:oauth-push-denied", {
+      userId: auth.verified.userId,
+      member: auth.verified.member,
+      scopes: auth.verified.scopes.join(","),
+    });
+    return forbidden();
+  }
+  if (auth.kind === "oauth-rejected") {
+    log.info("git-acl:push-oauth-rejected", { discovery: isDiscovery });
+    return bearerChallenge();
+  }
+  // anonymous | missing-credentials -> 401 challenge so the git client
+  // re-issues with Basic credentials.
+  log.info("git-acl:push-401-challenge", {
+    reason: auth.kind === "anonymous" ? "anonymous" : "missing-credentials",
+    discovery: isDiscovery,
+    visibility: route.visibility,
+  });
+  return basicChallenge();
+}
+
+type GitAuthorizationResult =
+  | { kind: "ok"; cacheCtx: CacheContext; actor?: string }
+  | { kind: "response"; response: Response };
+
+async function authorizeGitRouteForRequest(
+  c: AppContext,
+  route: RepositoryRoute,
+  service: GitService,
+  isDiscovery: boolean,
+  patTouchOp: PatTouchOp
+): Promise<GitAuthorizationResult> {
+  const cacheCtx = c.var.cacheCtx;
+  if (route.visibility !== "public" || service === "git-receive-pack") {
+    markRequestPrivate(cacheCtx);
+  }
+
+  // Git Smart HTTP can't carry per-request DPoP proofs (static
+  // http.extraHeader + multi-request conversation) — bound OAuth tokens
+  // degrade to bearer here; API/MCP keep the sender constraint.
+  const auth = await authenticateGitRequest(c.env, c.req.raw, route, {
+    db: c.var.db,
+    enforceDpop: false,
+  });
+  const fallbackBlocked = gateD1FallbackGitAuth(c, route, auth);
+  if (fallbackBlocked) return { kind: "response", response: fallbackBlocked };
+
+  const blocked =
+    service === "git-receive-pack"
+      ? await gateGitPush(c, route, auth, isDiscovery)
+      : gateGitRead(c, route, auth);
+  if (blocked) return { kind: "response", response: blocked };
+
+  if (auth.kind === "pat") {
+    // PAT `last_used_at` is a visibility signal for token management only;
+    // it is throttled for reads and always attempted for writes.
+    scheduleTouchPatLastUsedAt(
+      c.env,
+      workerExecutionContext(c),
+      auth.verified,
+      patTouchOp,
+      Date.now(),
+      {
+        db: c.var.db,
+        log: c.var.logFor({ service: "GitAuth" }),
+      }
+    );
+  }
+
+  return {
+    kind: "ok",
+    cacheCtx,
+    actor: auth.kind === "pat" || auth.kind === "oauth" ? auth.verified.userId : undefined,
+  };
+}
+
+// Artifacts-backed repos serve their git data plane from the Cloudflare
+// Artifacts remote (`https://<acct>.artifacts.cloudflare.net/git/…`). We
+// redirect AFTER the normal auth gate so private repos stay non-enumerable
+// and PAT auth continues to decide who may discover the remote URL. Git
+// follows 302s for both discovery and POST service requests; the client
+// then authenticates to the remote with an `art_v1_*` token from
+// `POST /api/:owner/:repo/dg/token` (delta-git PATs do not work there).
+//
+// Anonymous clones of PUBLIC repos get a short-lived read token embedded
+// in the redirect userinfo — otherwise the remote's auth wall makes
+// `git clone` fail for exactly the audience public repos exist for.
+// 15-minute read scope only; pushes still mint their own token via
+// /dg/token (write scope is never embedded).
+async function artifactsRemoteRedirect(
+  request: Request,
+  route: RepositoryRoute,
+  env: Env,
+  service: GitService,
+  log: ReturnType<AppContext["var"]["logFor"]>
+): Promise<Response | null> {
+  if (route.backend !== "artifacts" || !route.artifactsRemote) return null;
+  const url = new URL(request.url);
+  // Path is `/<owner>/<repo>[.git]/<service path>` — strip the first two
+  // segments rather than matching the slug, since the .git suffix may or
+  // may not be present in the request.
+  const suffix = url.pathname.replace(/^\/[^/]+\/[^/]+/, "");
+  const target = new URL(`${route.artifactsRemote}${suffix}${url.search}`);
+
+  if (service === "git-upload-pack" && route.visibility === "public" && route.artifactsName) {
+    // The ARTIFACTS binding can throw synchronously (remote-only bindings
+    // in miniflare, missing service) — try/catch, not .catch().
+    let token: { plaintext: string } | null = null;
+    try {
+      const repo = env.ARTIFACTS ? await env.ARTIFACTS.get(route.artifactsName) : null;
+      token = repo ? await repo.createToken("read", 900) : null;
+    } catch {
+      token = null;
+    }
+    if (token) {
+      target.username = "x-access-token";
+      target.password = token.plaintext;
+    } else {
+      // Mint failure degrades to a bare redirect — authenticated clients
+      // can still /dg/token; anonymous clone honestly fails downstream.
+      log.warn("git-artifacts:anon-token-mint-failed", { repoId: route.doName });
+    }
+  }
+  return new Response(null, {
+    status: 302,
+    headers: { Location: target.toString() },
+  });
+}
+
+/**
+ * Registers Git Smart HTTP v2 routes on the router.
+ */
+export function registerGitRoutes(router: AppRouter) {
+  router.get(`/:owner/:repo/info/refs`, async (c) => {
+    const owner = c.req.param("owner");
+    const repo = normalizeGitRouteRepoSlug(c.req.param("repo"));
+    if (!validateRouteSlugs(owner, repo)) return gitNotFound();
+    const url = new URL(c.req.url);
+    const service = url.searchParams.get("service");
+    if (service !== "git-upload-pack" && service !== "git-receive-pack") {
+      return new Response("Missing or unsupported service\n", { status: 400 });
+    }
+    const resolved = await resolveGitRouteForRequest(c, owner, repo, service, true);
+    if (resolved.kind === "response") return withGitCors(c.req.raw, resolved.response);
+    const route = resolved.route;
+    const encRefusal = encryptedRepoRefusal(route);
+    if (encRefusal) return withGitCors(c.req.raw, encRefusal);
+    const authorized = await authorizeGitRouteForRequest(c, route, service, true, "read");
+    if (authorized.kind === "response") return withGitCors(c.req.raw, authorized.response);
+    const artifactsRedirect = await artifactsRemoteRedirect(
+      c.req.raw,
+      route,
+      c.env,
+      service,
+      c.var.logFor({ service: "GitArtifacts", repoId: route.doName })
+    );
+    if (artifactsRedirect) return withGitCors(c.req.raw, artifactsRedirect);
+    const { cacheCtx } = authorized;
+    return withGitCors(
+      c.req.raw,
+      await capabilityAdvertisement(c.env, service, route.doName, cacheCtx)
+    );
+  });
+
+  // Browser git clients (isomorphic-git in the PWA working copy) issue CORS
+  // preflights before speaking smart HTTP; answer them on every git endpoint.
+  router.options(`/:owner/:repo/info/refs`, (c) => gitCorsPreflight(c.req.raw));
+  router.options(`/:owner/:repo/git-upload-pack`, (c) => gitCorsPreflight(c.req.raw));
+  router.options(`/:owner/:repo/git-receive-pack`, (c) => gitCorsPreflight(c.req.raw));
+
+  router.post(`/:owner/:repo/git-upload-pack`, async (c) => {
+    const owner = c.req.param("owner");
+    const repo = normalizeGitRouteRepoSlug(c.req.param("repo"));
+    if (!validateRouteSlugs(owner, repo)) return gitNotFound();
+    const resolved = await resolveGitRouteForRequest(c, owner, repo, "git-upload-pack", false);
+    if (resolved.kind === "response") return resolved.response;
+    const route = resolved.route;
+    const encRefusal = encryptedRepoRefusal(route);
+    if (encRefusal) return withGitCors(c.req.raw, encRefusal);
+    const authorized = await authorizeGitRouteForRequest(
+      c,
+      route,
+      "git-upload-pack",
+      false,
+      "read"
+    );
+    if (authorized.kind === "response") return withGitCors(c.req.raw, authorized.response);
+    const artifactsRedirect = await artifactsRemoteRedirect(
+      c.req.raw,
+      route,
+      c.env,
+      "git-upload-pack",
+      c.var.logFor({ service: "GitArtifacts", repoId: route.doName })
+    );
+    if (artifactsRedirect) return withGitCors(c.req.raw, artifactsRedirect);
+    // Traffic accounting — every authorized upload-pack counts as a clone
+    // (same rollup GitHub uses: fetches count toward clone traffic).
+    c.executionCtx.waitUntil(recordClone(c.env, route.doName));
+    return withGitCors(
+      c.req.raw,
+      await handleUploadPackPOST(c.env, route, c.req.raw, authorized.cacheCtx)
+    );
+  });
+
+  // protocol-v2 bundle-uri downloads — same read gate as upload-pack, since
+  // a bundle is a complete clone of every reachable object.
+  router.get(`/:owner/:repo/bundle/:token`, async (c) => {
+    const owner = c.req.param("owner");
+    const repo = normalizeGitRouteRepoSlug(c.req.param("repo"));
+    if (!validateRouteSlugs(owner, repo)) return gitNotFound();
+    const resolved = await resolveGitRouteForRequest(c, owner, repo, "git-upload-pack", false);
+    if (resolved.kind === "response") return resolved.response;
+    const route = resolved.route;
+    const encRefusal = encryptedRepoRefusal(route);
+    if (encRefusal) return withGitCors(c.req.raw, encRefusal);
+    const authorized = await authorizeGitRouteForRequest(
+      c,
+      route,
+      "git-upload-pack",
+      false,
+      "read"
+    );
+    if (authorized.kind === "response") return withGitCors(c.req.raw, authorized.response);
+    const artifactsRedirect = await artifactsRemoteRedirect(
+      c.req.raw,
+      route,
+      c.env,
+      "git-upload-pack",
+      c.var.logFor({ service: "GitArtifacts", repoId: route.doName })
+    );
+    if (artifactsRedirect) return withGitCors(c.req.raw, artifactsRedirect);
+    c.executionCtx.waitUntil(recordClone(c.env, route.doName));
+    return withGitCors(
+      c.req.raw,
+      await handleBundleGet(
+        c.env,
+        route,
+        c.req.param("token"),
+        c.req.raw.signal,
+        authorized.cacheCtx
+      )
+    );
+  });
+
+  router.post(`/:owner/:repo/git-receive-pack`, async (c) => {
+    const owner = c.req.param("owner");
+    const repo = normalizeGitRouteRepoSlug(c.req.param("repo"));
+    if (!validateRouteSlugs(owner, repo)) return gitNotFound();
+    const resolved = await resolveGitRouteForRequest(c, owner, repo, "git-receive-pack", false);
+    if (resolved.kind === "response") return resolved.response;
+    const route = resolved.route;
+    const encRefusal = encryptedRepoRefusal(route);
+    if (encRefusal) return withGitCors(c.req.raw, encRefusal);
+
+    // RFC 9421 / GLIP-01 lane: did:key-signed pushes authenticate the agent
+    // directly — no PAT, no Basic. The signature covers the body digest, so
+    // we buffer here (capped) and hand the streaming receive a rebuilt
+    // Request. Verified agents inherit merge-intent push semantics: their
+    // updates become intents adjudicated like any other divergent push.
+    if (hasHttpSignature(c.req.raw)) {
+      const log = c.var.logFor({ service: "GitAcl", repoId: route.doName });
+      const body = new Uint8Array(await c.req.raw.arrayBuffer());
+      if (body.length > HTTP_SIG_MAX_BODY_BYTES) {
+        return withGitCors(c.req.raw, new Response("signed body too large\n", { status: 413 }));
+      }
+      const verified = await verifyHttpSignature({
+        request: c.req.raw,
+        body,
+        db: c.var.db,
+        env: c.env,
+      });
+      if (verified.kind === "rejected") {
+        log.info("git-acl:http-sig-rejected", { reason: verified.reason });
+        return withGitCors(
+          c.req.raw,
+          verified.reason === "unknown-did" || verified.reason === "agent-banned"
+            ? forbidden()
+            : signatureChallenge()
+        );
+      }
+      log.info("git-acl:http-sig-ok", { did: verified.did });
+      const artifactsRedirect = await artifactsRemoteRedirect(
+        c.req.raw,
+        route,
+        c.env,
+        "git-receive-pack",
+        c.var.logFor({ service: "GitArtifacts", repoId: route.doName })
+      );
+      if (artifactsRedirect) return withGitCors(c.req.raw, artifactsRedirect);
+      const rebuilt = new Request(c.req.raw.url, {
+        method: c.req.raw.method,
+        headers: c.req.raw.headers,
+        body,
+      });
+      const res = await handleReceivePackPOST(
+        c.env,
+        route,
+        rebuilt,
+        workerExecutionContext(c),
+        c.var.db,
+        c.var.logFor({ service: "ReceiveAcl", repoId: route.doName }),
+        verified.did
+      );
+      return withGitCors(c.req.raw, res);
+    }
+
+    const authorized = await authorizeGitRouteForRequest(
+      c,
+      route,
+      "git-receive-pack",
+      false,
+      "write"
+    );
+    if (authorized.kind === "response") return withGitCors(c.req.raw, authorized.response);
+    const artifactsRedirect = await artifactsRemoteRedirect(
+      c.req.raw,
+      route,
+      c.env,
+      "git-receive-pack",
+      c.var.logFor({ service: "GitArtifacts", repoId: route.doName })
+    );
+    if (artifactsRedirect) return withGitCors(c.req.raw, artifactsRedirect);
+    const res = await handleReceivePackPOST(
+      c.env,
+      route,
+      c.req.raw,
+      workerExecutionContext(c),
+      c.var.db,
+      c.var.logFor({ service: "ReceiveAcl", repoId: route.doName }),
+      authorized.actor
+    );
+    return withGitCors(c.req.raw, res);
+  });
+
+  // --- Git LFS -------------------------------------------------------------
+  // git-lfs discovers the endpoint at `<remote>.git/info/lfs` and negotiates
+  // uploads/downloads through the Batch API (`/objects/batch`), then PUTs or
+  // GETs each object href. Objects live in R2 under `do/<doId>/lfs/<oid>` —
+  // opaque bytes keyed by their SHA-256, verified on upload. Auth mirrors the
+  // git transport gates: downloads follow the read gate (anonymous on public
+  // repos), uploads the push gate (PAT level=push / OAuth write+member).
+  // Encrypted repos still work — LFS objects are opaque server-side either
+  // way; strict-E2E clients push pre-encrypted blobs.
+
+  const lfsObjectHref = (origin: string, owner: string, repo: string, oid: string) =>
+    `${origin}/${owner}/${repo}.git/info/lfs/objects/${oid}`;
+
+  const lfsObjectKey = (env: Env, route: RepositoryRoute, oid: string) =>
+    `${doPrefix(env.REPO_DO.idFromName(route.doName).toString())}/lfs/${oid}`;
+
+  // Resolve + authorize an LFS request. Upload maps onto the receive-pack
+  // gate (push creds), download onto the upload-pack gate (read creds).
+  // Returns the route when authorized, else the Response to emit — the
+  // service-threaded challenge/404 behavior matches what a git client gets
+  // on the smart-HTTP endpoints, which is what git-lfs expects to retry on.
+  async function authorizeLfs(
+    c: AppContext,
+    operation: "upload" | "download"
+  ): Promise<{ route: RepositoryRoute } | { response: Response }> {
+    const owner = c.req.param("owner") ?? "";
+    const repo = normalizeGitRouteRepoSlug(c.req.param("repo") ?? "");
+    if (!validateRouteSlugs(owner, repo)) return { response: lfsError(404, "Not Found") };
+    const service: GitService = operation === "upload" ? "git-receive-pack" : "git-upload-pack";
+    const resolved = await resolveGitRouteForRequest(c, owner, repo, service, false);
+    if (resolved.kind === "response") return { response: resolved.response };
+    const authorized = await authorizeGitRouteForRequest(
+      c,
+      resolved.route,
+      service,
+      false,
+      operation === "upload" ? "write" : "read"
+    );
+    if (authorized.kind === "response") return { response: authorized.response };
+    return { route: resolved.route };
+  }
+
+  // POST /{o}/{r}[.git]/info/lfs/objects/batch — the negotiation step.
+  // Request: {operation, transfers?, objects:[{oid,size}]}; we only offer
+  // the "basic" transfer (same-origin PUT/GET — auth headers carry over).
+  router.post(`/:owner/:repo/info/lfs/objects/batch`, async (c) => {
+    const body = (await c.req.raw.json().catch(() => null)) as {
+      operation?: string;
+      objects?: { oid?: string; size?: number }[];
+    } | null;
+    const operation = body?.operation;
+    if ((operation !== "upload" && operation !== "download") || !Array.isArray(body?.objects)) {
+      return lfsError(400, "expected {operation: upload|download, objects:[{oid,size}]}");
+    }
+    const authorized = await authorizeLfs(c, operation);
+    if ("response" in authorized) return authorized.response;
+    const route = authorized.route;
+
+    const origin = requestOrigin(c.env, c.req.url, c.req.raw.headers);
+    const owner = c.req.param("owner") ?? "";
+    const repo = normalizeGitRouteRepoSlug(c.req.param("repo") ?? "");
+    const authz = c.req.raw.headers.get("Authorization");
+    // Echo the client credential on same-origin hrefs so LFS clients that
+    // do not re-resolve per-host auth still authenticate the transfer.
+    const header = authz ? { Authorization: authz } : {};
+
+    const objects = [];
+    for (const o of body.objects) {
+      const oid = String(o.oid ?? "").toLowerCase();
+      const size = Number(o.size ?? NaN);
+      if (!/^[0-9a-f]{64}$/.test(oid) || !Number.isSafeInteger(size) || size < 0) {
+        objects.push({ oid, size, error: { code: 422, message: "invalid object descriptor" } });
+        continue;
+      }
+      const head = await c.env.REPO_BUCKET.head(lfsObjectKey(c.env, route, oid));
+      if (operation === "upload") {
+        // Already stored → no actions: the client treats it as done.
+        if (head) {
+          objects.push({ oid, size });
+          continue;
+        }
+        objects.push({
+          oid,
+          size,
+          actions: {
+            upload: { href: lfsObjectHref(origin, owner, repo, oid), header, expires_in: 3600 },
+          },
+        });
+      } else {
+        if (!head) {
+          objects.push({ oid, size, error: { code: 404, message: "object not found" } });
+          continue;
+        }
+        objects.push({
+          oid,
+          size: head.size,
+          actions: {
+            download: { href: lfsObjectHref(origin, owner, repo, oid), header, expires_in: 3600 },
+          },
+        });
+      }
+    }
+    return new Response(JSON.stringify({ transfer: "basic", objects }), {
+      status: 200,
+      headers: { "Content-Type": LFS_MEDIATYPE, "Cache-Control": "no-store" },
+    });
+  });
+
+  // PUT /{o}/{r}[.git]/info/lfs/objects/{oid} — upload the content addressable
+  // blob. Streamed through a DigestStream into R2 so large objects never
+  // land in isolate memory; the stored object is deleted on hash mismatch.
+  router.put(`/:owner/:repo/info/lfs/objects/:oid`, async (c) => {
+    const authorized = await authorizeLfs(c, "upload");
+    if ("response" in authorized) return authorized.response;
+    const route = authorized.route;
+    const oid = c.req.param("oid").toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(oid)) return lfsError(422, "invalid object id");
+    const body = c.req.raw.body;
+    if (!body) return lfsError(400, "missing object body");
+
+    const digest = createDigestStream("SHA-256");
+    const [hashBranch, storeBranch] = body.tee();
+    const hashing = hashBranch.pipeTo(digest);
+    const key = lfsObjectKey(c.env, route, oid);
+    await c.env.REPO_BUCKET.put(key, storeBranch);
+    await hashing;
+    const stored = await c.env.REPO_BUCKET.head(key);
+    if (!stored || bytesToHex(new Uint8Array(await digest.digest)) !== oid) {
+      await c.env.REPO_BUCKET.delete(key);
+      return lfsError(422, "content does not match oid");
+    }
+    // Charge the namespace storage quota after the fact — the object is
+    // already durable, so a quota rejection deletes it rather than losing
+    // a paid-for upload mid-stream.
+    const charged = await chargeStorageQuota(c.env.ROUTES, route.namespaceId, stored.size);
+    if (!charged) {
+      await c.env.REPO_BUCKET.delete(key);
+      return lfsError(413, "storage quota exceeded for this namespace");
+    }
+    c.var.logFor({ service: "LFS", repoId: route.doName }).info("lfs:object-stored", {
+      oid,
+      size: stored.size,
+    });
+    return new Response(null, { status: 200 });
+  });
+
+  // GET /{o}/{r}[.git]/info/lfs/objects/{oid} — the download href.
+  router.get(`/:owner/:repo/info/lfs/objects/:oid`, async (c) => {
+    const authorized = await authorizeLfs(c, "download");
+    if ("response" in authorized) return authorized.response;
+    const oid = c.req.param("oid").toLowerCase();
+    const obj = await c.env.REPO_BUCKET.get(lfsObjectKey(c.env, authorized.route, oid));
+    if (!obj) return lfsError(404, "object not found");
+    return new Response(obj.body, {
+      status: 200,
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": String(obj.size),
+        "Cache-Control": "private, no-store",
+      },
+    });
+  });
+}

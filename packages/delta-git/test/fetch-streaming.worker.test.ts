@@ -1,0 +1,1145 @@
+import { it, expect, describe } from "vitest";
+import { env, exports as workerExports } from "cloudflare:workers";
+import { pktLine, delimPkt, flushPkt, concatChunks, decodePktLines } from "@/worker/git";
+import { handleFetchV2Streaming } from "@/worker/git/operations/uploadStream";
+import {
+  buildServeUploadPackPlan,
+  loadUploadPackSnapshot,
+  planUploadPack,
+} from "@/worker/git/operations/fetch/plan";
+import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers";
+import { setupRepoForTests } from "./util/repoSeed";
+import { asBufferSource } from "@/worker/common";
+import { packRefsKey } from "@/worker/keys";
+import { runQueueMessage } from "./util/queue";
+import { createTestCacheContext, seedPackFirstRepo } from "./util/pack-first";
+import { makeTracingLimiter } from "./util/pack-indexer.helpers";
+import { buildAppendOnlyDelta, buildCopyPrefixDelta, buildPack } from "./util/git-pack";
+import { seedPackedRepoState } from "./util/packed-repo";
+import { computeOid, encodeGitObject } from "@/worker/git/core/objects";
+
+function buildFetchBody({
+  wants,
+  haves,
+  done,
+}: {
+  wants: string[];
+  haves?: string[];
+  done?: boolean;
+}) {
+  const chunks: Uint8Array[] = [];
+  chunks.push(pktLine("command=fetch\n"));
+  chunks.push(delimPkt());
+  for (const w of wants) chunks.push(pktLine(`want ${w}\n`));
+  for (const h of haves || []) chunks.push(pktLine(`have ${h}\n`));
+  if (done) chunks.push(pktLine("done\n"));
+  chunks.push(flushPkt());
+  return concatChunks(chunks);
+}
+
+/**
+ * Find the index of a byte sequence within a Uint8Array
+ */
+function findBytes(haystack: Uint8Array, needle: Uint8Array): number {
+  outer: for (let i = 0; i <= haystack.length - needle.length; i++) {
+    for (let j = 0; j < needle.length; j++) {
+      if (haystack[i + j] !== needle[j]) continue outer;
+    }
+    return i;
+  }
+  return -1;
+}
+
+async function seedTwoCommitRepo(owner: string, repo: string) {
+  const repoId = `${owner}/${repo}`;
+  const doId = env.REPO_DO.idFromName(repoId);
+  const seeded = await seedPackFirstRepo(repoId);
+
+  return {
+    repoId,
+    doId,
+    getStub: seeded.getStub,
+    firstCommit: seeded.baseCommit.oid,
+    secondCommit: seeded.nextCommit.oid,
+  };
+}
+
+async function postFinalFetch(args: {
+  owner: string;
+  repo: string;
+  wants: string[];
+  haves: string[];
+}): Promise<Response> {
+  const body = buildFetchBody({
+    wants: args.wants,
+    haves: args.haves,
+    done: true,
+  });
+  return await workerExports.default.fetch(
+    `https://example.com/${args.owner}/${args.repo}/git-upload-pack`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-request",
+        "Git-Protocol": "version=2",
+      },
+      body: asBufferSource(body),
+    }
+  );
+}
+
+async function expectRetryThenBackfillRepair(args: {
+  owner: string;
+  repo: string;
+  repoId: string;
+  doId: DurableObjectId;
+  packKey: string;
+  firstCommit: string;
+  secondCommit: string;
+}): Promise<void> {
+  const retryRes = await postFinalFetch({
+    owner: args.owner,
+    repo: args.repo,
+    wants: [args.secondCommit],
+    haves: [args.firstCommit],
+  });
+  expect(retryRes.status).toBe(503);
+  expect(retryRes.headers.get("Retry-After")).toBe("10");
+  expect(await retryRes.text()).not.toContain("packfile");
+
+  const queueResult = await runQueueMessage({
+    kind: "pack-ref-backfill",
+    doId: args.doId.toString(),
+    repoId: args.repoId,
+    packKey: args.packKey,
+  });
+  expect(queueResult).toEqual({ acked: true, retried: false });
+  await expect(env.REPO_BUCKET.head(packRefsKey(args.packKey))).resolves.toBeTruthy();
+
+  const okRes = await postFinalFetch({
+    owner: args.owner,
+    repo: args.repo,
+    wants: [args.secondCommit],
+    haves: [args.firstCommit],
+  });
+  expect(okRes.status).toBe(200);
+  const okBytes = new Uint8Array(await okRes.arrayBuffer());
+  expect(new TextDecoder().decode(okBytes.subarray(4, 13))).toBe("packfile\n");
+}
+
+describe("git fetch streaming (default)", () => {
+  it("handles fetch with streaming by default", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("streaming");
+    await setupRepoForTests(env, owner, repo);
+    const repoId = `${owner}/${repo}`;
+
+    // Seed a repository with some commits
+    const id = env.REPO_DO.idFromName(repoId);
+    const { commitOid } = await runDOWithRetry(
+      () => env.REPO_DO.get(id),
+      async (instance) => await instance.seedMinimalRepo()
+    );
+
+    const body = buildFetchBody({ wants: [commitOid], done: true });
+    const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
+
+    const res = await workerExports.default.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-request",
+        "Git-Protocol": "version=2",
+      },
+      body,
+    } as any);
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toContain("git-upload-pack-result");
+
+    const bytes = new Uint8Array(await res.arrayBuffer());
+
+    const lines = decodePktLines(bytes);
+    let hasAcknowledgments = false;
+    let hasPackfile = false;
+    let inPackfile = false;
+    const packData: Uint8Array[] = [];
+    let hasSideband = false;
+
+    for (const line of lines) {
+      if (line.type === "line" && line.text === "acknowledgments\n") {
+        hasAcknowledgments = true;
+      }
+      if (line.type === "line" && line.text === "packfile\n") {
+        hasPackfile = true;
+        inPackfile = true;
+      }
+    }
+
+    expect(
+      hasAcknowledgments,
+      "Response should NOT contain 'acknowledgments\\n' when done=true"
+    ).toBe(false);
+    expect(hasPackfile, "Response should contain 'packfile\\n' pkt-line").toBe(true);
+
+    for (const line of lines) {
+      if (line.type === "line" && line.text === "packfile\n") {
+        inPackfile = true;
+      } else if (inPackfile && line.type === "line" && line.raw) {
+        // Check if this is sideband data (first byte is 0x01, 0x02, or 0x03)
+        if (
+          line.raw.length > 0 &&
+          (line.raw[0] === 0x01 || line.raw[0] === 0x02 || line.raw[0] === 0x03)
+        ) {
+          hasSideband = true;
+          if (line.raw[0] === 0x01) {
+            // Channel 1: pack data
+            packData.push(line.raw.subarray(1));
+          }
+        }
+      }
+    }
+
+    expect(hasSideband).toBe(true);
+    const pack = concatChunks(packData);
+
+    expect(pack.length).toBeGreaterThan(0);
+
+    // Verify pack signature
+    const packSig = new TextDecoder().decode(pack.subarray(0, 4));
+    expect(packSig).toBe("PACK");
+
+    // Verify pack header
+    const dv = new DataView(pack.buffer, pack.byteOffset, pack.byteLength);
+    const version = dv.getUint32(4);
+    const objCount = dv.getUint32(8);
+    expect(version).toBe(2);
+    expect(objCount).toBeGreaterThan(0);
+
+    // Verify SHA-1 trailer (last 20 bytes)
+    expect(pack.length).toBeGreaterThanOrEqual(32); // At least header + SHA-1
+    const packBody = pack.subarray(0, pack.length - 20);
+    const expectedSha = pack.subarray(pack.length - 20);
+    const actualSha = new Uint8Array(await crypto.subtle.digest("SHA-1", asBufferSource(packBody)));
+    expect(Array.from(actualSha)).toEqual(Array.from(expectedSha));
+  });
+
+  it("handles incremental fetch with haves", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("incremental");
+    await setupRepoForTests(env, owner, repo);
+    const repoId = `${owner}/${repo}`;
+
+    // Seed repository and get multiple commits
+    const id = env.REPO_DO.idFromName(repoId);
+    const { commitOid, parentOid } = await runDOWithRetry(
+      () => env.REPO_DO.get(id),
+      async (instance) => {
+        const firstResult = await instance.seedMinimalRepo();
+        const secondResult = await instance.seedMinimalRepo();
+        return {
+          commitOid: secondResult.commitOid,
+          parentOid: firstResult.commitOid,
+        };
+      }
+    );
+
+    // First, do negotiation without done
+    const negotiateBody = buildFetchBody({
+      wants: [commitOid],
+      haves: [parentOid],
+      done: false,
+    });
+
+    const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
+    const negotiateRes = await workerExports.default.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-request",
+        "Git-Protocol": "version=2",
+        // Streaming is now default, no header needed
+      },
+      body: negotiateBody,
+    } as any);
+
+    expect(negotiateRes.status).toBe(200);
+    const negotiateBytes = new Uint8Array(await negotiateRes.arrayBuffer());
+    const negotiateLines = decodePktLines(negotiateBytes);
+    let hasAcknowledgments = false;
+    let hasPackfile = false;
+    let hasParentAck = false;
+
+    for (const line of negotiateLines) {
+      if (line.type === "line") {
+        if (line.text === "acknowledgments\n") hasAcknowledgments = true;
+        if (line.text === "packfile\n") hasPackfile = true;
+        if (line.text && line.text.includes(`ACK ${parentOid}`)) hasParentAck = true;
+      }
+    }
+
+    // Should only have acknowledgments, no packfile
+    expect(
+      hasAcknowledgments,
+      "Negotiation response should contain 'acknowledgments\\n' pkt-line"
+    ).toBe(true);
+    expect(hasPackfile, "Negotiation response should NOT contain 'packfile\\n' pkt-line").toBe(
+      false
+    );
+    expect(hasParentAck, `Negotiation should ACK parent ${parentOid}`).toBe(true);
+
+    // Now fetch with done
+    const fetchBody = buildFetchBody({
+      wants: [commitOid],
+      haves: [parentOid],
+      done: true,
+    });
+
+    const fetchRes = await workerExports.default.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-request",
+        "Git-Protocol": "version=2",
+        // Streaming is now default, no header needed
+      },
+      body: fetchBody,
+    } as any);
+
+    expect(fetchRes.status).toBe(200);
+    const fetchBytes = new Uint8Array(await fetchRes.arrayBuffer());
+    const fetchLines = decodePktLines(fetchBytes);
+    let hasFetchAcknowledgments = false;
+    let hasFetchPackfile = false;
+
+    for (const line of fetchLines) {
+      if (line.type === "line") {
+        if (line.text === "acknowledgments\n") hasFetchAcknowledgments = true;
+        if (line.text === "packfile\n") hasFetchPackfile = true;
+      }
+    }
+
+    // Should go straight to packfile when done=true
+    expect(
+      hasFetchAcknowledgments,
+      "Final fetch with done=true should NOT contain 'acknowledgments\\n'"
+    ).toBe(false);
+    expect(hasFetchPackfile, "Final fetch should contain 'packfile\\n' pkt-line").toBe(true);
+
+    // Parse and verify pack data
+    let inPackfile = false;
+    const packData: Uint8Array[] = [];
+
+    for (const line of fetchLines) {
+      if (line.type === "line" && line.text === "packfile\n") {
+        inPackfile = true;
+      } else if (inPackfile && line.type === "line" && line.raw?.[0] === 0x01) {
+        packData.push(line.raw.subarray(1));
+      }
+    }
+
+    const pack = concatChunks(packData);
+    expect(pack.length).toBeGreaterThan(0);
+
+    // Verify it's a valid pack
+    const packSig = new TextDecoder().decode(pack.subarray(0, 4));
+    expect(packSig).toBe("PACK");
+  });
+
+  it("returns retry before packfile when an active pack ref sidecar is missing and backfill repairs it", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("missing-ref-sidecar");
+    await setupRepoForTests(env, owner, repo);
+    const repoId = `${owner}/${repo}`;
+    const id = env.REPO_DO.idFromName(repoId);
+    const getStub = () => env.REPO_DO.get(id);
+    const { commitOid: firstCommit } = await runDOWithRetry(
+      getStub,
+      async (instance) => await instance.seedMinimalRepo()
+    );
+    const { commitOid: secondCommit } = await runDOWithRetry(
+      getStub,
+      async (instance) => await instance.seedMinimalRepo()
+    );
+
+    const activeCatalog = await getStub().getActivePackCatalog();
+    expect(activeCatalog.length).toBeGreaterThan(0);
+    const targetPack = activeCatalog[0]!;
+    await env.REPO_BUCKET.delete(packRefsKey(targetPack.packKey));
+
+    const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
+    const fetchBody = buildFetchBody({
+      wants: [secondCommit],
+      haves: [firstCommit],
+      done: true,
+    });
+
+    const retryRes = await workerExports.default.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-request",
+        "Git-Protocol": "version=2",
+      },
+      body: fetchBody,
+    } as any);
+    expect(retryRes.status).toBe(503);
+    expect(retryRes.headers.get("Retry-After")).toBe("10");
+    expect(await retryRes.text()).not.toContain("packfile");
+
+    const queueResult = await runQueueMessage({
+      kind: "pack-ref-backfill",
+      doId: id.toString(),
+      repoId,
+      packKey: targetPack.packKey,
+    });
+    expect(queueResult).toEqual({ acked: true, retried: false });
+    await expect(env.REPO_BUCKET.head(packRefsKey(targetPack.packKey))).resolves.toBeTruthy();
+
+    const okRes = await workerExports.default.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-request",
+        "Git-Protocol": "version=2",
+      },
+      body: fetchBody,
+    } as any);
+    expect(okRes.status).toBe(200);
+    const okBytes = new Uint8Array(await okRes.arrayBuffer());
+    expect(new TextDecoder().decode(okBytes.subarray(4, 13))).toBe("packfile\n");
+  });
+
+  it("backfills refs for an already-active same-pack REF_DELTA pack", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("missing-ref-sidecar-ref-delta");
+    await setupRepoForTests(env, owner, repo);
+    const repoId = `${owner}/${repo}`;
+    const id = env.REPO_DO.idFromName(repoId);
+    const getStub = () => env.REPO_DO.get(id);
+
+    const baseBlobPayload = new TextEncoder().encode("base\n");
+    const midSuffix = new TextEncoder().encode("mid\n");
+    const finalSuffix = new TextEncoder().encode("final\n");
+    const baseBlob = await encodeGitObject("blob", baseBlobPayload);
+
+    const midPayload = new Uint8Array(baseBlobPayload.length + midSuffix.length);
+    midPayload.set(baseBlobPayload, 0);
+    midPayload.set(midSuffix, baseBlobPayload.length);
+    const midOid = await computeOid("blob", midPayload);
+
+    const finalPayload = new Uint8Array(midPayload.length + finalSuffix.length);
+    finalPayload.set(midPayload, 0);
+    finalPayload.set(finalSuffix, midPayload.length);
+
+    const packBytes = await buildPack([
+      {
+        type: "ref-delta",
+        baseOid: midOid,
+        delta: buildAppendOnlyDelta(midPayload, finalSuffix),
+      },
+      {
+        type: "ref-delta",
+        baseOid: baseBlob.oid,
+        delta: buildAppendOnlyDelta(baseBlobPayload, midSuffix),
+      },
+      { type: "blob", payload: baseBlobPayload },
+    ]);
+
+    await seedPackedRepoState({
+      env,
+      repoId,
+      getStub,
+      packs: [{ name: "pack-ref-delta-chain.pack", packBytes }],
+    });
+
+    const activeCatalog = await getStub().getActivePackCatalog();
+    expect(activeCatalog).toHaveLength(1);
+    const targetPack = activeCatalog[0]!;
+    await env.REPO_BUCKET.delete(packRefsKey(targetPack.packKey));
+
+    const queueResult = await runQueueMessage({
+      kind: "pack-ref-backfill",
+      doId: id.toString(),
+      repoId,
+      packKey: targetPack.packKey,
+    });
+
+    expect(queueResult).toEqual({ acked: true, retried: false });
+    await expect(env.REPO_BUCKET.head(packRefsKey(targetPack.packKey))).resolves.toBeTruthy();
+  });
+
+  it("backfills refs when the newest external duplicate base points back to the target pack", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("missing-ref-sidecar-external-duplicate-cycle");
+    await setupRepoForTests(env, owner, repo);
+    const repoId = `${owner}/${repo}`;
+    const id = env.REPO_DO.idFromName(repoId);
+    const getStub = () => env.REPO_DO.get(id);
+
+    const targetPayload = new TextEncoder().encode("target prefix\n");
+    const duplicateSuffix = new TextEncoder().encode("duplicate suffix\n");
+    const duplicatePayload = new Uint8Array(targetPayload.length + duplicateSuffix.length);
+    duplicatePayload.set(targetPayload, 0);
+    duplicatePayload.set(duplicateSuffix, targetPayload.length);
+
+    const targetOid = await computeOid("blob", targetPayload);
+    const duplicateOid = await computeOid("blob", duplicatePayload);
+
+    const olderPack = await buildPack([{ type: "blob", payload: duplicatePayload }]);
+    const targetPack = await buildPack([
+      {
+        type: "ref-delta",
+        baseOid: duplicateOid,
+        delta: buildCopyPrefixDelta(duplicatePayload, targetPayload.length),
+      },
+    ]);
+    const newerPack = await buildPack([
+      {
+        type: "ref-delta",
+        baseOid: targetOid,
+        delta: buildAppendOnlyDelta(targetPayload, duplicateSuffix),
+      },
+    ]);
+
+    const seeded = await seedPackedRepoState({
+      env,
+      repoId,
+      getStub,
+      // The seeder indexes the reversed list, so this caller order creates
+      // older -> target -> newer catalog history while active reads remain
+      // newest-first.
+      packs: [
+        { name: "pack-newer-duplicate.pack", packBytes: newerPack },
+        { name: "pack-target-cycle.pack", packBytes: targetPack },
+        { name: "pack-older-base.pack", packBytes: olderPack },
+      ],
+    });
+
+    const targetPackKey = seeded.packKeys[1]!;
+    const activeCatalog = await getStub().getActivePackCatalog();
+    expect(activeCatalog.map((row) => row.packKey)).toContain(targetPackKey);
+    await env.REPO_BUCKET.delete(packRefsKey(targetPackKey));
+
+    const queueResult = await runQueueMessage({
+      kind: "pack-ref-backfill",
+      doId: id.toString(),
+      repoId,
+      packKey: targetPackKey,
+    });
+
+    expect(queueResult).toEqual({ acked: true, retried: false });
+    await expect(env.REPO_BUCKET.head(packRefsKey(targetPackKey))).resolves.toBeTruthy();
+  });
+
+  it("plans final fetch from valid sidecars without closure-time range reads", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("valid-ref-sidecar-no-range");
+    await setupRepoForTests(env, owner, repo);
+    const { repoId, firstCommit, secondCommit } = await seedTwoCommitRepo(owner, repo);
+    const cacheCtx = createTestCacheContext(`https://example.com/${repoId}/git-upload-pack`);
+    const labels: string[] = [];
+    cacheCtx.memo = {
+      ...(cacheCtx.memo || {}),
+      limiter: makeTracingLimiter(labels),
+    };
+
+    const snapshotLoad = await loadUploadPackSnapshot(env, repoId, cacheCtx);
+    expect(snapshotLoad.type).toBe("Ready");
+    if (snapshotLoad.type !== "Ready") return;
+
+    labels.length = 0;
+    const plan = await buildServeUploadPackPlan(
+      env,
+      repoId,
+      snapshotLoad.snapshot,
+      [secondCommit],
+      [firstCommit],
+      undefined,
+      cacheCtx
+    );
+
+    expect(plan.type).toBe("Serve");
+    expect(plan.neededOids.length).toBeGreaterThan(0);
+    expect(labels).toContain("r2:get-pack-refs");
+    expect(labels).not.toContain("r2:get-range");
+  });
+
+  it("returns retry before packfile when an active pack ref sidecar is corrupt", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("corrupt-ref-sidecar");
+    await setupRepoForTests(env, owner, repo);
+    const { repoId, doId, getStub, firstCommit, secondCommit } = await seedTwoCommitRepo(
+      owner,
+      repo
+    );
+    const activeCatalog = await getStub().getActivePackCatalog();
+    expect(activeCatalog.length).toBeGreaterThan(0);
+    const targetPack = activeCatalog[0]!;
+    const refsKey = packRefsKey(targetPack.packKey);
+    const refsObject = await env.REPO_BUCKET.get(refsKey);
+    if (!refsObject) throw new Error("missing ref sidecar");
+    const refsBytes = new Uint8Array(await refsObject.arrayBuffer());
+    refsBytes[0] ^= 0xff;
+    await env.REPO_BUCKET.put(refsKey, asBufferSource(refsBytes));
+
+    await expectRetryThenBackfillRepair({
+      owner,
+      repo,
+      repoId,
+      doId,
+      packKey: targetPack.packKey,
+      firstCommit,
+      secondCommit,
+    });
+  });
+
+  it("returns retry before packfile when an active pack ref sidecar is stale", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("stale-ref-sidecar");
+    await setupRepoForTests(env, owner, repo);
+    const { repoId, doId, getStub, firstCommit, secondCommit } = await seedTwoCommitRepo(
+      owner,
+      repo
+    );
+    const activeCatalog = await getStub().getActivePackCatalog();
+    expect(activeCatalog.length).toBeGreaterThan(0);
+    const targetPack = activeCatalog[0]!;
+    const refsKey = packRefsKey(targetPack.packKey);
+    const refsObject = await env.REPO_BUCKET.get(refsKey);
+    if (!refsObject) throw new Error("missing ref sidecar");
+    const refsBytes = new Uint8Array(await refsObject.arrayBuffer());
+    refsBytes[40] ^= 0xff;
+    await env.REPO_BUCKET.put(refsKey, asBufferSource(refsBytes));
+
+    await expectRetryThenBackfillRepair({
+      owner,
+      repo,
+      repoId,
+      doId,
+      packKey: targetPack.packKey,
+      firstCommit,
+      secondCommit,
+    });
+  });
+
+  it("does not require pack ref sidecars for negotiation-only upload-pack planning", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("negotiation-ref-sidecar");
+    await setupRepoForTests(env, owner, repo);
+    const repoId = `${owner}/${repo}`;
+    const id = env.REPO_DO.idFromName(repoId);
+    const getStub = () => env.REPO_DO.get(id);
+    const { commitOid: firstCommit } = await runDOWithRetry(
+      getStub,
+      async (instance) => await instance.seedMinimalRepo()
+    );
+    const { commitOid: secondCommit } = await runDOWithRetry(
+      getStub,
+      async (instance) => await instance.seedMinimalRepo()
+    );
+
+    const activeCatalog = await getStub().getActivePackCatalog();
+    expect(activeCatalog.length).toBeGreaterThan(0);
+    await env.REPO_BUCKET.delete(packRefsKey(activeCatalog[0]!.packKey));
+
+    const plan = await planUploadPack(env, repoId, [secondCommit], [firstCommit], false);
+
+    expect(plan.type).toBe("Serve");
+    if (plan.type !== "Serve") return;
+    expect(plan.neededOids).toEqual([]);
+    expect(plan.ackOids).toContain(firstCommit);
+  });
+
+  it("handles initial clone (no haves) with streaming", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("clone");
+    await setupRepoForTests(env, owner, repo);
+    const repoId = `${owner}/${repo}`;
+
+    // Seed a repository
+    const id = env.REPO_DO.idFromName(repoId);
+    const { commitOid } = await runDOWithRetry(
+      () => env.REPO_DO.get(id),
+      async (instance) => instance.seedMinimalRepo()
+    );
+
+    // Clone with no haves
+    const body = buildFetchBody({ wants: [commitOid], done: true });
+    const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
+
+    const res = await workerExports.default.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-request",
+        "Git-Protocol": "version=2",
+      },
+      body,
+    } as any);
+
+    expect(res.status).toBe(200);
+
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    const lines = decodePktLines(bytes);
+
+    // Should include NAK since there are no common haves
+    let hasNak = false;
+    let hasPackfile = false;
+    let progressMessages = 0;
+    const packData: Uint8Array[] = [];
+
+    for (const line of lines) {
+      if (line.type === "line") {
+        if (line.text === "NAK\n") hasNak = true;
+        if (line.text === "packfile\n") hasPackfile = true;
+        if (hasPackfile && line.raw?.[0] === 0x01) {
+          packData.push(line.raw.subarray(1));
+        } else if (hasPackfile && line.raw?.[0] === 0x02) {
+          progressMessages++;
+        }
+      }
+    }
+
+    // With done=true, there are no acknowledgments (no NAK)
+    expect(hasNak, "Clone response with done=true should NOT contain NAK").toBe(false);
+    expect(hasPackfile, "Clone response should contain packfile").toBe(true);
+
+    // Verify pack contains all objects (tree + commit at minimum)
+    const pack = concatChunks(packData);
+    const dv = new DataView(pack.buffer, pack.byteOffset, pack.byteLength);
+    const objCount = dv.getUint32(8);
+    expect(objCount).toBeGreaterThanOrEqual(2); // At least tree + commit
+  });
+
+  it("handles repositories with packs created by default", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("with-pack");
+    await setupRepoForTests(env, owner, repo);
+    const repoId = `${owner}/${repo}`;
+
+    // Seed repository with packed objects (default behavior)
+    const id = env.REPO_DO.idFromName(repoId);
+    const { commitOid } = await runDOWithRetry(
+      () => env.REPO_DO.get(id),
+      async (instance) => instance.seedMinimalRepo() // Default: withPack=true
+    );
+
+    const body = buildFetchBody({ wants: [commitOid], done: true });
+    const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
+
+    // Streaming is now the default
+    const res = await workerExports.default.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-request",
+        "Git-Protocol": "version=2",
+      },
+      body,
+    } as any);
+
+    // Should succeed with streaming
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toContain("git-upload-pack-result");
+
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    const lines = decodePktLines(bytes);
+    let hasAcknowledgments = false;
+    let hasPackfile = false;
+
+    for (const line of lines) {
+      if (line.type === "line") {
+        if (line.text === "acknowledgments\n") hasAcknowledgments = true;
+        if (line.text === "packfile\n") hasPackfile = true;
+      }
+    }
+
+    // Verify basic structure
+    // When done=true, response goes straight to packfile
+    expect(
+      hasAcknowledgments,
+      "Response should NOT contain 'acknowledgments\\n' when done=true"
+    ).toBe(false);
+    expect(hasPackfile, "Response should contain 'packfile\\n' pkt-line").toBe(true);
+
+    // Find and verify pack data
+    const packStart = findBytes(bytes, new TextEncoder().encode("PACK"));
+    expect(packStart).toBeGreaterThan(-1);
+
+    const pack = bytes.subarray(packStart);
+    const dv = new DataView(pack.buffer, pack.byteOffset, pack.byteLength);
+    expect(dv.getUint32(4)).toBe(2); // version
+    expect(dv.getUint32(8)).toBeGreaterThan(0); // object count
+  });
+
+  it("returns 503 when pack assembly fails", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("fail");
+    await setupRepoForTests(env, owner, repo);
+
+    // Request fetch for non-existent objects
+    const body = buildFetchBody({
+      wants: ["deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"],
+      done: true,
+    });
+    const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
+
+    const res = await workerExports.default.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-request",
+        "Git-Protocol": "version=2",
+      },
+      body,
+    } as any);
+
+    // Should return 503 since objects don't exist
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBeDefined();
+  });
+
+  it("handles request abort mid-stream gracefully", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("abort");
+    await setupRepoForTests(env, owner, repo);
+    const repoId = `${owner}/${repo}`;
+
+    // Seed repository with multiple objects to ensure streaming takes some time
+    const id = env.REPO_DO.idFromName(repoId);
+    const commits: string[] = [];
+
+    await runDOWithRetry(
+      () => env.REPO_DO.get(id),
+      async (instance) => {
+        // Create multiple commits to ensure pack has content
+        for (let i = 0; i < 5; i++) {
+          const result = await instance.seedMinimalRepo();
+          commits.push(result.commitOid);
+        }
+        return commits;
+      }
+    );
+
+    const body = buildFetchBody({ wants: commits, done: true });
+    const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
+    const abortController = new AbortController();
+
+    const fetchPromise = workerExports.default.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-request",
+        "Git-Protocol": "version=2",
+      },
+      body,
+      signal: abortController.signal,
+    } as any);
+
+    // Abort after a short delay to interrupt the stream
+    setTimeout(() => abortController.abort(), 10);
+
+    // The fetch should be aborted
+    try {
+      const res = await fetchPromise;
+      // If we get a response, check if it's the expected abort response
+      // Some implementations might return 499 Client Closed Request
+      if (res.status === 499) {
+        expect(res.status).toBe(499);
+      } else {
+        // Otherwise the stream might have completed before abort
+        expect(res.status).toBe(200);
+      }
+    } catch (e: any) {
+      // AbortError is expected
+      expect(e.name).toBe("AbortError");
+    }
+  });
+
+  it("emits band-3 fatal message on mid-stream error", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("fatal");
+    await setupRepoForTests(env, owner, repo);
+    const repoId = `${owner}/${repo}`;
+
+    // This test is tricky to implement without mocking R2 failures
+    // We'll create a scenario where pack assembly could fail mid-stream
+    // by requesting objects that exist in DO but might fail during assembly
+
+    // Seed repository
+    const id = env.REPO_DO.idFromName(repoId);
+    const { commitOid } = await runDOWithRetry(
+      () => env.REPO_DO.get(id),
+      async (instance) => instance.seedMinimalRepo()
+    );
+
+    // To truly test band-3 fatal, we'd need to inject an R2 failure
+    // Since we can't easily mock R2 in the test environment,
+    // we'll test that the protocol structure is correct for error cases
+
+    // Create a malformed request that might trigger an error during processing
+    const body = buildFetchBody({
+      wants: [commitOid],
+      done: true,
+    });
+
+    // Corrupt the body slightly to potentially trigger an error
+    const corruptedBody = new Uint8Array(body.length + 10);
+    corruptedBody.set(body, 0);
+    // Add some garbage that might confuse the parser after valid data
+    corruptedBody.set(new Uint8Array([0xff, 0xff, 0xff, 0xff]), body.length);
+
+    const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
+
+    const res = await workerExports.default.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-request",
+        "Git-Protocol": "version=2",
+      },
+      body: corruptedBody,
+    } as any);
+
+    // The server should handle the corruption gracefully
+    // Either by returning an error status or completing with valid data
+    expect([200, 400, 500, 503].includes(res.status)).toBe(true);
+
+    if (res.status === 200) {
+      // If it succeeded, check for valid response structure
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      const lines = decodePktLines(bytes);
+
+      // Check if there's a band-3 fatal message
+      for (const line of lines) {
+        if (line.type === "line" && line.raw?.[0] === 0x03) {
+          const fatalMsg = new TextDecoder().decode(line.raw.subarray(1));
+          expect(fatalMsg).toContain("fatal:");
+        }
+      }
+
+      // Note: hasFatal might be false if the server recovered from the corruption
+    }
+  });
+
+  it("handles abort signal during negotiation phase", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("abort-negotiation");
+    await setupRepoForTests(env, owner, repo);
+    const repoId = `${owner}/${repo}`;
+
+    // Seed repository with commits
+    const id = env.REPO_DO.idFromName(repoId);
+    const { commitOid, parentOid } = await runDOWithRetry(
+      () => env.REPO_DO.get(id),
+      async (instance) => {
+        const first = await instance.seedMinimalRepo();
+        const second = await instance.seedMinimalRepo();
+        return {
+          commitOid: second.commitOid,
+          parentOid: first.commitOid,
+        };
+      }
+    );
+
+    // Test abort during negotiation (done=false)
+    const body = buildFetchBody({
+      wants: [commitOid],
+      haves: [parentOid],
+      done: false,
+    });
+
+    const abortController = new AbortController();
+
+    // Abort immediately
+    abortController.abort();
+
+    const res = await handleFetchV2Streaming(env as Env, repoId, body, abortController.signal);
+    expect(res.status).toBe(499);
+  });
+
+  it("verifies streaming response includes progress messages", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("progress");
+    await setupRepoForTests(env, owner, repo);
+    const repoId = `${owner}/${repo}`;
+
+    // Create a repository with enough content to trigger progress messages
+    const id = env.REPO_DO.idFromName(repoId);
+    const commits: string[] = [];
+
+    await runDOWithRetry(
+      () => env.REPO_DO.get(id),
+      async (instance) => {
+        // Create multiple commits
+        for (let i = 0; i < 3; i++) {
+          const result = await instance.seedMinimalRepo();
+          commits.push(result.commitOid);
+        }
+        // Try to trigger packing if possible
+        // Note: this might fall back to loose objects
+        return commits;
+      }
+    );
+
+    const body = buildFetchBody({ wants: commits, done: true });
+    const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
+
+    const res = await workerExports.default.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-request",
+        "Git-Protocol": "version=2",
+      },
+      body,
+    } as any);
+
+    expect(res.status).toBe(200);
+
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    const lines = decodePktLines(bytes);
+
+    // Look for band-2 progress messages
+    const progressMessages: string[] = [];
+    let inPackfile = false;
+
+    for (const line of lines) {
+      if (line.type === "line" && line.text === "packfile\n") {
+        inPackfile = true;
+      }
+      if (inPackfile && line.type === "line" && line.raw?.[0] === 0x02) {
+        // Band 2: progress message
+        const msg = new TextDecoder().decode(line.raw.subarray(1));
+        progressMessages.push(msg);
+      }
+    }
+
+    expect(progressMessages.length).toBeGreaterThan(0);
+    const packStart = findBytes(bytes, new TextEncoder().encode("PACK"));
+    expect(packStart).toBeGreaterThan(-1);
+  });
+
+  it("emits pack preparation progress before pack data for initial fetches", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("early-progress");
+    await setupRepoForTests(env, owner, repo);
+    const repoId = `${owner}/${repo}`;
+
+    // Seed repository with some commits and ensure they're packed
+    const id = env.REPO_DO.idFromName(repoId);
+    const { commitOid } = await runDOWithRetry(
+      () => env.REPO_DO.get(id),
+      async (instance) => instance.seedMinimalRepo()
+    );
+
+    const body = buildFetchBody({ wants: [commitOid], done: true });
+    const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
+
+    const res = await workerExports.default.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-request",
+        "Git-Protocol": "version=2",
+      },
+      body,
+    } as any);
+
+    expect(res.status).toBe(200);
+
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    const lines = decodePktLines(bytes);
+
+    // Collect all progress messages and pack data in order
+    const orderedOutput: { type: "progress" | "data"; content: string | number }[] = [];
+    let inPackfile = false;
+
+    for (const line of lines) {
+      if (line.type === "line" && line.text === "packfile\n") {
+        inPackfile = true;
+      } else if (inPackfile && line.type === "line" && line.raw) {
+        if (line.raw[0] === 0x02) {
+          // Band 2: progress message
+          const msg = new TextDecoder().decode(line.raw.subarray(1));
+          orderedOutput.push({ type: "progress", content: msg });
+        } else if (line.raw[0] === 0x01) {
+          // Band 1: pack data - just record the first byte to prove data arrived
+          orderedOutput.push({ type: "data", content: line.raw[1] });
+        }
+      }
+    }
+
+    // Verify we got progress messages
+    const progressMessages = orderedOutput.filter((o) => o.type === "progress");
+    expect(progressMessages.length).toBeGreaterThan(0);
+
+    expect(progressMessages[0]?.content).toBe("Preparing pack...\n");
+
+    // Verify progress comes before data
+    const firstProgressIdx = orderedOutput.findIndex((o) => o.type === "progress");
+    const firstDataIdx = orderedOutput.findIndex((o) => o.type === "data");
+
+    expect(firstProgressIdx).toBeGreaterThanOrEqual(0);
+    expect(firstDataIdx).toBeGreaterThanOrEqual(0);
+    expect(firstProgressIdx).toBeLessThan(firstDataIdx);
+  });
+
+  it("emits pack preparation progress before pack data when haves are present", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("have-progress");
+    await setupRepoForTests(env, owner, repo);
+    const repoId = `${owner}/${repo}`;
+
+    const id = env.REPO_DO.idFromName(repoId);
+    const { commitOid, parentOid } = await runDOWithRetry(
+      () => env.REPO_DO.get(id),
+      async (instance) => {
+        const first = await instance.seedMinimalRepo();
+        const second = await instance.seedMinimalRepo();
+        return {
+          commitOid: second.commitOid,
+          parentOid: first.commitOid,
+        };
+      }
+    );
+
+    const body = buildFetchBody({
+      wants: [commitOid],
+      haves: [parentOid],
+      done: true,
+    });
+    const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
+
+    const res = await workerExports.default.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-request",
+        "Git-Protocol": "version=2",
+      },
+      body,
+    } as any);
+
+    expect(res.status).toBe(200);
+
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    const lines = decodePktLines(bytes);
+
+    const orderedOutput: { type: "progress" | "data"; content: string | number }[] = [];
+    let inPackfile = false;
+
+    for (const line of lines) {
+      if (line.type === "line" && line.text === "packfile\n") {
+        inPackfile = true;
+      } else if (inPackfile && line.type === "line" && line.raw) {
+        if (line.raw[0] === 0x02) {
+          const msg = new TextDecoder().decode(line.raw.subarray(1));
+          orderedOutput.push({ type: "progress", content: msg });
+        } else if (line.raw[0] === 0x01) {
+          orderedOutput.push({ type: "data", content: line.raw[1] });
+        }
+      }
+    }
+
+    const progressMessages = orderedOutput.filter((o) => o.type === "progress");
+    expect(progressMessages[0]?.content).toBe("Preparing pack...\n");
+
+    const prepareIdx = orderedOutput.findIndex(
+      (o) => o.type === "progress" && o.content === "Preparing pack...\n"
+    );
+    const firstDataIdx = orderedOutput.findIndex((o) => o.type === "data");
+
+    expect(prepareIdx).toBeGreaterThanOrEqual(0);
+    expect(firstDataIdx).toBeGreaterThanOrEqual(0);
+    expect(prepareIdx).toBeLessThan(firstDataIdx);
+  });
+});

@@ -1,0 +1,168 @@
+import { Hono } from "hono";
+import { sql } from "drizzle-orm";
+import { namespaces } from "./db/d1/schema";
+import { registerGitRoutes } from "./routes/git";
+import { registerAdminRoutes } from "./routes/admin";
+import { registerAgentRoutes } from "./routes/agent";
+import { registerReputationRoutes } from "./routes/reputation";
+import { registerApiV3Routes } from "./routes/apiv3";
+import { registerGraphqlRoutes } from "./routes/graphql";
+import { registerPagesRoutes } from "./routes/pages";
+import { registerArchiveRoutes } from "./routes/archive";
+import { registerAgentSurfaceRoutes } from "./routes/agentSurface";
+import { registerBadgeRoutes } from "./routes/badge";
+import { registerFeedRoutes } from "./routes/feed";
+import { registerDocsRoutes } from "./routes/docs";
+import { registerMcpRoutes } from "./routes/mcp";
+import { registerHermesRoutes, ISOLATION_HEADERS } from "./routes/hermes";
+import { registerOAuthProviderRoutes } from "./routes/oauthProvider";
+import { registerPoppyRoutes } from "./routes/poppy";
+import { registerGitnessApi } from "./api/gitness";
+import { registerNpmRegistryRoutes } from "./routes/npmRegistry";
+import { registerDidRoutes } from "./routes/did";
+import { registerUiRoutes } from "./routes/ui";
+import { registerSpaRoutes } from "./routes/spa";
+import { registerAuthRoutes } from "./routes/auth";
+import { registerAtpAuthRoutes } from "./routes/atpauth";
+import { registerXrpcRoutes } from "./routes/xrpc";
+import { requestServicesMiddleware, type AppBindings, type AppContext } from "./routes/hono";
+import { renderUiDocumentResponse } from "./routes/uiResponse";
+import { loadViewer } from "./auth/session";
+import { json } from "./common";
+import { handleScheduled } from "./scheduled";
+import { handleRepoTaskQueue } from "./tasks/queue";
+
+const app = new Hono<AppBindings>({ strict: false });
+app.use("*", requestServicesMiddleware);
+// Cross-origin isolation on all HTML pages: required so embedded
+// Hermes mounts (SharedArrayBuffer/Atomics) work inline rather than
+// degrading to a popup. credentialless keeps cross-origin subresources
+// working while still granting isolation on supporting browsers.
+app.use("*", async (c, next) => {
+  await next();
+  if (c.res.headers.get("Content-Type")?.startsWith("text/html")) {
+    for (const [k, v] of Object.entries(ISOLATION_HEADERS)) c.res.headers.set(k, v);
+  }
+});
+// Ops probes — liveness is dependency-free; readiness touches each
+// storage primitive so a broken binding surfaces as 503, not a hung
+// request downstream. Registered first so nothing shadows them.
+app.get("/healthz", (c) => c.json({ ok: true }));
+app.get("/readyz", async (c) => {
+  const checks: Record<string, boolean> = {};
+  checks.d1 = await c.var.db
+    .select({ one: sql`1` })
+    .from(namespaces)
+    .limit(1)
+    .then(() => true)
+    .catch(() => false);
+  checks.kv = await c.env.ROUTES.get("__readyz__")
+    .then(() => true)
+    .catch(() => false);
+  checks.r2 = await c.env.REPO_BUCKET.list({ limit: 1 })
+    .then(() => true)
+    .catch(() => false);
+  const ok = Object.values(checks).every(Boolean);
+  return c.json({ ok, checks }, ok ? 200 : 503);
+});
+
+// Self-hosted docs — this repo's docs/ tree rendered at /docs/{page}.
+// Registered before the gitness {.+} table: a static /docs sibling
+// drowns in the compiled regex when registered after greedy routes.
+registerDocsRoutes(app);
+// Register Git protocol routes (info/refs, upload-pack, receive-pack)
+registerGitRoutes(app);
+// Register Admin routes
+registerAdminRoutes(app);
+// Register Auth routes BEFORE UI to avoid /:owner shadowing /auth
+registerAuthRoutes(app);
+// atproto DID sign-in (/auth/did/*) + DID-session repo APIs (/api/repos)
+registerAtpAuthRoutes(app);
+// delta-git agent API under /api/* — registered before UI for the same reason
+registerAgentRoutes(app);
+registerReputationRoutes(app);
+registerApiV3Routes(app);
+registerGraphqlRoutes(app);
+registerXrpcRoutes(app);
+registerMcpRoutes(app);
+registerHermesRoutes(app);
+// OAuth 2.1 provider: /.well-known discovery, /oauth/token|register,
+// /oauth/authorize info+decision. The consent page itself is a SPA route
+// and falls through to registerSpaRoutes.
+registerOAuthProviderRoutes(app);
+// Gitness /api/v1 facade — before UI so /api/v1/* never reaches /:owner.
+registerGitnessApi(app);
+// npm registry — /npm/@scope/name packuments + tarballs (PAT publish auth).
+registerNpmRegistryRoutes(app);
+// DID resolution — /1.0/identifiers/{did} W3C resolution binding.
+registerDidRoutes(app);
+// Static site serving from repo refs
+registerPagesRoutes(app);
+// POSIX tar export of a repo tree — consumed by wp-cloud deploy-git, CI, mirrors
+registerArchiveRoutes(app);
+// shields.io-compatible SVG badges under /badge/:owner/:repo/:metric
+registerBadgeRoutes(app);
+// Atom feeds at GitHub's paths — /:owner/:repo/{releases,commits}.atom
+registerFeedRoutes(app);
+// Agent-readable surface — /.well-known/delta-node, /llms.txt, /skill.md,
+// and `Accept: text/markdown` repo cards (falls through to UI otherwise).
+registerAgentSurfaceRoutes(app);
+// Poppy (Personal Agent Protocol) discovery descriptor.
+registerPoppyRoutes(app);
+
+// Functional legacy endpoints (raw blobs, refs JSON, site builds) — before
+// the SPA fallback so they keep winning their old paths.
+registerUiRoutes(app);
+// Gitness SPA — owns every remaining GET (repo pages, spaces, delta views,
+// legacy `/:owner/:repo` redirects live inside registerSpaRoutes).
+registerSpaRoutes(app);
+
+async function renderNotFound(c: AppContext): Promise<Response> {
+  const viewer = await loadViewer(c);
+  return renderUiDocumentResponse(
+    c.env,
+    "404",
+    {},
+    {
+      status: 404,
+      failureBody: "Not found\n",
+      failureStatus: 404,
+      viewer,
+    }
+  );
+}
+
+app.notFound((c) => renderNotFound(c));
+
+function errorStatus(error: Error): number {
+  if ("status" in error && typeof error.status === "number") {
+    return error.status;
+  }
+  return 500;
+}
+
+app.onError((error) => {
+  // The previous router converted uncaught handler failures into JSON. Most
+  // routes catch expected failures themselves, but keep this last-resort shape
+  // stable for truly unexpected errors.
+  const status = errorStatus(error);
+  return json({ error: error.message || "Internal Server Error" }, status, {
+    "Content-Type": "application/json; charset=utf-8",
+  });
+});
+
+export default {
+  fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    return app.fetch(request, env, ctx);
+  },
+  async queue(batch: MessageBatch<unknown>, env: Env, ctx: ExecutionContext) {
+    return await handleRepoTaskQueue(batch, env, ctx);
+  },
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(handleScheduled(controller.cron, env));
+  },
+};
+
+export { RepoDurableObject } from "./do/repo/repoDO";
+export { AdjudicatorAgent, RepoAgent, FirehoseAgent } from "./agent/runtime";
+export { ForgeSandbox } from "./do/sandbox/forgeSandbox";

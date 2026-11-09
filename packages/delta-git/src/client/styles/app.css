@@ -1,0 +1,823 @@
+@import "tailwindcss";
+@import "@primer/primitives/dist/css/primitives.css";
+@import "@primer/primitives/dist/css/functional/themes/light.css";
+@import "@primer/primitives/dist/css/functional/themes/dark.css";
+@source inline("bg-sky-100 text-sky-900 dark:bg-sky-500/20 dark:text-sky-300 dark:border dark:border-sky-500/40");
+@source inline("bg-amber-200 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200 dark:border dark:border-amber-500/40");
+@source inline("bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-200");
+@source inline("bg-green-50 dark:bg-green-900/20 text-green-800 dark:text-green-200");
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --default-transition-duration: 75ms;
+  /* GitHub chrome font stack — matches the clone target */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif,
+    "Apple Color Emoji", "Segoe UI Emoji";
+  --font-mono:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  /* GitHub has no display serif — alias leftover display headings to sans. */
+  --font-display: var(--font-sans);
+
+  /* Primer neutral ramp — monotonic, light end doubles for light-mode
+     classes and the dark end for dark: classes. */
+  --color-zinc-50: #ffffff;
+  --color-zinc-100: #f6f8fa;
+  --color-zinc-200: #e3e8ee;
+  --color-zinc-300: #d1d9e0;
+  --color-zinc-400: #818b98;
+  --color-zinc-500: #59636e;
+  --color-zinc-600: #3d444d;
+  --color-zinc-700: #2a313c;
+  --color-zinc-800: #212830;
+  --color-zinc-900: #151b23;
+  --color-zinc-950: #0d1117;
+
+  /* GitHub blue ramp */
+  --color-accent-50: #ddf4ff;
+  --color-accent-100: #b6e3ff;
+  --color-accent-200: #80ccff;
+  --color-accent-300: #54aeff;
+  --color-accent-400: #4493f8;
+  --color-accent-500: #1f6feb;
+  --color-accent-600: #0969da;
+  --color-accent-700: #0550ae;
+  --color-accent-800: #0a3069;
+  --color-accent-900: #002766;
+
+  --animate-fade-in: fade-in 0.4s ease-out both;
+  --animate-slide-up: slide-up 0.35s ease-out both;
+  --animate-scale-fade: scale-fade 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-shimmer: shimmer 1.5s ease-in-out infinite;
+  --animate-pulse-soft: pulse-soft 1.6s ease-in-out infinite;
+}
+
+/* Semantic tokens aliased onto Primer's theme-scoped CSS vars. These flip
+   automatically with [data-color-mode] on <html> — no dark: variant needed. */
+@theme inline {
+  --color-canvas: var(--bgColor-default);
+  --color-subtle: var(--bgColor-muted);
+  --color-inset: var(--bgColor-inset);
+  --color-overlay: var(--overlay-bgColor);
+  --color-edge: var(--borderColor-default);
+  --color-edge-muted: var(--borderColor-muted);
+  --color-fg: var(--fgColor-default);
+  --color-fg-muted: var(--fgColor-muted);
+  --color-on-emphasis: var(--fgColor-onEmphasis);
+  --color-link: var(--fgColor-link);
+  --color-success-fg: var(--fgColor-success);
+  --color-danger-fg: var(--fgColor-danger);
+  --color-attention-fg: var(--fgColor-attention);
+  --color-done-fg: var(--fgColor-done);
+  --color-open-fg: var(--fgColor-open);
+  --color-btn: var(--button-primary-bgColor-rest);
+  --color-btn-hover: var(--button-primary-bgColor-hover);
+  --color-btn-active: var(--button-primary-bgColor-active);
+  --color-btn-fg: var(--button-primary-fgColor-rest);
+  --color-btn-edge: var(--button-primary-borderColor-rest);
+  --color-control: var(--control-bgColor-rest);
+  --color-control-hover: var(--control-bgColor-hover);
+  --color-control-active: var(--control-bgColor-active);
+  --color-control-edge: var(--control-borderColor-rest);
+  --color-header: var(--header-bgColor);
+  --color-header-fg: var(--header-fgColor-default);
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes scale-fade {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes shimmer {
+  from {
+    background-position: -200% 0;
+  }
+
+  to {
+    background-position: 200% 0;
+  }
+}
+
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  html,
+  body {
+    min-height: 100vh;
+  }
+
+  body {
+    @apply bg-canvas font-sans antialiased;
+    color: var(--fgColor-default);
+    overflow-x: clip;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  html:not(.dark) {
+    color-scheme: light;
+  }
+
+  *:focus-visible {
+    outline: none;
+    box-shadow:
+      0 0 0 2px var(--bgColor-default),
+      0 0 0 4px var(--borderColor-accent-emphasis);
+  }
+
+  ::selection {
+    background-color: var(--bgColor-accent-muted);
+  }
+
+  *,
+  ::before,
+  ::after {
+    border-color: var(--borderColor-default, currentcolor);
+  }
+
+  h1 {
+    @apply mb-6 text-3xl font-bold;
+  }
+
+  h2 {
+    @apply mt-6 mb-4 text-2xl font-semibold;
+  }
+
+  h3 {
+    @apply mt-4 mb-3 text-lg font-semibold;
+  }
+
+  p {
+    @apply mb-4;
+  }
+
+  a {
+    color: var(--fgColor-link);
+  }
+
+  a:hover {
+    text-decoration: underline;
+  }
+
+  button:not(:disabled),
+  select,
+  summary,
+  [role="button"] {
+    cursor: pointer;
+  }
+}
+
+@layer components {
+  /* Thin 6px scrollbar — applied globally to all scrollable elements.
+     scrollbar-width/scrollbar-color are Firefox-only fallback;
+     ::-webkit-scrollbar rules handle Chrome/Safari/Edge. */
+  @supports not selector(::-webkit-scrollbar) {
+    * {
+      scrollbar-width: thin;
+      scrollbar-color: theme(--color-zinc-700) transparent;
+    }
+  }
+
+  *::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background-color: theme(--color-zinc-700);
+    border-radius: 3px;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: theme(--color-zinc-600);
+  }
+
+  table {
+    @apply w-full border-collapse;
+    background-color: var(--bgColor-default);
+  }
+
+  table th {
+    @apply px-3 py-2 text-left text-xs font-normal;
+    color: var(--fgColor-muted);
+    background-color: var(--bgColor-muted);
+  }
+
+  table td {
+    @apply px-3 py-2 text-sm;
+  }
+
+  table tbody tr {
+    border-top: 1px solid var(--borderColor-muted);
+  }
+
+  table tbody tr:hover {
+    background-color: var(--bgColor-muted);
+  }
+
+  pre {
+    @apply overflow-x-auto rounded-md p-4;
+    background-color: var(--bgColor-muted);
+  }
+
+  code {
+    @apply rounded-sm px-1 py-0.5 text-sm font-mono;
+    background-color: var(--bgColor-neutral-muted);
+  }
+
+  pre code {
+    @apply bg-transparent p-0;
+  }
+
+  .blob-container {
+    background: var(--bgColor-default);
+    border-color: var(--borderColor-default);
+  }
+
+  .ref-menu > summary {
+    list-style: none;
+  }
+
+  .ref-menu > summary::-webkit-details-marker,
+  .ref-menu > summary::marker {
+    display: none;
+    content: "";
+  }
+
+  .ref-menu[open] > summary {
+    @apply ring-2 ring-accent-500/30;
+  }
+
+  .markdown-content {
+    @apply max-w-4xl leading-6;
+    font-size: 16px;
+    color: var(--fgColor-default);
+  }
+
+  .markdown-content > *:first-child {
+    margin-top: 0;
+  }
+
+  .markdown-content > *:last-child {
+    margin-bottom: 0;
+  }
+
+  .markdown-content h1,
+  .markdown-content h2,
+  .markdown-content h3,
+  .markdown-content h4 {
+    @apply mt-6 mb-3 font-semibold;
+    color: var(--fgColor-default);
+  }
+
+  .markdown-content h1,
+  .markdown-content h2 {
+    padding-bottom: 0.3em;
+    border-bottom: 1px solid var(--borderColor-muted);
+  }
+
+  .markdown-content p,
+  .markdown-content ul,
+  .markdown-content ol,
+  .markdown-content blockquote,
+  .markdown-content pre {
+    @apply mb-4;
+  }
+
+  .markdown-content ul,
+  .markdown-content ol {
+    @apply ml-6;
+  }
+
+  .markdown-content ul {
+    list-style: disc;
+  }
+
+  .markdown-content ol {
+    list-style: decimal;
+  }
+
+  .markdown-content blockquote {
+    border-left: 0.25em solid var(--borderColor-default);
+    padding-left: 1em;
+    color: var(--fgColor-muted);
+  }
+
+  .markdown-content img {
+    @apply inline-block max-w-full;
+  }
+
+  .markdown-content pre {
+    @apply overflow-x-auto rounded-md p-4;
+    background-color: var(--bgColor-muted);
+  }
+
+  .markdown-content pre code,
+  #blob-code {
+    @apply font-mono text-sm;
+  }
+
+  .markdown-content pre code {
+    display: block;
+    padding: 0;
+    border-radius: 0;
+    white-space: pre;
+    background: transparent !important;
+  }
+
+  pre code.hljs,
+  .blob-container code.hljs,
+  .markdown-content pre code.hljs,
+  #blob-code.hljs {
+    background: transparent !important;
+  }
+
+  .markdown-content pre code.hljs {
+    overflow-x: visible;
+  }
+
+  #blob-pre {
+    @apply bg-transparent p-0;
+  }
+
+  pre.has-line-numbers {
+    padding: 0 !important;
+  }
+
+  .code-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: transparent;
+  }
+
+  .code-table.hljs {
+    display: table;
+    margin: 0;
+    padding: 0 !important;
+    overflow: visible;
+    background: transparent !important;
+  }
+
+  .code-table tr,
+  .code-table td {
+    border: none;
+    background: transparent;
+  }
+
+  .code-table .line-num {
+    width: 1%;
+    min-width: 3.5rem;
+    padding: 0 1rem 0 0.5rem;
+    text-align: right;
+    vertical-align: top;
+    white-space: nowrap;
+    user-select: none;
+    border-right: 1px solid var(--borderColor-muted);
+  }
+
+  .code-table .line-num a {
+    display: block;
+    color: var(--fgColor-subtle, var(--fgColor-muted));
+    text-decoration: none;
+  }
+
+  .code-table .line-num a:hover {
+    color: var(--fgColor-link);
+  }
+
+  .code-table .line-code {
+    white-space: pre;
+    padding: 0 0.75rem;
+    line-height: 1.375rem;
+  }
+
+  .code-line:hover {
+    background: var(--bgColor-muted);
+  }
+
+  .code-line {
+    scroll-margin-top: 6rem;
+  }
+
+  .code-line:target,
+  .code-line.line-highlight {
+    background: var(--bgColor-attention-muted);
+  }
+
+  svg.inline {
+    vertical-align: -0.125em;
+  }
+
+  [data-theme-toggle] svg {
+    vertical-align: middle;
+  }
+
+  html.dark [data-theme-toggle] .icon-light {
+    display: none;
+  }
+
+  html.dark [data-theme-toggle] .icon-dark {
+    display: inline-block;
+  }
+
+  html:not(.dark) [data-theme-toggle] .icon-light {
+    display: inline-block;
+  }
+
+  html:not(.dark) [data-theme-toggle] .icon-dark {
+    display: none;
+  }
+}
+
+@layer components {
+  @media (max-width: 640px) {
+    #commits-table th:nth-child(3),
+    #commits-table td:nth-child(3) {
+      display: none;
+    }
+
+    #commits-table {
+      table-layout: fixed;
+    }
+
+    #commits-table th,
+    #commits-table td {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    #commits-table th:nth-child(1),
+    #commits-table td:nth-child(1) {
+      width: 5.5rem;
+      white-space: nowrap;
+    }
+
+    #commits-table th:nth-child(2),
+    #commits-table td:nth-child(2) {
+      white-space: normal;
+      word-break: break-word;
+    }
+
+    #commits-table th:nth-child(4),
+    #commits-table td:nth-child(4) {
+      white-space: normal;
+      overflow: visible;
+      text-overflow: unset;
+    }
+
+    /* Wrap long code lines on mobile instead of horizontal scroll */
+    .code-table .line-code {
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .diff-code {
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .markdown-content pre code {
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    /* Responsive markdown tables on mobile */
+    .markdown-content table {
+      table-layout: fixed;
+    }
+
+    .markdown-content table td,
+    .markdown-content table th {
+      word-break: break-word;
+      overflow-wrap: break-word;
+      padding: 0.5rem 0.5rem;
+    }
+  }
+}
+
+/* ── Diff Viewer ──────────────────────────────────────────────── */
+
+@layer components {
+  .diff-viewer {
+    @apply rounded-md overflow-hidden;
+    border: 1px solid var(--borderColor-default);
+    background-color: var(--bgColor-default);
+  }
+
+  /* Summary bar */
+  .diff-summary {
+    @apply flex flex-wrap items-center justify-between gap-3 px-5 py-3.5;
+    border-bottom: 1px solid var(--borderColor-muted);
+    background-color: var(--bgColor-muted);
+  }
+
+  .diff-summary-stats {
+    @apply flex flex-wrap items-center gap-3 text-sm;
+  }
+
+  .diff-stat-add {
+    @apply font-medium;
+    color: var(--fgColor-success);
+  }
+
+  .diff-stat-mod {
+    @apply font-medium;
+    color: var(--fgColor-attention);
+  }
+
+  .diff-stat-del {
+    @apply font-medium;
+    color: var(--fgColor-danger);
+  }
+
+  .diff-compare-label {
+    @apply rounded-full px-3 py-1 text-xs font-medium;
+    background-color: var(--bgColor-neutral-muted);
+    color: var(--fgColor-muted);
+  }
+
+  /* File list */
+  .diff-file-list {
+    /* no table – just stacked cards */
+  }
+
+  .diff-file-entry {
+    border-bottom: 1px solid var(--borderColor-muted);
+  }
+
+  .diff-file-entry:last-child {
+    border-bottom: 0;
+  }
+
+  .diff-file-row {
+    @apply flex items-center justify-between gap-3 px-5 py-3 transition-colors;
+  }
+
+  .diff-file-row:hover {
+    background-color: var(--bgColor-muted);
+  }
+
+  .diff-file-info {
+    @apply flex items-center gap-3 overflow-hidden;
+    min-width: 0;
+  }
+
+  .diff-file-path {
+    @apply truncate font-mono text-sm;
+  }
+
+  .diff-file-path a {
+    @apply no-underline hover:underline;
+  }
+
+  /* Badges */
+  .diff-badge {
+    @apply inline-flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md text-xs font-bold;
+  }
+
+  .diff-badge-add {
+    background-color: var(--bgColor-success-muted);
+    color: var(--fgColor-success);
+  }
+
+  .diff-badge-mod {
+    background-color: var(--bgColor-attention-muted);
+    color: var(--fgColor-attention);
+  }
+
+  .diff-badge-del {
+    background-color: var(--bgColor-danger-muted);
+    color: var(--fgColor-danger);
+  }
+
+  /* Toggle button */
+  .diff-toggle-btn {
+    @apply inline-flex flex-shrink-0 items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors;
+    border: 1px solid var(--control-borderColor-rest);
+    background-color: var(--control-bgColor-rest);
+    color: var(--fgColor-default);
+  }
+
+  .diff-toggle-btn:hover {
+    background-color: var(--control-bgColor-hover);
+  }
+
+  .diff-toggle-btn.active {
+    background-color: var(--bgColor-accent-muted);
+    border-color: var(--borderColor-accent-muted);
+    color: var(--fgColor-accent);
+  }
+
+  .diff-toggle-icon {
+    @apply text-[0.7rem] leading-none;
+  }
+
+  /* Expanded content area */
+  .diff-expand-area {
+    border-top: 1px solid var(--borderColor-muted);
+  }
+
+  /* Patch container */
+  .diff-patch-container {
+    overflow-x: auto;
+    overflow-y: auto;
+    max-height: 32rem;
+  }
+
+  .diff-patch-pre {
+    margin: 0 !important;
+    padding: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+  }
+
+  .diff-patch-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: transparent;
+  }
+
+  .diff-patch-table.hljs {
+    display: table;
+    margin: 0;
+    padding: 0 !important;
+    overflow: visible;
+    background: transparent !important;
+  }
+
+  .diff-patch-table tr,
+  .diff-patch-table td {
+    border: none !important;
+    background: transparent;
+    padding: 0;
+  }
+
+  .diff-patch-table tr:hover {
+    background: transparent;
+  }
+
+  /* Gutter (prefix column: +/-/space) */
+  .diff-gutter {
+    width: 1%;
+    min-width: 1.25rem;
+    padding: 0 0.25rem 0 0.75rem !important;
+    text-align: center;
+    vertical-align: top;
+    white-space: pre;
+    user-select: none;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    line-height: 1.375rem;
+    color: var(--fgColor-muted);
+  }
+
+  /* Code cell */
+  .diff-code {
+    white-space: pre;
+    padding: 0 0.75rem 0 0.25rem !important;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    line-height: 1.375rem;
+  }
+
+  /* Line-level diff coloring — Primer muted tokens flip with the theme */
+  .diff-line-add {
+    background: var(--bgColor-success-muted) !important;
+  }
+
+  .diff-line-add .diff-gutter {
+    color: var(--fgColor-success);
+  }
+
+  .diff-line-del {
+    background: var(--bgColor-danger-muted) !important;
+  }
+
+  .diff-line-del .diff-gutter {
+    color: var(--fgColor-danger);
+  }
+
+  .diff-line-hunk {
+    background: var(--bgColor-accent-muted) !important;
+  }
+
+  .diff-line-hunk .diff-code {
+    color: var(--fgColor-accent);
+    font-style: italic;
+  }
+
+  .diff-line-hunk .diff-gutter {
+    color: var(--fgColor-accent);
+  }
+
+  /* Loading state */
+  .diff-loading {
+    @apply flex items-center gap-2 px-5 py-4 text-sm;
+    color: var(--fgColor-muted);
+  }
+
+  .diff-spinner {
+    display: inline-block;
+    width: 1rem;
+    height: 1rem;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: diff-spin 0.6s linear infinite;
+  }
+
+  @keyframes diff-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  /* Skip message */
+  .diff-skip-msg {
+    @apply px-5 py-4 text-sm italic;
+    color: var(--fgColor-muted);
+  }
+
+  /* Empty state */
+  .diff-empty {
+    @apply px-5 py-6 text-center text-sm;
+    color: var(--fgColor-muted);
+  }
+}
+
+/* GitHub-style divided list rows (ideas, merge intents): border between rows
+   only, not above the first — the container border supplies that edge. */
+.gh-list > li + li {
+  border-top: 1px solid var(--borderColor-muted);
+}
+
+/* Shared card variants (Card component) on Primer surface tokens. */
+.card-default {
+  border-color: var(--borderColor-default);
+  background-color: var(--bgColor-default);
+}
+
+.card-accent {
+  border-color: var(--borderColor-accent-muted);
+  background-color: var(--bgColor-accent-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

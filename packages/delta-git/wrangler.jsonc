@@ -1,0 +1,271 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "git-on-cloudflare",
+  // Paid Workers account ("Pressword"). Required: the user owns multiple
+  // accounts, so every wrangler call needs explicit scoping.
+  "account_id": "ddf0cf5b4491ba59765378877fe8c697",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-05-13",
+  "compatibility_flags": [
+    "nodejs_als",
+    "nodejs_compat",
+    // Required by @cloudflare/workers-oauth-provider for Client ID Metadata
+    // Document (CIMD) fetches — forbids fetches to private/link-local ranges.
+    "global_fetch_strictly_public"
+  ],
+  "workers_dev": true,
+  // Self service binding — internal loopback for platform-side traffic that
+  // must traverse the real HTTP surface (chaos endpoint probing, internal
+  // receive floods). Avoids the public-egress fetch path.
+  "services": [{ "binding": "SELF", "service": "git-on-cloudflare" }],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "REPO_DO",
+        "class_name": "RepoDurableObject"
+      },
+      {
+        "name": "ADJUDICATOR_DO",
+        "class_name": "AdjudicatorAgent"
+      },
+      {
+        "name": "REPO_AGENT_DO",
+        "class_name": "RepoAgent"
+      },
+      {
+        "name": "FIREHOSE_DO",
+        "class_name": "FirehoseAgent"
+      },
+      {
+        // Platform compute — every "real effect" module runs here: CI
+        // executions, security scans, SBOMs, cert probes, federation
+        // mirrors, dev workspaces. One DO class; instances are addressed
+        // by id prefix (`job-*` for jobs, `ws-*` for workspaces) so they
+        // get their own container.
+        "name": "FORGE_SANDBOX",
+        "class_name": "ForgeSandbox"
+      }
+    ]
+  },
+  // DO-managed containers: each ForgeSandbox instance gets its own
+  // container built from containers/forge/Dockerfile.
+  "containers": [
+    {
+      "name": "forge-sandbox",
+      "class_name": "ForgeSandbox",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "forge": {
+          "dockerfile": "containers/forge/Dockerfile",
+          "build_context": "containers/forge"
+        }
+      }
+    }
+  ],
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "RepoDurableObject"
+      ]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [
+        "AuthDurableObject"
+      ]
+    },
+    {
+      "tag": "v3",
+      "deleted_classes": [
+        "AuthDurableObject"
+      ]
+    },
+    {
+      "tag": "v4",
+      // SQLite-backed so the agent DOs deploy on the free plan (KV-backed
+      // new_classes is paid-only); the KV-style storage API works unchanged.
+      "new_sqlite_classes": [
+        "AdjudicatorAgent",
+        "RepoAgent",
+        "FirehoseAgent"
+      ]
+    },
+    {
+      "tag": "v5",
+      // ForgeSandbox — DO-managed container class for platform compute.
+      "new_sqlite_classes": [
+        "ForgeSandbox"
+      ]
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "ROUTES",
+      "id": "5aec0fe75cee4e65b082cec726de78f9"
+    },
+    {
+      // OAuth provider state — hashed codes/tokens/grants, encrypted props.
+      // Nothing usable leaks from a dump: secrets are only ever hashed.
+      "binding": "OAUTH_KV",
+      "id": "d248c21a464e4189804ea80bd2b64ef2"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "git-on-cloudflare",
+      "database_id": "72f2335d-7f97-415e-82b7-12cf8e80a1a5",
+      "migrations_dir": "drizzle/d1"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "REPO_BUCKET",
+      "bucket_name": "git-repos"
+    }
+  ],
+  "ai": {
+    "binding": "AI"
+  },
+  // Semantic code search — @cf/baai/bge-base-en-v1.5 embeddings upserted by
+  // src/worker/search. The index ("dg-repo-embed", dims 768, cosine) must
+  // exist on the account before deploy: `wrangler vectorize create`.
+  "vectorize": [
+    {
+      "binding": "VECTORIZE",
+      "index_name": "dg-repo-embed"
+    }
+  ],
+  // Cloudflare Artifacts: hybrid backend for opted-in repositories.
+  "artifacts": [
+    {
+      "binding": "ARTIFACTS",
+      "namespace": "delta-git"
+    }
+  ],
+  // Analytics Engine is included with Workers Paid; `metric()` no-ops if the
+  // binding is ever absent (e.g. an older deploy config).
+  // Cron tiers: 5-min handles due monitor probes + delegate staleness;
+  // hourly carries the certificate-expiry notification scan.
+  "triggers": { "crons": ["*/5 * * * *", "0 * * * *"] },
+  "analytics_engine_datasets": [
+    {
+      "binding": "ANALYTICS",
+      "dataset": "dg_metrics"
+    }
+  ],
+
+  "queues": {
+    "producers": [
+      {
+        "binding": "REPO_TASKS_QUEUE",
+        "queue": "git-on-cloudflare-repo-maint"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "git-on-cloudflare-repo-maint",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1
+      },
+      {
+        // Cloudflare lifecycle events (cf.artifacts.repo.*) are delivered to
+        // this queue via an account-level event subscription created with
+        // `wrangler queues subscription create`. Kept separate from the repo
+        // maintenance queue since the payload schema is Cloudflare-owned.
+        "queue": "dg-artifacts-events",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5
+      }
+    ]
+  },
+  // Workers Rate Limiting bindings — global edge-consistent counters for
+  // the 60s-window abuse lanes (the hourly lanes stay on the KV fixed
+  // window, which the binding can't express). `rateLimit()` falls back to
+  // KV when a binding is absent (e.g. vitest env).
+  "unsafe": {
+    "bindings": [
+      {
+        "name": "RATE_LIMIT_AUTH_CHALLENGE",
+        "type": "ratelimit",
+        "namespace_id": "1001",
+        "simple": { "limit": 10, "period": 60 }
+      },
+      {
+        "name": "RATE_LIMIT_AUTH_VERIFY",
+        "type": "ratelimit",
+        "namespace_id": "1002",
+        "simple": { "limit": 20, "period": 60 }
+      },
+      {
+        "name": "RATE_LIMIT_PATCH",
+        "type": "ratelimit",
+        "namespace_id": "1003",
+        "simple": { "limit": 60, "period": 60 }
+      },
+      {
+        "name": "RATE_LIMIT_VOTE",
+        "type": "ratelimit",
+        "namespace_id": "1004",
+        "simple": { "limit": 30, "period": 60 }
+      }
+    ]
+  },
+  "observability": {
+    "enabled": true
+  },
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "dist/client",
+    "html_handling": "none"
+  },
+  // Environment variables (text/JSON)
+  "vars": {
+    // Repo DO idle cleanup threshold (minutes)
+    "REPO_DO_IDLE_MINUTES": "30",
+    // Logging level: debug|info|warn|error
+    "LOG_LEVEL": "info",
+    // tessera OIDC issuer (production). Override via .dev.vars for local dev.
+    // Client id and secret are runtime concerns and live in .dev.vars / `wrangler secret put`.
+    "TESSERA_OIDC_ISSUER": "https://auth.limic.dev",
+    // atproto DID sign-in is the primary web identity; tessera stays wired
+    // in code but disabled. Set to "on" to re-enable the OIDC login path.
+    "TESSERA_AUTH": "off",
+    // atproto PDS/base URL used for DID+handle resolution
+    // (com.atproto.identity.resolveDid / resolveHandle).
+    "ATP_PDS_URL": "https://bsky.social",
+    // Hermes browser-agent deployment origin (embed.js source for /embed/hermes).
+    "HERMES_ORIGIN": "https://hermes.widespread.fyi",
+    // Hosts allowed as OAuth return_to targets — wpcloud SSO handoff.
+    "ALLOWED_RETURN_HOSTS": "wpcloud.delta-git.workers.dev",
+    // Comma-separated DID/userId allowlist for global reputation admin
+    // (epoch create/close). Empty = no admins.
+    "DG_ADMIN_ACTORS": "",
+    // Cloudflare account id — used with the CF_API_TOKEN secret by the
+    // deploy-on-commit lane and per-repo Artifacts event subscriptions.
+    "CF_ACCOUNT_ID": "ddf0cf5b4491ba59765378877fe8c697",
+    // Outbound email for notifications — Resend-compatible HTTP API
+    // (POST {url}/emails {from,to,subject,text,html?} with Bearer auth).
+    // Empty = email egress disabled; notification rows still land in-app.
+    // The key itself stays a secret (`wrangler secret put EMAIL_API_KEY`).
+    "EMAIL_API_URL": "",
+    "EMAIL_FROM": "delta-git <noreply@delta-git.workers.dev>",
+    // Canonical public origin — used to turn relative notification links
+    // into absolute URLs in outbound email, and as the X-Forwarded-Host
+    // allowlist when the worker sits behind a fronting proxy
+    // (code.widespread.fyi → code-router worker → this worker).
+    "PUBLIC_ORIGIN": "https://code.widespread.fyi",
+    // Proof-of-interest compute pool — localchimera coordinator base URL.
+    // When set, PUBLIC repos route inference-shaped work (adjudication,
+    // research, indexing) to the volunteer pool first and fall back to
+    // Workers AI; private repos never emit content there regardless.
+    // The per-project dispatch bearer token stays a secret
+    // (`wrangler secret put COMPUTE_DISPATCH_TOKEN`).
+    "COMPUTE_COORDINATOR": "",
+    // "0" disables the pool path even when the coordinator is configured.
+    "COMPUTE_ENABLED": "1",
+    // Inline result-wait budget for pool inference before Workers-AI fallback.
+    "COMPUTE_TIMEOUT_MS": "45000"
+  }
+}
