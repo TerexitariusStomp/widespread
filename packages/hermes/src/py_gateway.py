@@ -432,6 +432,65 @@ def host_call(op: str, args: dict | None = None,
     return inner if isinstance(inner, dict) else resp
 
 
+def sys_request(op: str, args: dict | None = None,
+                timeout_s: float = 30.0) -> dict:
+    """Host-system info op (sysRequest): hardwareConcurrency, deviceMemory,
+    performance.memory heap stats, storage.estimate, timeOrigin. Backs the
+    browser psutil/resource implementations — real browser measurements,
+    never fabricated."""
+    resp = _proxy_result(_js().sysRequest(op, json.dumps(args or {})))
+    inner = resp.get("result")
+    return inner if isinstance(inner, dict) else resp
+
+
+def flock_request(path: str, mode: str, blocking: bool = True) -> dict:
+    """Web Locks acquisition for fcntl.flock/lockf. ``mode`` is 'exclusive'
+    or 'shared'; ``blocking=False`` maps LOCK_NB (resolves {ok:false,busy}
+    instead of waiting). The page holds the lock until flock_release."""
+    resp = _proxy_result(_js().flockRequest(str(path), mode, bool(blocking)))
+    inner = resp.get("result")
+    return inner if isinstance(inner, dict) else resp
+
+
+def flock_release(path: str) -> dict:
+    """Release a Web Locks hold taken by flock_request."""
+    resp = _proxy_result(_js().flockRelease(str(path)))
+    inner = resp.get("result")
+    return inner if isinstance(inner, dict) else resp
+
+
+def tcp_open(host: str, port: int) -> dict:
+    """Open a relayed TCP connection: page dials the hermes relay Worker,
+    which connects() upstream and pipes bytes over the WebSocket. Returns
+    {id} or {error}/{errno}."""
+    resp = _proxy_result(_js().tcpOpen(str(host), int(port)))
+    inner = resp.get("result")
+    return inner if isinstance(inner, dict) else resp
+
+
+def tcp_send(tunnel_id: str, data: bytes) -> dict:
+    """Write bytes into an open tunnel (base64 over the coincident call)."""
+    resp = _proxy_result(
+        _js().tcpSend(str(tunnel_id), base64.b64encode(data).decode()))
+    inner = resp.get("result")
+    return inner if isinstance(inner, dict) else resp
+
+
+def tcp_recv(tunnel_id: str, timeout_ms: int = 30000) -> dict:
+    """Long-poll the next chunk: {data:b64} | {eof:true} | {error}/{errno}.
+    The coincident call parks the interpreter while the page waits on the
+    relay socket — same blocking shape as fetch_blocking."""
+    resp = _proxy_result(_js().tcpRecv(str(tunnel_id), int(timeout_ms)))
+    inner = resp.get("result")
+    return inner if isinstance(inner, dict) else resp
+
+
+def tcp_close(tunnel_id: str) -> dict:
+    resp = _proxy_result(_js().tcpClose(str(tunnel_id)))
+    inner = resp.get("result")
+    return inner if isinstance(inner, dict) else resp
+
+
 def _turn_grant() -> str:
     """Broker grant of the session whose prompt-turn thread is running, if
     any — same attribution fetch_blocking uses for vault scoping."""

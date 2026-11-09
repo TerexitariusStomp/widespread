@@ -146,7 +146,7 @@ try {
 cpSync(resolve(assets, 'pyodide'), join(out, 'pyodide'), { recursive: true })
 
 mkdirSync(join(out, 'overlay'), { recursive: true })
-const overlayFiles = ['browser_runtime.py', 'browser_bootstrap.py', 'py_gateway.py']
+const overlayFiles = ['browser_runtime.py', 'browser_bootstrap.py', 'browser_native.py', 'py_gateway.py']
 for (const f of overlayFiles) {
   cpSync(join(root, 'src', f), join(out, 'overlay', f))
 }

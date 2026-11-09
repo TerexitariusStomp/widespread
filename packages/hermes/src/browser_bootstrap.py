@@ -7,7 +7,6 @@ transport so model calls leave via fetch — keys never enter this heap.
 """
 import os
 import sys
-import types
 
 # --- 1. HERMES_HOME → in-browser FS --------------------------------------
 # MEMFS for the spike; swapped for an OPFS-backed mount once we persist.
@@ -37,143 +36,30 @@ class _EOFStdin(io.StringIO):
 
 sys.stdin = _EOFStdin("")
 
-# --- 2. Native-module stubs ------------------------------------------------
-def _stub(name: str, **attrs):
-    mod = types.ModuleType(name)
-    mod.__dict__.update(attrs)
-    mod.__browser_stub__ = True
-    sys.modules[name] = mod
-    return mod
-
-
+# --- 2. Native-module implementations -------------------------------------
 def _install_native_stubs():
-    """Replace modules with no wasm build. Registry's discover_builtin_tools
-    already skips import-failures, but stubs keep shared utilities importable
-    (e.g. modules that read psutil constants at import). Only stub what the
-    wasm build genuinely lacks — signal/mmap/socket exist in Pyodide and
-    stubbing them breaks asyncio/anyio/starlette."""
-    import importlib.util
+    """Install real browser-backed native modules (see browser_native.py).
 
-    def _stub_if_missing(name, **attrs):
-        try:
-            if importlib.util.find_spec(name) is not None:
-                return None
-        except Exception:
-            pass
-        return _stub(name, **attrs)
+    Dispositions, verified against the pinned Pyodide 0.28.3 lock and the
+    vendored upstream tree:
 
-    psutil = _stub_if_missing("psutil")
-    if psutil is not None:
-        psutil.Process = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("psutil unavailable in browser"))
-        psutil.pid_exists = lambda pid: False
-        psutil.boot_time = lambda: 0.0
-        psutil.cpu_count = lambda *a, **k: 1
-        psutil.virtual_memory = lambda: types.SimpleNamespace(total=0, available=0, percent=0)
-        psutil.disk_usage = lambda p: types.SimpleNamespace(total=0, used=0, free=0, percent=0)
+    IMPLEMENTED (real): subprocess (WASIX userspace), socket (DoH + relay
+    TCP tunnel), fcntl (Web Locks), psutil (navigator/performance/storage),
+    resource (performance timers), pwd/grp (session identity),
+    termios/tty (attr store + winsize plumbing), ptyprocess (WASIX terminal
+    spawn behind a registered fd).
 
-    for name in ("ptyprocess", "ptyprocess.PtyProcess", "pexpect", "pty",
-                 "nemo_relay", "pillow_heif", "winpty", "pywinpty",
-                 "termios", "tty", "resource", "readline", "mmap",
-                 "grp", "pwd"):
-        _stub_if_missing(name)
+    DELETED — Pyodide ships them (rule a): mmap, PIL/Pillow (env wheel).
 
-    fcntl = _stub_if_missing("fcntl")
-    if fcntl is not None:
-        # DB layers flock() the sqlite file; single-writer cooperative runtime
-        # makes it a real no-op rather than a capability gap.
-        fcntl.flock = lambda fd, op: None
-        fcntl.lockf = lambda fd, op, *a, **k: None
-        fcntl.LOCK_EX = 2
-        fcntl.LOCK_SH = 1
-        fcntl.LOCK_UN = 8
-        fcntl.LOCK_NB = 4
+    DELETED — upstream only touches them behind guards or on platforms we
+    are not (rule b): pty (evals/tests only), pexpect (tests only),
+    nemo_relay (lazy optional import), pillow_heif (guarded optional),
+    winpty/pywinpty (Windows-only ConPTY path), readline (no production
+    imports — prompt_toolkit is self-contained).
+    """
+    import browser_native
 
-    # PIL ships in Pyodide (pillow wheel exists) — leave it; only stub if absent.
-    try:
-        import PIL  # noqa: F401
-    except ImportError:
-        _stub("PIL")
-        _stub("PIL.Image")
-
-    # subprocess exists in Pyodide but cannot spawn — any terminal tool that
-    # reaches Popen must fail loudly, never hang. check_fn-style gating keeps
-    # most of those tools unregistered anyway.
-    import subprocess  # noqa: F401
-
-    def _enoent(*a, **k):
-        # Same exception the OS raises for a missing binary: upstream probe
-        # paths (git_probe, which-style checks) treat ENOENT as "absent".
-        raise FileNotFoundError(2, "No such file or directory (browser runtime)",
-                                (a[0] if a else k.get("args") or [""])[0]
-                                if isinstance(a[0] if a else k.get("args"), (list, tuple)) else (a[0] if a else k.get("args", "")))
-
-    class _NoSpawnPopen(subprocess.Popen):
-        """Popen stays a type (upstream annotates ``subprocess.Popen | None``)
-        but instantiation always raises ENOENT — wasm cannot spawn."""
-
-        def __init__(self, *a, **k):
-            _enoent(*a, **k)
-
-    subprocess.Popen = _NoSpawnPopen
-    subprocess.run = _enoent
-    subprocess.check_output = _enoent
-    subprocess.call = _enoent
-
-    _install_socket_guards()
-
-
-def _install_socket_guards():
-    """Raw TCP does not exist in a browser. Emscripten sockets attempt a
-    WebSocket-backed proxy connect that can block inside a C call forever —
-    wedging the cooperative interpreter with no pump. Every connect-family
-    entry point must fail fast instead; all real egress goes through the
-    vault-mediated fetch path."""
-    import errno
-    import socket
-
-    def _clog(msg):
-        try:
-            import js
-            js.hermesBridge.log("i", "[sock] " + msg)
-        except Exception:
-            pass
-
-    def _refuse(name):
-        def _blocked(*a, **k):
-            _clog(f"{name} refused: {str(a)[:120]}")
-            raise OSError(errno.EHOSTUNREACH,
-                          f"{name}: raw sockets unavailable in browser runtime")
-        return _blocked
-
-    socket.create_connection = _refuse("socket.create_connection")
-    socket.getaddrinfo = _refuse("socket.getaddrinfo")
-    socket.gethostbyname = _refuse("socket.gethostbyname")
-    socket.gethostbyname_ex = _refuse("socket.gethostbyname_ex")
-    socket.getfqdn = lambda *a, **k: "localhost"
-
-    _Sock = socket.socket
-
-    class _NoConnectSock(_Sock):
-        def connect(self, *a, **k):
-            raise OSError(errno.EHOSTUNREACH,
-                          "connect: raw sockets unavailable in browser runtime")
-
-        def connect_ex(self, *a, **k):
-            return errno.EHOSTUNREACH
-
-        def bind(self, *a, **k):
-            raise OSError(errno.EHOSTUNREACH,
-                          "bind: raw sockets unavailable in browser runtime")
-
-        def listen(self, *a, **k):
-            raise OSError(errno.EHOSTUNREACH,
-                          "listen: raw sockets unavailable in browser runtime")
-
-        def accept(self, *a, **k):
-            raise OSError(errno.EHOSTUNREACH,
-                          "accept: raw sockets unavailable in browser runtime")
-
-    socket.socket = _NoConnectSock
+    browser_native.install()
 
 
 # --- 3. Vault-mediated httpx transport ------------------------------------

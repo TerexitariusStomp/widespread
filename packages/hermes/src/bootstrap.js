@@ -533,6 +533,28 @@
         return { error: String(e) }
       }
     }
+    w.proxy.sysRequest = function (op, argsJson) {
+      return withTimeout(sysCall(op, JSON.parse(argsJson || '{}')), 15000, 'sys')
+    }
+    w.proxy.flockRequest = function (path, mode, blocking) {
+      return withTimeout(flockCall(String(path || ''), mode, blocking !== false), 120000, 'flock')
+    }
+    w.proxy.flockRelease = function (path) {
+      return Promise.resolve(flockRelease(String(path || '')))
+    }
+    w.proxy.tcpOpen = function (host, port) {
+      return withTimeout(tcpOpen(String(host || ''), Number(port)), 25000, 'tcp-open')
+    }
+    w.proxy.tcpSend = function (id, b64) {
+      return Promise.resolve(tcpSend(String(id || ''), String(b64 || '')))
+    }
+    w.proxy.tcpRecv = function (id, ms) {
+      var wait = Math.min(Math.max(Number(ms) || 0, 1), 30000)
+      return withTimeout(tcpRecv(String(id || ''), wait), wait + 10000, 'tcp-recv')
+    }
+    w.proxy.tcpClose = function (id) {
+      return Promise.resolve(tcpClose(String(id || '')))
+    }
   }
 
   import('./vendor/coincident-main.js').then(function (mod) {
@@ -1092,6 +1114,310 @@
       }
       return { error: String(e && e.message || e) }
     })
+  }
+
+  // --- 6c. Host-system info (psutil/resource backing) ---------------------
+  // Real browser measurements only: hardwareConcurrency, deviceMemory,
+  // performance.memory heap stats, navigator.storage.estimate, timeOrigin.
+  // Called synchronously from the backend worker via coincident.
+
+  function sysCall(op, args) {
+    if (op !== 'sysinfo') return Promise.resolve({ error: 'unknown_op' })
+    var jsHeap = null
+    try {
+      if (performance && performance.memory) {
+        jsHeap = {
+          used: performance.memory.usedJSHeapSize,
+          total: performance.memory.totalJSHeapSize,
+          limit: performance.memory.jsHeapSizeLimit,
+        }
+      }
+    } catch (e) {}
+    var base = {
+      hardwareConcurrency: navigator.hardwareConcurrency || 1,
+      deviceMemory: (typeof navigator.deviceMemory === 'number') ? navigator.deviceMemory : null,
+      timeOrigin: (performance && performance.timeOrigin) || Date.now(),
+      jsHeap: jsHeap,
+      userAgent: navigator.userAgent || '',
+    }
+    var estP = (navigator.storage && navigator.storage.estimate)
+      ? navigator.storage.estimate().catch(function () { return null })
+      : Promise.resolve(null)
+    return estP.then(function (est) {
+      base.storage = est ? { quota: est.quota || 0, usage: est.usage || 0 } : null
+      return base
+    })
+  }
+
+  // --- 6d. fcntl.flock/lockf over Web Locks --------------------------------
+  // Real cross-context mutual exclusion: navigator.locks is per-origin, so
+  // locks held here exclude the backend worker, other tabs, and workers.
+  // The coincident call resolves when the lock is GRANTED; the lock itself
+  // is held by a pending callback promise until flockRelease resolves it.
+  // Keyed by the file's /proc/self/fd path — same file => same lock.
+
+  var heldLocks = {}   // path -> {release, fd}
+
+  function flockCall(path, mode, blocking) {
+    path = String(path || '')
+    if (!path) return Promise.resolve({ error: 'bad_path' })
+    var held = heldLocks[path]
+    if (held) {
+      // Same file already locked in this page (another fd of the same
+      // open file description family). navigator.locks would queue behind
+      // our own pending hold and deadlock the coincident caller, so grant
+      // reentrantly — the cross-context exclusion boundary is per-path and
+      // this page already holds it. Python tracks per-fd state itself.
+      return Promise.resolve({ ok: true, reentrant: true })
+    }
+    mode = (mode === 'shared') ? 'shared' : 'exclusive'
+    return new Promise(function (resolve) {
+      var settled = false
+      navigator.locks.request('hermes-flock:' + path, { mode: mode, ifAvailable: !blocking }, function (lock) {
+        if (lock === null) {
+          settled = true
+          resolve({ ok: false, busy: true })
+          return undefined
+        }
+        var releaseFn
+        var holdPromise = new Promise(function (r) { releaseFn = r })
+        heldLocks[path] = { release: releaseFn }
+        settled = true
+        resolve({ ok: true })
+        // Returning a pending promise keeps the Web Lock held until
+        // flockRelease resolves it — the coincident call already returned.
+        return holdPromise
+      }).catch(function (e) {
+        if (!settled) resolve({ error: String(e && e.message || e) })
+      })
+    })
+  }
+
+  function flockRelease(path) {
+    path = String(path || '')
+    var held = heldLocks[path]
+    if (held) {
+      delete heldLocks[path]
+      try { held.release() } catch (e) {}
+    }
+    return { ok: true }
+  }
+
+  // --- 6e. Relayed TCP tunnels ----------------------------------------------
+  // Python socket.connect() -> coincident tcpOpen -> WebSocket to the hermes
+  // relay Worker -> cloudflare:sockets connect() -> bidirectional pipe.
+  // The relay enforces session tokens, SSRF range blocks, and port 25.
+  // Vault `vault:` placeholders are never resolved into this path — the
+  // tunnel carries raw bytes only.
+
+  var tcpTuns = {}
+  var tcpSeq = 0
+  var tcpTok = null   // {token, base, exp}
+
+  function tcpToken() {
+    var now = Date.now()
+    if (tcpTok && tcpTok.exp > now + 10000) return Promise.resolve(tcpTok)
+    var base = defaultRelayBase().replace(/\/+$/, '')
+    return realFetch(base + '/tcp-token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    }).then(function (r) {
+      if (!r.ok) throw new Error('tcp-token HTTP ' + r.status)
+      return r.json()
+    }).then(function (j) {
+      tcpTok = {
+        token: j.token,
+        base: String(j.base || base).replace(/\/+$/, ''),
+        exp: Number(j.expiresAt) || (now + 600000),
+      }
+      return tcpTok
+    }).catch(function (e) {
+      tcpTok = null
+      throw e
+    })
+  }
+
+  function b64ToBytes(b64) {
+    var bin = atob(b64)
+    var u = new Uint8Array(bin.length)
+    for (var i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i)
+    return u
+  }
+
+  function bytesToB64(u) {
+    var bin = ''
+    var CH = 0x8000
+    for (var i = 0; i < u.length; i += CH)
+      bin += String.fromCharCode.apply(null, u.subarray(i, i + CH))
+    return btoa(bin)
+  }
+
+  // Relay close codes 4000+errno surface real connect() failures to Python
+  // (the Worker closes the socket with the upstream errno when connect()
+  // fails after the upgrade).
+  function tcpErrno(code) {
+    return (code >= 4000 && code < 5000) ? code - 4000 : 0
+  }
+
+  function drainTcp(tun) {
+    while (tun.waiters.length && (tun.chunks.length || tun.closed || tun.error)) {
+      var w = tun.waiters.shift()
+      if (tun.chunks.length) {
+        var total = 0
+        for (var i = 0; i < tun.chunks.length; i++) total += tun.chunks[i].length
+        var out = new Uint8Array(total)
+        var o = 0
+        for (var j = 0; j < tun.chunks.length; j++) { out.set(tun.chunks[j], o); o += tun.chunks[j].length }
+        tun.chunks = []
+        w.resolve({ data: bytesToB64(out) })
+      } else if (tun.errno) {
+        w.resolve({ errno: tun.errno })
+      } else if (tun.error) {
+        w.resolve({ error: tun.error })
+      } else {
+        w.resolve({ eof: true })
+      }
+    }
+  }
+
+  function tcpOpen(host, port) {
+    host = String(host || '')
+    port = Number(port)
+    if (!host || !(port > 0 && port < 65536)) {
+      return Promise.resolve({ error: 'bad_address' })
+    }
+    return tcpToken().then(function (t) {
+      return new Promise(function (resolve) {
+        var id = 't' + (++tcpSeq)
+        var ws
+        try {
+          ws = new RealWebSocket(
+            t.base.replace(/^http/, 'ws') + '/tcp?token=' + encodeURIComponent(t.token) +
+            '&host=' + encodeURIComponent(host) + '&port=' + port)
+        } catch (e) {
+          return resolve({ error: String(e && e.message || e) })
+        }
+        ws.binaryType = 'arraybuffer'
+        var tun = {
+          ws: ws, id: id, chunks: [], waiters: [],
+          opened: false, closed: false, error: null,
+        }
+        tcpTuns[id] = tun
+        var settled = false
+        var finish = function (r) { if (!settled) { settled = true; resolve(r) } }
+        var timer = setTimeout(function () {
+          if (!tun.opened) {
+            try { ws.close() } catch (e) {}
+            tun.error = tun.error || 'tcp_timeout'
+            tun.closed = true
+            drainTcp(tun)
+            finish({ error: tun.error })
+          }
+        }, 20000)
+        ws.onopen = function () {
+          tun.opened = true
+          clearTimeout(timer)
+          finish({ id: id })
+        }
+        ws.onerror = function () {
+          clearTimeout(timer)
+          if (!tun.opened) {
+            tun.error = tun.error || 'tcp_refused'
+            tun.closed = true
+            drainTcp(tun)
+            finish({ error: tun.error })
+          }
+        }
+        ws.onclose = function (ev) {
+          clearTimeout(timer)
+          tun.closed = true
+          var errno = tcpErrno(ev && ev.code)
+          if (errno) tun.errno = errno
+          else if (!tun.error) tun.error = 'tcp_closed'
+          drainTcp(tun)
+          if (!tun.opened) {
+            finish(tun.errno ? { errno: tun.errno } : { error: tun.error || 'tcp_refused' })
+          }
+        }
+        ws.onmessage = function (ev) {
+          var d = ev.data
+          var bytes
+          if (d instanceof ArrayBuffer) bytes = new Uint8Array(d)
+          else if (d instanceof Uint8Array) bytes = d
+          else if (typeof d === 'string') bytes = new TextEncoder().encode(d)
+          else bytes = new Uint8Array(d.buffer || d)
+          tun.chunks.push(bytes)
+          drainTcp(tun)
+        }
+      })
+    }).catch(function (e) {
+      return { error: 'tcp_token: ' + String(e && e.message || e).slice(0, 160) }
+    })
+  }
+
+  function tcpSend(id, b64) {
+    var tun = tcpTuns[id]
+    if (!tun) return { error: 'bad_tunnel' }
+    if (!tun.opened || tun.ws.readyState !== 1) return { error: 'tcp_closed' }
+    try {
+      tun.ws.send(b64ToBytes(b64))
+      return { ok: true }
+    } catch (e) {
+      return { error: String(e && e.message || e) }
+    }
+  }
+
+  function tcpRecv(id, ms) {
+    var tun = tcpTuns[id]
+    if (!tun) return Promise.resolve({ error: 'bad_tunnel' })
+    return new Promise(function (resolve) {
+      var done = false
+      var finish = function (r) {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        resolve(r)
+      }
+      var w = { resolve: finish }
+      var timer = setTimeout(function () {
+        var i = tun.waiters.indexOf(w)
+        if (i >= 0) tun.waiters.splice(i, 1)
+        // Timeout is not EOF: report empty-poll so Python can retry.
+        finish({ poll: true })
+      }, Math.min(Math.max(ms, 1), 30000))
+      tun.waiters.push(w)
+      drainTcp(tun)
+    })
+  }
+
+  function tcpClose(id) {
+    var tun = tcpTuns[id]
+    if (!tun) return { ok: true }
+    delete tcpTuns[id]
+    tun.closed = true
+    tun.error = tun.error || null
+    var ws = tun.ws
+    // Resolve pending waiters before the close event lands.
+    drainTcp(tun)
+    try { ws.close(1000, 'closed') } catch (e) {}
+    return { ok: true }
+  }
+
+  // --- 6f. Test/diagnostic surface ----------------------------------------
+  // Read-only probes over the same code paths the coincident proxy uses —
+  // lets the Playwright smoke prove sysinfo/flock/tcp in real Chromium
+  // without a Python eval channel (the backend worker is a coincident
+  // worker: page->worker calls can't reach it while Python is parked).
+  window.__HERMES_BRIDGE__ = {
+    sysinfo: function () { return sysCall('sysinfo', {}) },
+    wasiStatus: function () { return wasiCall('status', {}) },
+    flock: function (path, mode, blocking) { return flockCall(path, mode, blocking) },
+    flockRelease: function (path) { return Promise.resolve(flockRelease(path)) },
+    tcpOpen: function (host, port) { return tcpOpen(host, port) },
+    tcpSend: function (id, b64) { return Promise.resolve(tcpSend(id, b64)) },
+    tcpRecv: function (id, ms) { return tcpRecv(id, ms) },
+    tcpClose: function (id) { return Promise.resolve(tcpClose(id)) },
   }
 
   // --- 7. Share-as-gateway -----------------------------------------------

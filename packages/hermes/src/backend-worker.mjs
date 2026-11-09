@@ -76,6 +76,30 @@ const bridge = {
     // survive reloads on hosts without OPFS.
     return proxy.persistFile(path, b64)
   },
+  sysRequest(op, argsJson) {
+    // Host measurements (navigator/performance/storage) for psutil/resource.
+    return proxy.sysRequest(op, argsJson)
+  },
+  flockRequest(path, mode, blocking) {
+    // Web Locks mutual exclusion for fcntl.flock/lockf.
+    return proxy.flockRequest(path, mode, blocking)
+  },
+  flockRelease(path) {
+    return proxy.flockRelease(path)
+  },
+  tcpOpen(host, port) {
+    // Relayed TCP tunnel: page -> relay Worker -> cloudflare:sockets.
+    return proxy.tcpOpen(host, port)
+  },
+  tcpSend(id, b64) {
+    return proxy.tcpSend(id, b64)
+  },
+  tcpRecv(id, ms) {
+    return proxy.tcpRecv(id, ms)
+  },
+  tcpClose(id) {
+    return proxy.tcpClose(id)
+  },
   log(level, msg) { console.log('[py]', msg) },
 }
 
