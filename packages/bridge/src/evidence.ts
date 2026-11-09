@@ -7,7 +7,8 @@
 //      own verifier reads `{upstream}/commit/{sha}.patch` (GitHub serves
 //      format-patch there). We do the same, independently.
 
-import type { CommitEvidence, Crosscheck, Env, ShipClaim } from "./types";
+import type { DgShip1Claim } from "@widespread/protocol";
+import type { CommitEvidence, Crosscheck, Env } from "./types";
 import { diffUrlFor, resolveLocator } from "./locator";
 
 const DIFF_EXCERPT_CHARS = 6000;
@@ -246,7 +247,7 @@ export async function gatherCommitEvidence(
 }
 
 /** Compare the claim's self-reported stats to what we recomputed. */
-export function crosscheck(claim: ShipClaim, commits: CommitEvidence[]): Crosscheck {
+export function crosscheck(claim: DgShip1Claim, commits: CommitEvidence[]): Crosscheck {
   const files = new Set<string>();
   let lines = 0;
   let verified = 0;

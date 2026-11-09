@@ -3,7 +3,9 @@
 import { adjudicate } from "./adjudicator";
 import { crosscheck, findDerivative, gatherCommitEvidence, laterUpstreamFingerprints, upstreamFor } from "./evidence";
 import { oracleEnv, signVerdict } from "./oracle";
-import { fetchOpLog, verifyChain } from "./oplog";
+import { verifyOpLogChain } from "@widespread/protocol";
+import type { DgShip1Claim } from "@widespread/protocol";
+import { fetchOpLog } from "./oplog";
 import { refreshBatch, sendPayout } from "./payouts";
 import { attestClaim } from "./ecosystem";
 import { getBounty, getRecord, putRecord } from "./store";
@@ -13,10 +15,9 @@ import type {
   Env,
   PayoutReceipt,
   ReviewRecord,
-  ShipClaim,
 } from "./types";
 
-function receiverFor(claim: ShipClaim, bounty: Bounty | null, actor: string): string | null {
+function receiverFor(claim: DgShip1Claim, bounty: Bounty | null, actor: string): string | null {
   if (bounty?.recipients?.[actor]) return bounty.recipients[actor];
   if (bounty?.receiver_email) return bounty.receiver_email;
   if (claim.paypal_email) return claim.paypal_email;
@@ -52,8 +53,8 @@ export async function runReview(
   // a new claim; its payout gets a hash-keyed batch id.
   const prior = stored?.claim.hash === entry.hash ? stored : null;
 
-  const claim = entry.payload as unknown as ShipClaim;
-  const [chain, bounty] = await Promise.all([verifyChain(entries), getBounty(env, repo)]);
+  const claim = entry.payload as unknown as DgShip1Claim;
+  const [chain, bounty] = await Promise.all([verifyOpLogChain(entries), getBounty(env, repo)]);
 
   // Recompute each claimed commit's diff independently of the forge verdict.
   const commits = await Promise.all(

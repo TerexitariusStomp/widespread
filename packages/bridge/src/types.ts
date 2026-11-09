@@ -1,4 +1,10 @@
 // Shared types for the Slop.cash ⇄ delta-git payout bridge.
+//
+// Protocol-shared shapes (OpLogEntry, ChainVerification, DgShip1Claim,
+// AttestationToken) live in @widespread/protocol — import them from there
+// directly; this module intentionally does not re-export them.
+
+import type { ChainVerification, OpLogEntry } from "@widespread/protocol";
 
 /** Runtime environment — bindings + vars + secrets (see wrangler.jsonc). */
 export interface Env {
@@ -39,6 +45,8 @@ export interface Env {
   FEED_POLAR?: string;
   /** HMAC secret for /api/claims attestation tokens (falls back to ADMIN_TOKEN). */
   ATTEST_SECRET?: string;
+  /** Optional JWT for authenticated 1Click API routes (quotes/tokens work without it). */
+  ONECLICK_JWT?: string;
   /** Markup (bps) applied when mirroring third-party bounties into our
    * markets — our spread, skimmed on-chain to platformTo at release. */
   CUT_BPS?: string;
@@ -128,48 +136,6 @@ export interface FeedDoc {
   sources: Record<string, { ok: boolean; count: number; error?: string; fetched_at: number }>;
   records: FeedRecord[];
   mirrors?: MirrorListing[];
-}
-
-/** One row of GET /api/:owner/:repo/dg/oplog (snake_case over the wire). */
-export interface OpLogEntry {
-  seq: number;
-  hash: string;
-  prev_hash: string;
-  kind: string;
-  actor: string;
-  payload: Record<string, unknown>;
-  created_at: number;
-}
-
-export interface OpLogResponse {
-  entries: OpLogEntry[];
-}
-
-/** Result of replaying the op-log hash chain locally. */
-export interface ChainVerification {
-  valid: boolean;
-  checked: number;
-  tip_hash: string | null;
-  tip_seq: number;
-  broken_at_seq: number | null;
-}
-
-/** What the ship claim asserts (subset of the dg-ship-1 payload we use). */
-export interface ShipClaim {
-  session_id?: string;
-  tool?: string;
-  commits?: string[];
-  files?: number;
-  ship?: boolean;
-  lines_added?: number;
-  lines_removed?: number;
-  claimed?: {
-    lines_added?: number;
-    lines_removed?: number;
-    files_touched?: number;
-  };
-  paypal_email?: string;
-  work_id?: string;
 }
 
 export type EvidenceSource = "forge-diff" | "upstream-patch" | "unavailable";

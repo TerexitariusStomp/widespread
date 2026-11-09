@@ -1,33 +1,13 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { b58encode, b58decode, parseNearKey, nearViewCall, nearFunctionCall } from "../src/nearops";
-import { fakeEnv, jsonRes } from "./mock";
+import { base58 } from "@scure/base";
+import { parseNearKey, nearViewCall, nearFunctionCall } from "../src/nearops";
+import { jsonRes } from "./mock";
 
-const te = new TextEncoder();
 const b64ToBytes = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-
-describe("base58", () => {
-  it("round-trips arbitrary bytes", () => {
-    for (const n of [1, 32, 64, 100]) {
-      const b = crypto.getRandomValues(new Uint8Array(n));
-      expect(b58decode(b58encode(b))).toEqual(b);
-    }
-  });
-  it("preserves leading zero bytes", () => {
-    const b = new Uint8Array([0, 0, 1, 2, 0, 3]);
-    expect(b58decode(b58encode(b))).toEqual(b);
-  });
-  it("known vector: empty → empty, '1' → [0]", () => {
-    expect(b58decode("")).toEqual(new Uint8Array(0));
-    expect(b58decode("1")).toEqual(new Uint8Array([0]));
-  });
-  it("rejects invalid chars", () => {
-    expect(() => b58decode("0OIl")).toThrow(/bad base58/);
-  });
-});
 
 describe("parseNearKey", () => {
   const raw = new Uint8Array(64).map((_, i) => i);
-  const key = `ed25519:${b58encode(raw)}`;
+  const key = `ed25519:${base58.encode(raw)}`;
   it("splits seed||pubkey", () => {
     const { seed, pubkey } = parseNearKey(key);
     expect(seed).toEqual(raw.slice(0, 32));
@@ -35,7 +15,7 @@ describe("parseNearKey", () => {
   });
   it("rejects wrong prefix / length", () => {
     expect(() => parseNearKey("sr25519:abc")).toThrow(/ed25519:/);
-    expect(() => parseNearKey(`ed25519:${b58encode(new Uint8Array(10))}`)).toThrow(/64/);
+    expect(() => parseNearKey(`ed25519:${base58.encode(new Uint8Array(10))}`)).toThrow(/64/);
   });
 });
 

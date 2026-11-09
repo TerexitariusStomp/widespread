@@ -376,7 +376,7 @@ export default {
     }
     if (pathname === "/api/intents/status" && req.method === "GET") {
       const dep = url.searchParams.get("depositAddress") ?? "";
-      return dep ? json(await intentsStatus(dep)) : bad("need ?depositAddress=", 400);
+      return dep ? json(await intentsStatus(dep, env)) : bad("need ?depositAddress=", 400);
     }
     // Simocracy-compatible mechanism service (org.simocracy.mechanism).
     if (pathname === "/api/mechanisms" && req.method === "GET") {

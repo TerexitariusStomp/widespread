@@ -311,7 +311,23 @@ export async function mechanismRun(
 // legacy intents-api.aurora.dev). No app key needed for quotes.
 // Same discipline as intents.js: a quote is a preview; settlement only
 // counts after confirmed status — never credit on deposit alone.
-const INTENTS_API = "https://1click.chaindefuser.com/v0";
+// Transport is @defuse-protocol/one-click-sdk-typescript; ONECLICK_JWT is
+// only required for authenticated routes (quotes/tokens/status are open).
+import {
+  ApiError,
+  OneClickService,
+  OpenAPI,
+  QuoteRequest,
+} from "@defuse-protocol/one-click-sdk-typescript";
+import axios from "axios";
+
+// The SDK is generated-code axios — force the fetch adapter so Worker and
+// Node share one transport (and tests can stub globalThis.fetch).
+axios.defaults.adapter = "fetch";
+
+function oneClickEnv(env: { ONECLICK_JWT?: string }) {
+  if (env.ONECLICK_JWT) OpenAPI.TOKEN = env.ONECLICK_JWT;
+}
 
 // Defuse asset ids (from /v0/tokens): NEAR-native USDC is unwrapped
 // nep141:<contract>; foreign-chain assets are nep141:<chain>-<addr>.omft.near.
@@ -322,7 +338,7 @@ export const INTENTS_ASSETS = {
 };
 
 export async function hatsPayoutQuote(
-  env: object,
+  env: { ONECLICK_JWT?: string },
   args: {
     hatId?: string; assetIn?: string; assetOut?: string;
     amount?: string; recipient?: string; destChain?: string; refundTo?: string;
@@ -331,6 +347,7 @@ export async function hatsPayoutQuote(
   if (!args.amount || !args.recipient) {
     return { error: "need {amount, recipient} — assetIn/assetOut/destChain optional" };
   }
+  oneClickEnv(env);
   const deadline = new Date(Date.now() + 2 * 3600e3)
     .toISOString().replace(/\.\d{3}Z$/, "Z");
   const origin = args.assetIn ?? INTENTS_ASSETS.NEAR_USDC;
@@ -343,44 +360,55 @@ export async function hatsPayoutQuote(
     ?? (isNearNative ? "widespread.near" : null);
   if (!refundTo)
     return { error: "need refundTo — must be a valid address on the ORIGIN chain (NEAR account for nep141, chain address for omft assets)" };
-  const body = {
+  const request: QuoteRequest = {
     dry: true,
-    swapType: "EXACT_INPUT",
-    depositType: "ORIGIN_CHAIN",
+    swapType: QuoteRequest.swapType.EXACT_INPUT,
+    depositType: QuoteRequest.depositType.ORIGIN_CHAIN,
     originAsset: origin,
     destinationAsset: args.assetOut ?? INTENTS_ASSETS.SOL_USDC,
     amount: String(args.amount),
     slippageTolerance: 100,
     refundTo,
-    refundType: "ORIGIN_CHAIN",
+    refundType: QuoteRequest.refundType.ORIGIN_CHAIN,
     recipient: args.recipient,
-    recipientType: "DESTINATION_CHAIN",
+    recipientType: QuoteRequest.recipientType.DESTINATION_CHAIN,
     deadline,
   };
-  const res = await fetch(`${INTENTS_API}/quote`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(20000),
-  });
-  const data = await res.json().catch(() => null) as Record<string, unknown> | null;
-  return {
-    hatId: args.hatId ?? null,
-    dry: true,
-    rail: "near-intents-1click",
-    status: res.ok ? "quoted" : `http ${res.status}`,
-    quote: data?.quote ?? data,
-    upstream: data?.message ? { message: data.message } : undefined,
-    note: "indicative dry quote only — settlement requires confirmed status via /v0/status. NEAR-native origins currently 500 upstream (omft assets quote fine).",
-  };
+  try {
+    const res = await OneClickService.getQuote(request);
+    return {
+      hatId: args.hatId ?? null,
+      dry: true,
+      rail: "near-intents-1click",
+      status: "quoted",
+      quote: res.quote ?? res,
+      note: "indicative dry quote only — settlement requires confirmed status via /v0/status. NEAR-native origins currently 500 upstream (omft assets quote fine).",
+    };
+  } catch (e) {
+    const status = e instanceof ApiError ? e.status : 0;
+    return {
+      hatId: args.hatId ?? null,
+      dry: true,
+      rail: "near-intents-1click",
+      status: status ? `http ${status}` : "error",
+      quote: e instanceof ApiError ? e.body : undefined,
+      upstream: e instanceof ApiError && typeof e.body === "object" && e.body !== null && "message" in e.body
+        ? { message: (e.body as { message?: unknown }).message }
+        : undefined,
+      note: "indicative dry quote only — settlement requires confirmed status via /v0/status. NEAR-native origins currently 500 upstream (omft assets quote fine).",
+    };
+  }
 }
 
 /** Settlement status for a 1Click deposit address — only credit on
  *  terminal success states (same discipline as waitSettled). */
-export async function intentsStatus(depositAddress: string) {
-  const res = await fetch(
-    `${INTENTS_API}/status?depositAddress=${encodeURIComponent(depositAddress)}`,
-    { signal: AbortSignal.timeout(15000) });
-  const data = await res.json().catch(() => null);
-  return { depositAddress, http: res.status, status: data };
+export async function intentsStatus(depositAddress: string, env?: { ONECLICK_JWT?: string }) {
+  if (env) oneClickEnv(env);
+  try {
+    const status = await OneClickService.getExecutionStatus(depositAddress);
+    return { depositAddress, http: 200, status };
+  } catch (e) {
+    const http = e instanceof ApiError ? e.status : 0;
+    return { depositAddress, http, status: e instanceof ApiError ? e.body : null };
+  }
 }

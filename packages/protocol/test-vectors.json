@@ -1,0 +1,66 @@
+{
+  "comment": "Fixed ed25519 test vectors for @widespread/protocol — the cross-language contract (hermes python plugin asserts dg1 payload + signature bytes against these). Seed is bytes 1..32; NOT a real credential.",
+  "ed25519": {
+    "seedHex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+    "publicKeyHex": "79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664",
+    "did": "did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7"
+  },
+  "dg1": {
+    "method": "POST",
+    "path": "/api/acme/widgets/dg/ship",
+    "bodyUtf8": "{\"commits\":[\"0123456789abcdef\"],\"tool\":\"widespread-runner\"}",
+    "bodySha256Hex": "3222365f55aeca3dbc5231ac57d273ee08d06523b7565099963315240c3b6ff9",
+    "ts": "1735689600",
+    "nonce": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+    "payload": "dg1\ndid:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7\n1735689600\na1b2c3d4e5f60718293a4b5c6d7e8f90\nPOST\n/api/acme/widgets/dg/ship\n3222365f55aeca3dbc5231ac57d273ee08d06523b7565099963315240c3b6ff9",
+    "signingDigestHex": "09c93fa3b9904ba90dd715fb59130709694a860f3af8ddd26528ce74c0a7cd2e",
+    "signatureHex": "3f33bc6865274900ec1df7a4c41527e208df06fb7e5cfc250add6654271873dc32eaf450a3cbfb00e63cfa58f773e3466cd5b7f3143e54f46fa134227129ef09",
+    "headers": {
+      "x-dg-did": "did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7",
+      "x-dg-ts": "1735689600",
+      "x-dg-nonce": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      "x-dg-sig": "3f33bc6865274900ec1df7a4c41527e208df06fb7e5cfc250add6654271873dc32eaf450a3cbfb00e63cfa58f773e3466cd5b7f3143e54f46fa134227129ef09"
+    }
+  },
+  "oplog": {
+    "entries": [
+      {
+        "seq": 0,
+        "hash": "2c4b3756e61d1a8fde8db19fc8aecf9d3162851004b06fbf1fc03e4ea2e69fb5",
+        "prev_hash": "genesis",
+        "kind": "ship",
+        "actor": "did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7",
+        "payload": {
+          "op": "claim",
+          "work_id": "w1"
+        },
+        "created_at": 1735689600
+      },
+      {
+        "seq": 1,
+        "hash": "9f346345e0c48a38006521d601fb90c7ea7e19415219fda101e081e191db7fb9",
+        "prev_hash": "2c4b3756e61d1a8fde8db19fc8aecf9d3162851004b06fbf1fc03e4ea2e69fb5",
+        "kind": "note",
+        "actor": "bridge",
+        "payload": {
+          "op": "note"
+        },
+        "created_at": 1735689601
+      },
+      {
+        "seq": 2,
+        "hash": "cd40cab9e249d89b43fc7eea58079e08eadc0217850ad95a39ff7975321c8513",
+        "prev_hash": "9f346345e0c48a38006521d601fb90c7ea7e19415219fda101e081e191db7fb9",
+        "kind": "ship",
+        "actor": "did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7",
+        "payload": {
+          "op": "claim",
+          "work_id": "w2"
+        },
+        "created_at": 1735689602
+      }
+    ],
+    "tipHash": "cd40cab9e249d89b43fc7eea58079e08eadc0217850ad95a39ff7975321c8513",
+    "tipSeq": 2
+  }
+}

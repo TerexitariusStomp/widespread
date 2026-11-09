@@ -1,0 +1,37 @@
+{
+  "name": "@widespread/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared widespread protocol primitives — did:key, dg1 signed-request envelopes, dg-ship-1/op-log types. WebCrypto + @noble/curves + @scure/base only; runs in Workers, Node, and browsers.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./test-vectors.json": "./test-vectors.json"
+  },
+  "bin": {
+    "widespread-sign": "./bin/widespread-sign.mjs"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "test-vectors.json",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "pretest": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.9.0",
+    "@scure/base": "^1.1.6"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.5"
+  }
+}

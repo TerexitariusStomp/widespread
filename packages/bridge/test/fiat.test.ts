@@ -53,7 +53,7 @@ function rpcFetch(handlers: {
         return jsonRes({ result: { result: bytes } });
       }
       if (body.method === "block") {
-        return jsonRes({ result: { header: { hash: handlers.blockHash ?? "11111111111111111111111111111111" } } });
+        return jsonRes({ result: { header: { hash: handlers.blockHash ?? "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi" } } });
       }
       return jsonRes({ error: { message: `unmocked rpc ${body.method}/${rt}` } }, 500);
     }
@@ -135,7 +135,7 @@ describe("tryOpsEscrow", () => {
         const markets = listCalls > 1 ? [{ marketId: "30", specHash: "sha256:spec" }] : [];
         return jsonRes({ result: { result: [...new TextEncoder().encode(JSON.stringify(markets))] } });
       }
-      if (body.method === "block") return jsonRes({ result: { header: { hash: "22222222222222222222222222222222" } } });
+      if (body.method === "block") return jsonRes({ result: { header: { hash: "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR" } } });
       return jsonRes({});
     });
     const kv = fakeKV();
@@ -157,7 +157,7 @@ describe("tryOpsEscrow", () => {
       const rt = body.params?.request_type;
       if (rt === "view_access_key") return jsonRes({ result: { nonce: 0, permission: "FullAccess" } });
       if (rt === "call_function") return jsonRes({ result: { result: [] } });
-      if (body.method === "block") return jsonRes({ result: { header: { hash: "33333333333333333333333333333333" } } });
+      if (body.method === "block") return jsonRes({ result: { header: { hash: "CktRuQ2mttgRGkXJtyksdKHjUdc2C4TgDzyB98oEzy8" } } });
       return jsonRes({});
     });
     const kv = fakeKV();
@@ -182,7 +182,7 @@ describe("tryOpsEscrow", () => {
       const rt = body.params?.request_type;
       if (rt === "view_access_key") return jsonRes({ result: { nonce: 0, permission: "FullAccess" } });
       if (rt === "call_function") return jsonRes({ result: { result: [] } }); // market never appears
-      if (body.method === "block") return jsonRes({ result: { header: { hash: "44444444444444444444444444444444" } } });
+      if (body.method === "block") return jsonRes({ result: { header: { hash: "GgBaCs3NCBuZN12kCJgAW63ydqohFkHEdfdEXBPzLHq" } } });
       return jsonRes({});
     });
     const env = opsEnv();

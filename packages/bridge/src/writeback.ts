@@ -1,21 +1,11 @@
 // Bidirectional audit: after a verdict, write the receipt back to the
 // forge as a commit status (POST /api/:o/:r/dg/status), signed with the
-// bridge's own did:key agent identity — the same envelope scheme the
-// forge verifies for every agent mutation (x-dg-* headers, Ed25519 over
-// sha256("dg1\n<did>\n<ts>\n<nonce>\n<METHOD>\n<path>\n<body_sha256>")).
+// bridge's own did:key agent identity. The dg1 envelope
+// (x-dg-* headers, Ed25519 over sha256("dg1\n<did>\n<ts>\n<nonce>\n
+// <METHOD>\n<path>\n<body_sha256>")) is produced by @widespread/protocol.
 
+import { signDg1Request } from "@widespread/protocol";
 import type { Env, Writeback } from "./types";
-
-const te = new TextEncoder();
-
-const toHex = (buf: ArrayBuffer | Uint8Array): string =>
-  [...new Uint8Array(buf instanceof Uint8Array ? buf : new Uint8Array(buf))]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-
-async function sha256Hex(data: Uint8Array): Promise<string> {
-  return toHex(await crypto.subtle.digest("SHA-256", data as BufferSource));
-}
 
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
@@ -39,25 +29,17 @@ async function signedPost(
   path: string,
   body: unknown
 ): Promise<{ status: number; body: unknown }> {
-  const bodyBytes = te.encode(JSON.stringify(body));
-  const ts = String(Math.floor(Date.now() / 1000));
-  const nonce = crypto.randomUUID().replace(/-/g, "");
-  const bodySha = await sha256Hex(bodyBytes);
-  const payload = await sha256Hex(
-    te.encode(`dg1\n${env.DG_AGENT_DID}\n${ts}\n${nonce}\nPOST\n${path}\n${bodySha}`)
-  );
-  const sig = toHex(
-    await crypto.subtle.sign("Ed25519", key, te.encode(payload) as BufferSource)
-  );
+  const bodyBytes = new TextEncoder().encode(JSON.stringify(body));
+  const headers = await signDg1Request({
+    did: env.DG_AGENT_DID!,
+    privateKey: key,
+    method: "POST",
+    path,
+    body: bodyBytes,
+  });
   const res = await fetch(`${env.FORGE_BASE}${path}`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-dg-did": env.DG_AGENT_DID!,
-      "x-dg-ts": ts,
-      "x-dg-nonce": nonce,
-      "x-dg-sig": sig,
-    },
+    headers: { "content-type": "application/json", ...headers },
     body: bodyBytes,
   });
   return { status: res.status, body: await res.json().catch(() => ({})) };

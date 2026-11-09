@@ -239,7 +239,7 @@ export async function tryOpsEscrow(env: Env, mirror: MirrorListing): Promise<unk
              txHash: prior.txHash, market_id: null, attempts: prior.attempts };
   }
 
-  const price = await nearPriceUsd();
+  const price = await nearPriceUsd(env);
   if (!price || !Number.isFinite(price) || price <= 0) {
     return { skipped: "NEAR price unavailable or invalid (intents /tokens)" };
   }

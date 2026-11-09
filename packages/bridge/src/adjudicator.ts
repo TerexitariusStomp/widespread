@@ -2,14 +2,13 @@
 // This is the hackathon's "AI" half — a model weighs spec-fit and evidence
 // integrity and returns a structured verdict. No rules engine decides.
 
+import type { ChainVerification, OpLogEntry } from "@widespread/protocol";
 import type {
   Adjudication,
   Bounty,
-  ChainVerification,
   CommitEvidence,
   Crosscheck,
   Env,
-  OpLogEntry,
 } from "./types";
 
 const SYSTEM = `You are the adjudicator for Widespread, a contributor reward pool.
