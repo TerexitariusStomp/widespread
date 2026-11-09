@@ -32,13 +32,38 @@ export class ForeguildFutarchy {
     this.noPool = {};
     this.redeemed = {}; // id -> {account: "1"} — one payout per account
     this.nextId = 1;
+    this.resolvers = {}; // metricId -> {account: "1"} — oracle attestors
+    // DAO admin: the account allowed to register resolvers. Defaults to
+    // the deployer (first propose caller) — set via setDao.
+    this.dao = "";
+  }
+
+  // ---- DAO admin: who may set the oracle resolver registry ----
+  @call({})
+  setDao({ account }) {
+    const who = near.predecessorAccountId();
+    assert(!this.dao || who === this.dao, "only the dao admin can rotate itself");
+    this.dao = account;
+    return { dao: this.dao };
+  }
+
+  // Resolver registry: metricId -> oracle accounts allowed to attest
+  // resolution values. Replaces hand-attested strings with a bound set
+  // of attestors; a metricId with no resolvers stays permissionless
+  // (proposer-early / anyone-after-deadline, as before).
+  @call({})
+  setResolvers({ metricId, accounts }) {
+    const who = near.predecessorAccountId();
+    assert(this.dao && who === this.dao, "only the dao admin registers resolvers");
+    this.resolvers[metricId] = Object.fromEntries((accounts ?? []).map((a) => [a, "1"]));
+    return { metricId, resolvers: accounts ?? [] };
   }
 
   // ---- propose: lock the decision + treasury action ----
   // Payable (as in the deployed bundle): any attached deposit stays in the
   // contract balance (i.e. the treasury) — it is NOT credited to a pool.
   @call({ payableFunction: true })
-  propose({ title, metricId, threshold, comparator, treasuryAction, deadline }) {
+  propose({ title, metricId, threshold, comparator, treasuryAction, deadline, challengeWindowNs }) {
     // comparator: "gte" | "lte" — metricValue vs threshold decides YES.
     assert(["gte", "lte"].includes(comparator), "comparator must be gte|lte");
     assert(deadline, "deadline required — anti-hostage");
@@ -54,6 +79,11 @@ export class ForeguildFutarchy {
       deadline,
       status: OPEN,
       createdAt: near.blockTimestamp().toString(),
+      // Optimistic-oracle window: after resolution, a challenge period
+      // (default 0 = immediate final, the pre-upgrade behavior) during
+      // which a resolver may post a different attestation. Redeem is
+      // locked until the window closes.
+      challengeWindowNs: challengeWindowNs ?? "0",
       resolution: null,
     };
     this.yesShares[id] = {};
@@ -65,12 +95,16 @@ export class ForeguildFutarchy {
   }
 
   // ---- trade: buy outcome shares, deposit-backed pro-rata ----
-  // Footgun (preserved from the deployed bundle): any `side` other than
-  // "yes" is treated as "no" — there is no validation of the side string.
   @call({ payableFunction: true })
   buyShares({ proposalId, side }) {
     const p = this.proposals[proposalId];
     assert(p && p.status === OPEN, "proposal not open");
+    // Anti-snipe (fix): trading must stop at the deadline — previously a
+    // late buyer could purchase shares AFTER the outcome was knowable
+    // but before resolve() ran, diluting honest positions.
+    assert(near.blockTimestamp() <= BigInt(p.deadline), "trading closed — deadline passed");
+    // Fix the silent-side footgun: unknown sides used to count as "no".
+    assert(side === "yes" || side === "no", "side must be yes|no");
     const who = near.predecessorAccountId();
     const amt = near.attachedDeposit();
     assert(amt > 0n, "attach NEAR to buy shares");
@@ -96,9 +130,17 @@ export class ForeguildFutarchy {
     const p = this.proposals[proposalId];
     assert(p && p.status === OPEN, "proposal not open");
     const now = near.blockTimestamp();
-    const isProposer = near.predecessorAccountId() === p.proposer;
+    const caller = near.predecessorAccountId();
+    const isProposer = caller === p.proposer;
+    const isResolver = !!this.resolvers[p.metricId]?.[caller];
     const expired = now > BigInt(p.deadline);
-    assert(isProposer || expired, "only proposer early; anyone after deadline");
+    // When resolvers are registered for the metric, attestation belongs
+    // to them (pre- or post-deadline); permissionless fallback only once
+    // the deadline passes AND no resolver exists for the metric.
+    const hasResolvers = Object.keys(this.resolvers[p.metricId] ?? {}).length > 0;
+    const allowed = isResolver || (isProposer && !hasResolvers) ||
+      (expired && !hasResolvers);
+    assert(allowed, "resolution requires a registered resolver for this metric");
     assert(
       evidenceHash && evidenceHash.length > 16,
       "evidenceHash required — bind the metric source"
@@ -128,11 +170,46 @@ export class ForeguildFutarchy {
     return p.resolution;
   }
 
+  // ---- challenge: a resolver may post a different attestation inside
+  // the window — the optimistic-oracle check on a bad resolution.
+  @call({})
+  challenge({ proposalId, metricValue, evidenceHash }) {
+    const p = this.proposals[proposalId];
+    assert(p && p.status === RESOLVED, "nothing to challenge");
+    assert(BigInt(p.challengeWindowNs ?? "0") > 0n, "no challenge window");
+    const within = near.blockTimestamp() <=
+      BigInt(p.resolution.ts) + BigInt(p.challengeWindowNs);
+    assert(within, "challenge window closed — resolution final");
+    const caller = near.predecessorAccountId();
+    assert(this.resolvers[p.metricId]?.[caller], "only a registered resolver challenges");
+    assert(evidenceHash && evidenceHash.length > 16, "evidenceHash required");
+    const mv = BigInt(metricValue);
+    const th = BigInt(p.threshold);
+    const yesWon = p.comparator === "gte" ? mv >= th : mv <= th;
+    const prior = p.resolution.outcome;
+    p.resolution = {
+      outcome: yesWon ? "yes" : "no",
+      metricValue: metricValue.toString(),
+      threshold: p.threshold,
+      evidenceHash,
+      resolvedBy: caller,
+      ts: near.blockTimestamp().toString(),
+      challengedFrom: prior,
+    };
+    return p.resolution;
+  }
+
   // ---- redeem: winning shares cash out pro-rata; losers fund treasury ----
   @call({})
   redeem({ proposalId }) {
     const p = this.proposals[proposalId];
     assert(p && p.status === RESOLVED, "proposal not resolved");
+    // Resolution isn't final until the challenge window closes.
+    const winNs = BigInt(p.challengeWindowNs ?? "0");
+    assert(
+      winNs === 0n || near.blockTimestamp() > BigInt(p.resolution.ts) + winNs,
+      "challenge window open — resolution not final"
+    );
     const who = near.predecessorAccountId();
     if (this.redeemed[proposalId][who])
       return {
@@ -189,6 +266,11 @@ export class ForeguildFutarchy {
   @view({})
   pools({ proposalId }) {
     return { yes: this.yesPool[proposalId], no: this.noPool[proposalId] };
+  }
+
+  @view({})
+  getResolvers({ metricId }) {
+    return Object.keys(this.resolvers[metricId] ?? {});
   }
 
   @view({})
