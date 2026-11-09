@@ -310,7 +310,7 @@ export async function handleArenaResolveMessage(
         const result = await pushRefToRemote(
           env,
           doName,
-          repo.artifactsRemote ?? artifactsRepo.remote,
+          repo.artifactsRemote ?? (await artifactsRepo.info()).remote,
           targetRef,
           winning.headOid,
           fetch,

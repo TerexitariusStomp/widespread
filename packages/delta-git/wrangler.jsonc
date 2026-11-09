@@ -141,24 +141,19 @@
       "index_name": "dg-repo-embed"
     }
   ],
-  // Cloudflare Artifacts: hybrid backend for opted-in repositories.
-  "artifacts": [
-    {
-      "binding": "ARTIFACTS",
-      "namespace": "delta-git"
-    }
-  ],
-  // Analytics Engine is included with Workers Paid; `metric()` no-ops if the
-  // binding is ever absent (e.g. an older deploy config).
+  // Cloudflare Artifacts hybrid backend — paid-plan feature, not bound on the
+  // free-tier deploy. Code paths guard on env.ARTIFACTS and repo creation with
+  // backend "artifacts" returns 503 artifacts-unavailable. Re-add the binding
+  // (namespace "delta-git") if the account upgrades.
+  // "artifacts": [{ "binding": "ARTIFACTS", "namespace": "delta-git" }],
   // Cron tiers: 5-min handles due monitor probes + delegate staleness;
   // hourly carries the certificate-expiry notification scan.
   "triggers": { "crons": ["*/5 * * * *", "0 * * * *"] },
-  "analytics_engine_datasets": [
-    {
-      "binding": "ANALYTICS",
-      "dataset": "dg_metrics"
-    }
-  ],
+  // Analytics Engine is a paid-plan feature; not bound on the free-tier
+  // deploy. `metric()` no-ops when the binding is absent.
+  // "analytics_engine_datasets": [
+  //   { "binding": "ANALYTICS", "dataset": "dg_metrics" }
+  // ],
 
   "queues": {
     "producers": [

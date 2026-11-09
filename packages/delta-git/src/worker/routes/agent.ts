@@ -419,6 +419,18 @@ function intentView(intent: MergeIntentRow) {
 type ArenaPhase = "building" | "judging" | "resolved";
 
 /** Mirrors the SSR arena feed's phase derivation for the JSON surface. */
+// fork() returns the repo's initial access token but not its expiry under the
+// current Artifacts binding API — read it back from the fork's token list
+// (the initial token is the fork's only active token at creation time).
+async function artifactsForkTokenExpiry(
+  artifacts: Artifacts,
+  repoName: string
+): Promise<string | null> {
+  const repo = await artifacts.get(repoName);
+  const { tokens } = await repo.listTokens();
+  return tokens.find((t) => t.state === "active")?.expiresAt ?? null;
+}
+
 function deriveArenaPhase(match: {
   status: string;
   endsAt: number | null;
@@ -1820,7 +1832,7 @@ state plus evidence — a credited award is a ledger entry, not a wire.
         workspace: wsName,
         remote: fork.remote,
         token: fork.token,
-        expires_at: fork.tokenExpiresAt,
+        expires_at: await artifactsForkTokenExpiry(artifacts, wsName),
       });
     } catch (e) {
       return bad(c, `artifacts:${String(e)}`, 502);
@@ -1996,14 +2008,14 @@ state plus evidence — a credited award is a ledger entry, not a wire.
 
     let forkRemote: string;
     let forkToken: string;
-    let expiresAt: string;
+    let expiresAt: string | null;
     try {
       const canonical = await artifacts.get(route.artifactsName);
       // fork() returns the new repo plus its initial access token.
       const fork = await canonical.fork(wsName);
       forkRemote = fork.remote;
       forkToken = fork.token;
-      expiresAt = fork.tokenExpiresAt;
+      expiresAt = await artifactsForkTokenExpiry(artifacts, wsName);
     } catch (e) {
       return bad(c, `artifacts:${String(e)}`, 502);
     }

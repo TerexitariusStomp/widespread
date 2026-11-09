@@ -660,7 +660,11 @@ function ensureResolveCacheContext(
         props: undefined,
         exports: workerExports,
         abort() {},
-        // Mock-only: the resolve path never touches distributed tracing.
+        // Mock-only: the resolve path never touches virtual-host mapping or
+        // distributed tracing.
+        mapVirtualHost() {
+          return "";
+        },
         tracing: {} as Tracing,
       },
       memo: {} as RequestMemo,
