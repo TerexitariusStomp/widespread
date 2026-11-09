@@ -1,0 +1,11 @@
+diff --git a/packages/pipeline-graph/tsconfig.json b/packages/pipeline-graph/tsconfig.json
+index c0c1d03..c057ebc 100644
+--- a/packages/pipeline-graph/tsconfig.json
++++ b/packages/pipeline-graph/tsconfig.json
+@@ -1,5 +1,6 @@
+ {
+   "compilerOptions": {
++    "ignoreDeprecations": "5.0",
+     "target": "ESNext",
+     "useDefineForClassFields": true,
+     "lib": ["DOM", "DOM.Iterable", "ESNext"],

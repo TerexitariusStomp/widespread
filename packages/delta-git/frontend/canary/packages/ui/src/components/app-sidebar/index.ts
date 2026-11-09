@@ -1,7 +1,0 @@
-export * from './sidebar-search/command-palette'
-export * from './types'
-export * from './sidebar-item'
-export * from './sidebar-user'
-export * from './harness-logo'
-export * from './sidebar-search/search-context'
-export * from './sidebar-search/sidebar-search'

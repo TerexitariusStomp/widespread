@@ -1,0 +1,11 @@
+diff --git a/packages/yaml-editor/tsconfig.json b/packages/yaml-editor/tsconfig.json
+index b3d2e75..05a1aa9 100644
+--- a/packages/yaml-editor/tsconfig.json
++++ b/packages/yaml-editor/tsconfig.json
+@@ -1,5 +1,6 @@
+ {
+   "compilerOptions": {
++    "ignoreDeprecations": "5.0",
+     "target": "ESNext",
+     "useDefineForClassFields": true,
+     "lib": ["DOM", "DOM.Iterable", "ESNext"],

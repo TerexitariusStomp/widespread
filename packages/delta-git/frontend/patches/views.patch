@@ -1,0 +1,561 @@
+diff --git a/packages/views/src/components/repo-subheader.tsx b/packages/views/src/components/repo-subheader.tsx
+index 8f5f63f..94b8198 100644
+--- a/packages/views/src/components/repo-subheader.tsx
++++ b/packages/views/src/components/repo-subheader.tsx
+@@ -20,19 +20,29 @@ interface RepoSubheaderProps {
+   showPipelinesTab?: boolean
+   showSearchTab?: boolean
+   summaryPath?: string
+-  filesPath?: string
+   commitsPath?: string
+   isRepoEmpty?: boolean
++  /** delta-git surfaces — absolute paths to repo-scoped delta views. */
++  deltaPaths?: { intents?: string; ideas?: string; arena?: string; agents?: string; knowledge?: string }
+ }
+ 
++/**
++ * GitHub-style tab order: Code | Issues | Pull requests | Discussions |
++ * Actions | Projects | Wiki | Security | Insights, then the delta-native
++ * surfaces (Intents | Ideas | Arena | Agents | Knowledge), then Commits /
++ * Tags / Branches / Settings. The Code tab covers both the summary view
++ * and the file browser — they merged under /summary/*, so no separate
++ * Files tab exists. Surfaces that have not landed yet route to a stub
++ * page that explains the roadmap instead of a dead link.
++ */
+ export const RepoSubheader = ({
+   showPipelinesTab = true,
+   showSearchTab = false,
+   className,
+   summaryPath,
+-  filesPath,
+   commitsPath,
+-  isRepoEmpty = false
++  isRepoEmpty = false,
++  deltaPaths
+ }: RepoSubheaderProps) => {
+   const { t } = useTranslation()
+ 
+@@ -40,12 +50,35 @@ export const RepoSubheader = ({
+     <SandboxLayout.SubHeader className={className}>
+       <Tabs.NavRoot>
+         <Tabs.List className="cn-repo-subheader-tabs">
+-          <Tabs.Trigger value={summaryPath || RepoTabsKeys.SUMMARY}>{t('views:repos.summary', 'Summary')}</Tabs.Trigger>
+-          <Tabs.Trigger value={filesPath || RepoTabsKeys.CODE} disabled={isRepoEmpty}>
+-            {t('views:repos.files', 'Files')}
++          <Tabs.Trigger value={summaryPath || RepoTabsKeys.SUMMARY}>{t('views:repos.code', 'Code')}</Tabs.Trigger>
++          <Tabs.Trigger value="issues">{t('views:repos.issues', 'Issues')}</Tabs.Trigger>
++          <Tabs.Trigger value={RepoTabsKeys.PULLS} disabled={isRepoEmpty}>
++            {t('views:repos.pullRequests', 'Pull requests')}
+           </Tabs.Trigger>
++          <Tabs.Trigger value="discussions">{t('views:repos.discussions', 'Discussions')}</Tabs.Trigger>
+           {showPipelinesTab && (
+-            <Tabs.Trigger value={RepoTabsKeys.PIPELINES}>{t('views:repos.pipelines', 'Pipelines')}</Tabs.Trigger>
++            <Tabs.Trigger value={RepoTabsKeys.PIPELINES}>{t('views:repos.actions', 'Actions')}</Tabs.Trigger>
++          )}
++          <Tabs.Trigger value="projects">{t('views:repos.projects', 'Projects')}</Tabs.Trigger>
++          <Tabs.Trigger value="wiki" disabled={isRepoEmpty}>
++            {t('views:repos.wiki', 'Wiki')}
++          </Tabs.Trigger>
++          <Tabs.Trigger value="security">{t('views:repos.security', 'Security')}</Tabs.Trigger>
++          <Tabs.Trigger value="insights" disabled={isRepoEmpty}>
++            {t('views:repos.insights', 'Insights')}
++          </Tabs.Trigger>
++          {deltaPaths?.intents && (
++            <Tabs.Trigger value={deltaPaths.intents} disabled={isRepoEmpty}>
++              Intents
++            </Tabs.Trigger>
++          )}
++          {deltaPaths?.ideas && <Tabs.Trigger value={deltaPaths.ideas}>Ideas</Tabs.Trigger>}
++          {deltaPaths?.arena && <Tabs.Trigger value={deltaPaths.arena}>Arena</Tabs.Trigger>}
++          {deltaPaths?.agents && <Tabs.Trigger value={deltaPaths.agents}>Agents</Tabs.Trigger>}
++          {deltaPaths?.knowledge && (
++            <Tabs.Trigger value={deltaPaths.knowledge} disabled={isRepoEmpty}>
++              Knowledge
++            </Tabs.Trigger>
+           )}
+           <Tabs.Trigger value={commitsPath || RepoTabsKeys.COMMITS} disabled={isRepoEmpty}>
+             {t('views:repos.commits', 'Commits')}
+@@ -53,9 +86,6 @@ export const RepoSubheader = ({
+           <Tabs.Trigger value={RepoTabsKeys.TAGS} disabled={isRepoEmpty}>
+             {t('views:repos.tags', 'Tags')}
+           </Tabs.Trigger>
+-          <Tabs.Trigger value={RepoTabsKeys.PULLS} disabled={isRepoEmpty}>
+-            {t('views:repos.pullRequests', 'Pull requests')}
+-          </Tabs.Trigger>
+           <Tabs.Trigger value={RepoTabsKeys.BRANCHES} disabled={isRepoEmpty}>
+             {t('views:repos.branches.title', 'Branches')}
+           </Tabs.Trigger>
+diff --git a/packages/views/src/execution/execution-tree-utils.tsx b/packages/views/src/execution/execution-tree-utils.tsx
+index b0a5b74..6d1f599 100644
+--- a/packages/views/src/execution/execution-tree-utils.tsx
++++ b/packages/views/src/execution/execution-tree-utils.tsx
+@@ -5,7 +5,7 @@ import { ExecutionState } from '@views/repo/pull-request'
+ import { getFormattedDuration } from '@harnessio/ui/utils'
+ import { Execution, Stage, Step } from './types'
+ 
+-const mapCiStatusToExecutionState = (status: CiStatus): ExecutionState => {
++export const mapCiStatusToExecutionState = (status: CiStatus): ExecutionState => {
+   switch (status) {
+     case 'blocked':
+       return ExecutionState.BLOCKED
+diff --git a/packages/views/src/execution/index.ts b/packages/views/src/execution/index.ts
+index 91d3276..1f54876 100644
+--- a/packages/views/src/execution/index.ts
++++ b/packages/views/src/execution/index.ts
+@@ -1,6 +1,8 @@
+ export * from '@views/execution/execution-header'
+ export * from '@views/execution/execution-info'
+ export * from '@views/execution/execution-tree'
++export * from '@views/execution/execution-tree-utils'
+ export * from '@views/execution/execution-tabs'
+ export * from '@views/execution/pipeline-status'
++export * from '@views/execution/step-execution'
+ export * from '@views/execution/types'
+diff --git a/packages/views/src/repo/components/repo-header.tsx b/packages/views/src/repo/components/repo-header.tsx
+index 0ef0ce0..8426d7e 100644
+--- a/packages/views/src/repo/components/repo-header.tsx
++++ b/packages/views/src/repo/components/repo-header.tsx
+@@ -1,10 +1,27 @@
+-import { Alert, Button, Favorite, IconV2, Layout, Skeleton, StatusBadge, Text } from '@harnessio/ui/components'
++import {
++  Alert,
++  Button,
++  Favorite,
++  IconV2,
++  Layout,
++  Link,
++  Popover,
++  Skeleton,
++  StatusBadge,
++  Text
++} from '@harnessio/ui/components'
+ import { useTranslation } from '@harnessio/ui/context'
+ import { cn, formatDate } from '@harnessio/ui/utils'
+ 
+ import { RepositoryType } from '../repo.types'
+ import { ForkedFrom } from './forked-from'
+ 
++interface SponsorLink {
++  platform: string
++  value: string
++  url: string
++}
++
+ interface RepoHeaderProps {
+   name: string
+   isPublic: boolean
+@@ -14,6 +31,10 @@ interface RepoHeaderProps {
+   className?: string
+   isFavorite?: boolean
+   onFavoriteToggle: (isFavorite: boolean) => void
++  /** GitHub-style star count shown beside the favorite toggle. */
++  starCount?: number
++  /** Parsed FUNDING.yml links — renders the GitHub-style Sponsor button. */
++  sponsors?: SponsorLink[]
+   onSyncLinked?: () => void
+   isSyncing?: boolean
+   archivedDate?: number
+@@ -30,6 +51,8 @@ export const RepoHeader = ({
+   className,
+   isFavorite,
+   onFavoriteToggle,
++  starCount,
++  sponsors,
+   onSyncLinked,
+   isSyncing,
+   archivedDate,
+@@ -71,6 +94,54 @@ export const RepoHeader = ({
+               </Layout.Flex>
+ 
+               <Favorite isFavorite={isFavorite} onFavoriteToggle={onFavoriteToggle} />
++              {starCount !== undefined && (
++                <Text variant="body-normal" color="foreground-3">
++                  {starCount} {starCount === 1 ? 'star' : 'stars'}
++                </Text>
++              )}
++
++              {sponsors !== undefined && sponsors.length === 1 && (
++                <Button variant="outline" size="sm" asChild>
++                  <Link
++                    external
++                    noHoverUnderline
++                    href={sponsors[0].url}
++                    target="_blank"
++                    rel="noopener noreferrer"
++                  >
++                    <IconV2 name="heart" size="xs" />
++                    {t('views:repos.sponsor', 'Sponsor')}
++                  </Link>
++                </Button>
++              )}
++              {sponsors !== undefined && sponsors.length > 1 && (
++                <Popover.Root>
++                  <Popover.Trigger asChild>
++                    <Button variant="outline" size="sm">
++                      <IconV2 name="heart" size="xs" />
++                      {t('views:repos.sponsor', 'Sponsor')}
++                      <IconV2 className="chevron-down" name="nav-arrow-down" size="2xs" />
++                    </Button>
++                  </Popover.Trigger>
++                  <Popover.Content align="start" className="w-64" hideArrow>
++                    <Layout.Grid gapY="2xs">
++                      {sponsors.map(link => (
++                        <Button key={link.url} variant="ghost" size="sm" className="justify-start" asChild>
++                          <Link
++                            external
++                            noHoverUnderline
++                            href={link.url}
++                            target="_blank"
++                            rel="noopener noreferrer"
++                          >
++                            {link.platform === 'custom' ? link.url : `${link.platform}: ${link.value}`}
++                          </Link>
++                        </Button>
++                      ))}
++                    </Layout.Grid>
++                  </Popover.Content>
++                </Popover.Root>
++              )}
+             </>
+           )}
+         </Layout.Flex>
+diff --git a/packages/views/src/repo/pull-request/hooks/useDiffHighlighter.ts b/packages/views/src/repo/pull-request/hooks/useDiffHighlighter.ts
+index 78e74e3..15bfab1 100644
+--- a/packages/views/src/repo/pull-request/hooks/useDiffHighlighter.ts
++++ b/packages/views/src/repo/pull-request/hooks/useDiffHighlighter.ts
+@@ -1,6 +1,9 @@
+ import { useEffect, useState, type Dispatch, type SetStateAction } from 'react'
+ 
+-import { getDiffViewHighlighter } from '@git-diff-view/shiki'
++// delta-git: dynamic import — the static import pulled the whole shiki
++// vendor chunk into the entry bundle's preload graph. The highlighter
++// only resolves inside the effect anyway.
++import type { getDiffViewHighlighter as getDiffViewHighlighterType } from '@git-diff-view/shiki'
+ 
+ // Re-export from UI types for backward compatibility
+ export type { HighlighterType } from '@harnessio/ui/types'
+@@ -14,6 +17,8 @@ export const useDiffHighlighter = ({ setLoading }: { setLoading: Dispatch<SetSta
+     const init = async () => {
+       setLoading(true)
+       try {
++        const getDiffViewHighlighter: typeof getDiffViewHighlighterType = (await import('@git-diff-view/shiki'))
++          .getDiffViewHighlighter
+         const shikiHighlighter = await getDiffViewHighlighter()
+         if (shikiHighlighter) {
+           setHighlighter(shikiHighlighter as HighlighterType)
+diff --git a/packages/views/src/repo/repo-summary/components/clone-repo-dialog.tsx b/packages/views/src/repo/repo-summary/components/clone-repo-dialog.tsx
+index 313874b..2006d00 100644
+--- a/packages/views/src/repo/repo-summary/components/clone-repo-dialog.tsx
++++ b/packages/views/src/repo/repo-summary/components/clone-repo-dialog.tsx
+@@ -1,6 +1,6 @@
+ import { FC } from 'react'
+ 
+-import { Alert, Button, CopyButton, IconV2, Layout, Popover, Tabs, TextInput } from '@harnessio/ui/components'
++import { Alert, Button, CopyButton, IconV2, Layout, Link, Popover, Tabs, TextInput } from '@harnessio/ui/components'
+ import { useCustomDialogTrigger, useTranslation } from '@harnessio/ui/context'
+ 
+ export interface CloneRepoDialogProps {
+@@ -9,11 +9,18 @@ export interface CloneRepoDialogProps {
+   isSSHEnabled?: boolean
+   handleCreateToken: () => void
+   tokenGenerationError?: string | null
++  /** Direct-download archive URL for the selected ref (`.zip`). */
++  zipUrl?: string
++  /** Namespace/repo slug the `dgit` client addresses (e.g. `alice/my-repo`). */
++  dgitRepoRef?: string
++  /** Host origin the `dgit` client targets — `dgit login --host`. */
++  dgitHost?: string
+ }
+ 
+ export enum CloneRepoTabs {
+   HTTPS = 'https',
+-  SSH = 'ssh'
++  SSH = 'ssh',
++  DGIT = 'dgit'
+ }
+ 
+ export const CloneRepoDialog: FC<CloneRepoDialogProps> = ({
+@@ -21,7 +28,10 @@ export const CloneRepoDialog: FC<CloneRepoDialogProps> = ({
+   sshUrl,
+   isSSHEnabled,
+   handleCreateToken: _handleCreateToken,
+-  tokenGenerationError
++  tokenGenerationError,
++  zipUrl,
++  dgitRepoRef,
++  dgitHost
+ }) => {
+   const { t } = useTranslation()
+   const { triggerRef, registerTrigger } = useCustomDialogTrigger()
+@@ -31,6 +41,8 @@ export const CloneRepoDialog: FC<CloneRepoDialogProps> = ({
+     _handleCreateToken()
+   }
+ 
++  const dgitLogin = dgitHost ? `dgit login --host ${dgitHost}` : 'dgit login'
++
+   return (
+     <Popover.Root>
+       <Popover.Trigger asChild>
+@@ -53,6 +65,7 @@ export const CloneRepoDialog: FC<CloneRepoDialogProps> = ({
+                 {t('views:repos.cloneSsh', 'SSH')}
+               </Tabs.Trigger>
+             )}
++            {!!dgitRepoRef && <Tabs.Trigger value={CloneRepoTabs.DGIT}>dgit</Tabs.Trigger>}
+           </Tabs.List>
+ 
+           <Tabs.Content value={CloneRepoTabs.HTTPS}>
+@@ -92,7 +105,51 @@ export const CloneRepoDialog: FC<CloneRepoDialogProps> = ({
+               suffix={<CopyButton name={sshUrl || ''} buttonVariant="transparent" />}
+             />
+           </Tabs.Content>
++
++          <Tabs.Content value={CloneRepoTabs.DGIT}>
++            <Layout.Vertical gap="sm">
++              <TextInput
++                className="truncate"
++                id="dgitLogin"
++                label={t('views:repos.dgitLogin', 'Sign in once')}
++                readOnly
++                value={dgitLogin}
++                suffix={<CopyButton name={dgitLogin} buttonVariant="transparent" />}
++              />
++              <TextInput
++                className="truncate"
++                id="dgitIntents"
++                label={t('views:repos.dgitIntents', 'List merge intents')}
++                readOnly
++                value={`dgit intents ${dgitRepoRef ?? ''}`}
++                suffix={<CopyButton name={`dgit intents ${dgitRepoRef ?? ''}`} buttonVariant="transparent" />}
++              />
++              <TextInput
++                className="truncate"
++                id="dgitHooks"
++                label={t('views:repos.dgitHooks', 'Scan-gated pushes')}
++                readOnly
++                value="dgit hooks install --global"
++                suffix={<CopyButton name="dgit hooks install --global" buttonVariant="transparent" />}
++                caption={t(
++                  'views:repos.dgitCaption',
++                  'The delta-git client adds OAuth sign-in and a pre-push secret scan to plain git.'
++                )}
++              />
++            </Layout.Vertical>
++          </Tabs.Content>
+         </Tabs.Root>
++
++        {!!zipUrl && (
++          <Layout.Vertical gap="xs" className="mt-cn-sm border-t pt-cn-sm">
++            <Link external variant="secondary" href={zipUrl} noHoverUnderline>
++              <Layout.Flex align="center" gap="2xs">
++                <IconV2 name="download" size="sm" />
++                {t('views:repos.downloadZip', 'Download ZIP')}
++              </Layout.Flex>
++            </Link>
++          </Layout.Vertical>
++        )}
+       </Popover.Content>
+     </Popover.Root>
+   )
+diff --git a/packages/views/src/repo/repo-summary/components/summary-panel.tsx b/packages/views/src/repo/repo-summary/components/summary-panel.tsx
+index 4ca08bf..8fec6f9 100644
+--- a/packages/views/src/repo/repo-summary/components/summary-panel.tsx
++++ b/packages/views/src/repo/repo-summary/components/summary-panel.tsx
+@@ -31,6 +31,14 @@ interface SummaryPanelProps {
+   timestamp?: string
+   description?: string
+   tags?: Record<string, string>
++  /** GitHub-style topic chips (lowercase slug names). */
++  topics?: string[]
++  /** Project homepage URL shown under the description (GitHub "website"). */
++  website?: string | null
++  /** Route path to the repo's license file, if one exists at the root. */
++  licensePath?: string
++  /** Display name of the detected license file (e.g. `LICENSE`, `COPYING`). */
++  licenseName?: string
+   saveDescription: (description: string) => void
+   updateRepoError?: string
+   isEditDialogOpen: boolean
+@@ -43,6 +51,10 @@ const SummaryPanel: FC<SummaryPanelProps> = ({
+   timestamp,
+   description = '',
+   tags,
++  topics,
++  website,
++  licensePath,
++  licenseName,
+   saveDescription,
+   updateRepoError,
+   isEditDialogOpen,
+@@ -114,6 +126,23 @@ const SummaryPanel: FC<SummaryPanelProps> = ({
+           </Layout.Grid>
+         )}
+ 
++        {!!website && (
++          <Layout.Flex align="center" gap="2xs" className="min-w-0">
++            <IconV2 name="link" size="xs" className="shrink-0 text-cn-2" />
++            <Link variant="secondary" href={website} external className="truncate">
++              {website}
++            </Link>
++          </Layout.Flex>
++        )}
++
++        {!!topics?.length && (
++          <Layout.Flex wrap="wrap" gap="3xs">
++            {topics.map(topic => (
++              <Tag key={topic} label={topic} value={topic} variant="outline" size="sm" theme="blue" />
++            ))}
++          </Layout.Flex>
++        )}
++
+         {!!tags && !!Object.keys(tags).length && (
+           <Layout.Flex wrap="wrap" gap="3xs">
+             {Object.entries(tags).map(([key, value]) => (
+@@ -122,6 +151,18 @@ const SummaryPanel: FC<SummaryPanelProps> = ({
+           </Layout.Flex>
+         )}
+ 
++        {!!licensePath && (
++          <>
++            <Separator />
++            <Link variant="secondary" to={licensePath}>
++              <Layout.Flex className="cursor-pointer gap-cn-2xs" align="center" gap="2xs">
++                <IconV2 name="menu-scale" size="xs" className="text-cn-2" />
++                <Text color="foreground-1">{licenseName ?? 'License'}</Text>
++              </Layout.Flex>
++            </Link>
++          </>
++        )}
++
+         <Separator />
+ 
+         <Layout.Grid gapY="sm">
+diff --git a/packages/views/src/repo/repo-summary/repo-summary.tsx b/packages/views/src/repo/repo-summary/repo-summary.tsx
+index 1fa45ad..cf1ddc5 100644
+--- a/packages/views/src/repo/repo-summary/repo-summary.tsx
++++ b/packages/views/src/repo/repo-summary/repo-summary.tsx
+@@ -111,6 +111,24 @@ export interface RepoSummaryViewProps extends Partial<RoutingProps> {
+   upstream?: TypesRepositoryCore
+   onFetchAndMerge?: () => void
+   isFetchingUpstream?: boolean
++  /** Detected repo-root license file — rendered as an About-sidebar row. */
++  licenseFile?: { name: string; path: string }
++  /** Route builder for a repo file path (renders the license link). */
++  toRepoFilePath?: ({ path }: { path: string }) => string
++  /** Direct-download `.zip` archive URL for the selected ref (clone dialog). */
++  zipUrl?: string
++  /** `namespace/repo` the dgit client addresses in the clone dialog. */
++  dgitRepoRef?: string
++  /** Host origin for `dgit login --host` in the clone dialog. */
++  dgitHost?: string
++  /** GitHub-style topic chips for the About sidebar. */
++  topics?: string[]
++  /** Project homepage URL for the About sidebar. */
++  website?: string | null
++  /** Route builder for the releases page (About "Releases" row). */
++  toRepoReleases?: () => string
++  /** Published release count for the About "Releases" row. */
++  releasesCount?: number
+ }
+ 
+ export function RepoSummaryView({
+@@ -151,6 +169,13 @@ export function RepoSummaryView({
+   upstream,
+   onFetchAndMerge,
+   isFetchingUpstream,
++  licenseFile,
++  toRepoFilePath,
++  zipUrl,
++  dgitRepoRef,
++  dgitHost,
++  topics,
++  website,
+   ...props
+ }: RepoSummaryViewProps) {
+   const { t } = useTranslation()
+@@ -278,6 +303,9 @@ export function RepoSummaryView({
+                     httpsUrl={repository?.git_url ?? 'could not fetch url'}
+                     handleCreateToken={handleCreateToken}
+                     tokenGenerationError={tokenGenerationError}
++                    zipUrl={zipUrl}
++                    dgitRepoRef={dgitRepoRef}
++                    dgitHost={dgitHost}
+                   />
+                 </ButtonLayout>
+               </ListActions.Right>
+@@ -381,7 +409,7 @@ export function RepoSummaryView({
+         <SandboxLayout.Column>
+           <SandboxLayout.Content className="pl-0">
+             <SummaryPanel
+-              title={t('views:repos.summary', 'Summary')}
++              title={t('views:repos.about', 'About')}
+               details={[
+                 {
+                   id: '0',
+@@ -410,11 +438,26 @@ export function RepoSummaryView({
+                   count: pull_req_summary?.open_count || 0,
+                   iconName: 'git-pull-request',
+                   to: props.toRepoPullRequests?.() ?? '#'
+-                }
++                },
++                ...(props.toRepoReleases
++                  ? [
++                      {
++                        id: '4',
++                        name: t('views:repos.releases', 'Releases'),
++                        count: props.releasesCount ?? 0,
++                        iconName: 'tag' as const,
++                        to: props.toRepoReleases()
++                      }
++                    ]
++                  : [])
+               ]}
+               timestamp={repository?.created ? new Date(repository.created).toISOString() : ''}
+               description={repository?.description}
+               tags={repository?.tags}
++              topics={topics}
++              website={website}
++              licensePath={licenseFile && toRepoFilePath ? toRepoFilePath({ path: licenseFile.path }) : undefined}
++              licenseName={licenseFile?.name}
+               saveDescription={saveDescription}
+               updateRepoError={updateRepoError}
+               isEditDialogOpen={isEditDialogOpen}
+diff --git a/packages/views/src/sidebar-view/sidebar-view.tsx b/packages/views/src/sidebar-view/sidebar-view.tsx
+index f928d4c..68959dd 100644
+--- a/packages/views/src/sidebar-view/sidebar-view.tsx
++++ b/packages/views/src/sidebar-view/sidebar-view.tsx
+@@ -5,7 +5,6 @@ import {
+   AppSidebarUser,
+   Drawer,
+   DrawerContentProps,
+-  HarnessLogo,
+   LanguageCode,
+   LanguageDialog,
+   LanguageInterface,
+@@ -117,7 +116,7 @@ export const SidebarView = ({
+         <Sidebar.Header>
+           <SearchProvider>
+             <Layout.Grid gapY="md">
+-              <HarnessLogo />
++              <img src="/logo-widespread.png" alt="Widespread" className="size-6" />
+               <SidebarSearch />
+             </Layout.Grid>
+           </SearchProvider>
+diff --git a/packages/views/tsconfig.json b/packages/views/tsconfig.json
+index b3e5c49..99ec6ad 100644
+--- a/packages/views/tsconfig.json
++++ b/packages/views/tsconfig.json
+@@ -1,5 +1,6 @@
+ {
+   "compilerOptions": {
++    "ignoreDeprecations": "5.0",
+     "target": "ESNext",
+     "useDefineForClassFields": true,
+     "lib": ["DOM", "DOM.Iterable", "ESNext"],
+@@ -8,6 +9,7 @@
+     "esModuleInterop": false,
+     "allowSyntheticDefaultImports": true,
+     "strict": true,
++    "module": "ESNext",
+     "moduleResolution": "Bundler",
+     "resolveJsonModule": true,
+     "isolatedModules": true,

@@ -1,0 +1,11 @@
+diff --git a/packages/filters/tsconfig.json b/packages/filters/tsconfig.json
+index fb3e796..5bc5fe4 100644
+--- a/packages/filters/tsconfig.json
++++ b/packages/filters/tsconfig.json
+@@ -1,5 +1,6 @@
+ {
+   "compilerOptions": {
++    "ignoreDeprecations": "5.0",
+     "target": "ESNext",
+     "useDefineForClassFields": true,
+     "lib": ["DOM", "DOM.Iterable", "ESNext"],

@@ -1,0 +1,117 @@
+diff --git a/packages/ui/src/components/markdown-viewer/index.tsx b/packages/ui/src/components/markdown-viewer/index.tsx
+index 63c6bb3..d28c691 100644
+--- a/packages/ui/src/components/markdown-viewer/index.tsx
++++ b/packages/ui/src/components/markdown-viewer/index.tsx
+@@ -2,9 +2,11 @@ import { CSSProperties, memo, ReactNode, useCallback, useEffect, useMemo, useRef
+ 
+ import { CopyButton, IconV2, IconV2NamesType, Text } from '@/components'
+ import MarkdownPreview from '@uiw/react-markdown-preview'
++import rehypeAutolinkHeadings from 'rehype-autolink-headings'
+ import rehypeExternalLinks from 'rehype-external-links'
+ import { getCodeString, RehypeRewriteOptions } from 'rehype-rewrite'
+ import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
++import rehypeSlug from 'rehype-slug'
+ import rehypeVideo from 'rehype-video'
+ import remarkBreaks from 'remark-breaks'
+ 
+@@ -302,7 +304,20 @@ const MarkdownViewerLocal = ({
+           rehypeRewrite={rehypeRewrite}
+           remarkPlugins={[remarkBreaks]}
+           rehypePlugins={[
++            // Sanitize first — the slug/autolink plugins run after and add
++            // known-safe `id`/anchor markup, so the schema needs no widening.
+             [rehypeSanitize, sanitizeSchema],
++            // GitHub-compatible heading ids (github-slugger) + hover anchors
++            // so README/comment headings are deep-linkable like on GitHub.
++            rehypeSlug,
++            [
++              rehypeAutolinkHeadings,
++              {
++                behavior: 'append',
++                properties: { className: 'dg-heading-anchor', ariaHidden: 'true', tabIndex: -1 },
++                content: { type: 'text', value: '#' }
++              }
++            ],
+             [rehypeVideo, { test: /\.(mp4|mov|webm|mkv|flv)$/, details: false }],
+             [rehypeExternalLinks, { rel: ['nofollow noreferrer noopener'], target: '_blank' }]
+           ]}
+diff --git a/packages/ui/src/components/markdown-viewer/style.css b/packages/ui/src/components/markdown-viewer/style.css
+index d90ad21..7e3da5a 100644
+--- a/packages/ui/src/components/markdown-viewer/style.css
++++ b/packages/ui/src/components/markdown-viewer/style.css
+@@ -415,3 +415,23 @@
+     }
+   }
+ }
++
++/* GitHub-style heading anchors — '#' appears on heading hover, always
++   keyboard-focusable. Applied by rehype-autolink-headings. */
++.dg-heading-anchor {
++  opacity: 0;
++  margin-left: var(--cn-spacing-1, 0.25rem);
++  text-decoration: none;
++  color: var(--cn-text-3, currentColor);
++  transition: opacity 120ms ease-in-out;
++}
++
++h1:hover .dg-heading-anchor,
++h2:hover .dg-heading-anchor,
++h3:hover .dg-heading-anchor,
++h4:hover .dg-heading-anchor,
++h5:hover .dg-heading-anchor,
++h6:hover .dg-heading-anchor,
++.dg-heading-anchor:focus {
++  opacity: 1;
++}
+diff --git a/packages/ui/src/components/nav/header.tsx b/packages/ui/src/components/nav/header.tsx
+index 1e822e5..e066c70 100644
+--- a/packages/ui/src/components/nav/header.tsx
++++ b/packages/ui/src/components/nav/header.tsx
+@@ -1,4 +1,4 @@
+-import { HarnessLogo, Layout } from '@/components'
++import { Layout } from '@/components'
+ import { useRouterContext } from '@/context'
+ 
+ import AvatarDropdown from './avatar-dropdown'
+@@ -10,7 +10,7 @@ export default function Header() {
+   return (
+     <Layout.Flex className="bg-cn-0 p-cn-header h-cn-header" gap="md" justify="between" align="center">
+       <Link to="/">
+-        <HarnessLogo />
++        <img src="/logo-widespread.png" alt="Widespread" className="size-6" />
+       </Link>
+       <div className="w-full">
+         <ScopeSelector />
+diff --git a/packages/ui/src/components/search-files.tsx b/packages/ui/src/components/search-files.tsx
+index 10d5ced..1298daa 100644
+--- a/packages/ui/src/components/search-files.tsx
++++ b/packages/ui/src/components/search-files.tsx
+@@ -147,7 +147,8 @@ export const SearchFiles = ({
+     <DropdownMenu.Root open={isOpen} onOpenChange={setIsOpen} modal={false}>
+       <div className={cn('relative', inputContainerClassName)}>
+         <DropdownMenu.Trigger className="pointer-events-none absolute inset-0 -z-0 !outline-0" tabIndex={-1} />
+-        <SearchInput
++        <div className="dg-file-search" data-dg-file-search>
++          <SearchInput
+           ref={searchInputRef}
+           size={searchInputSize}
+           searchValue={currentQuery}
+@@ -157,6 +158,7 @@ export const SearchFiles = ({
+           onFocus={handleFocus}
+           autoFocus
+         />
++        </div>
+       </div>
+ 
+       <DropdownMenu.Content
+diff --git a/packages/ui/tsconfig.json b/packages/ui/tsconfig.json
+index c335238..4cf6e8c 100644
+--- a/packages/ui/tsconfig.json
++++ b/packages/ui/tsconfig.json
+@@ -1,5 +1,6 @@
+ {
+   "compilerOptions": {
++    "ignoreDeprecations": "5.0",
+     "target": "ES2022",
+     "lib": ["ES2022", "DOM", "DOM.Iterable"],
+     "jsx": "react-jsx",
