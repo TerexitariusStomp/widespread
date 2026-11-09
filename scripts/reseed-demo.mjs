@@ -3,7 +3,7 @@
 //   node scripts/reseed-demo.mjs
 import { execFileSync } from "node:child_process";
 
-const BRIDGE = "https://slopcash-bridge.hardwoodstablecoin.workers.dev";
+const BRIDGE = "https://widespread-bridge.widespread.workers.dev";
 const DIR = new URL("..", import.meta.url).pathname;
 
 const claims = [

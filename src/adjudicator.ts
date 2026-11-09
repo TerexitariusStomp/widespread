@@ -136,7 +136,10 @@ async function nearAiCall(env: Env, input: AdjudicatorInput): Promise<{
         { role: "system", content: SYSTEM },
         { role: "user", content: buildPrompt(input) },
       ],
-      max_tokens: 1024,
+      // Reasoning models (DeepSeek-V4.x) spend part of the budget on
+      // reasoning_content before emitting content — 1024 starves the
+      // answer entirely (content:null → unparseable verdict).
+      max_tokens: 4096,
       temperature: 0,
       // Ask the model TEE to sign the exact in/out bytes.
       signature_kind: "provider_tee",
