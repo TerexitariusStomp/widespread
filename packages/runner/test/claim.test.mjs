@@ -19,8 +19,10 @@ const UPSTREAM_COMMITS = 'https://api.github.com/repos/SlopDotCash/protocol/comm
 
 // Resolve a commit the forge can verify. HEAD occasionally comes back
 // "commits-unverifiable" (the forge checks the upstream .patch endpoint),
-// so walk the recent history until one verifies. Each attempt is a real
-// signed ship POST — bounded to keep the prod op-log noise small.
+// and some verified commits still report ship:false (the forge declines
+// to record a ship entry for them), so walk the recent history until one
+// fully verifies + ships. Each attempt is a real signed ship POST —
+// bounded to keep the prod op-log noise small.
 async function findVerifiableCommit() {
   const res = await fetch(UPSTREAM_COMMITS, {
     headers: { 'user-agent': 'widespread-runner-test', accept: 'application/vnd.github+json' },
@@ -42,7 +44,7 @@ test('collectEnvAttestation reports runtime without faking TPM', () => {
 test('shipClaim registers a real agent and lands a verified dg-ship-1 claim', async () => {
   const shas = await findVerifiableCommit();
   let last = null;
-  for (const sha of shas.slice(0, 5)) {
+  for (const sha of shas.slice(0, 8)) {
     last = await shipClaim({
       forgeBase: FORGE,
       repo: REPO,
