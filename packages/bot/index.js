@@ -4,12 +4,13 @@
  * merge of a PR with `closes #N`  → merge=accept → triggers bridge review → payout
  * receipt writeback → the payout lands in the PR's own thread permanently.
  */
+import { parseBotVerdict } from "./verdict.js";
+
 const BRIDGE = process.env.WIDE_BRIDGE || "https://widespread-bridge.widespread.workers.dev";
 const FORGE = process.env.WIDE_FORGE || "https://code.widespread.fyi";
-const { parseBotVerdict } = require("./verdict");
 const seen = new Set(); // `${repo}#${issue}:${bot}:${sha}` — one verdict per head
 
-module.exports = (app) => {
+export default (app) => {
   app.log.info("widespread-bot up");
 
   /** PR → linked wide:funded issue → {issueNum, amount, paypal}. */
@@ -168,3 +169,4 @@ module.exports = (app) => {
     app.log.info({ repo, sha: pr.merge_commit_sha }, "merge=accept triggered");
   });
 };
+

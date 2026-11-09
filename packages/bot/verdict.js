@@ -32,4 +32,4 @@ function parseBotVerdict({ login = "", body = "", state = "", conclusion = "", a
   return null;
 }
 
-module.exports = { parseBotVerdict, REVIEWISH };
+export { parseBotVerdict, REVIEWISH };

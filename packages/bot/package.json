@@ -1,7 +1,8 @@
 {
-  "name": "widespread-bot",
+  "name": "@widespread/bot",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "description": "GitHub App — @widespread mentions, merge=accept, payout receipts in repo history",
   "main": "index.js",
   "scripts": { "test": "node --test test/" },
