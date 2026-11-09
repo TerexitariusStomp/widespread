@@ -33,9 +33,6 @@ const HAS_CF_CREDS =
 // Subscription creation mutates the Cloudflare account — require the
 // explicit live gate on top of credentials.
 const LIVE = process.env.E2E_LIVE === "1" && HAS_CF_CREDS;
-const LIVE_SKIP = !HAS_CF_CREDS
-  ? "set CF_ACCOUNT_ID + CF_API_TOKEN (real Cloudflare API credentials)"
-  : "set E2E_LIVE=1 to create real event subscriptions";
 
 const CF_API = "https://api.cloudflare.com/client/v4";
 
@@ -60,7 +57,11 @@ describe("ensureArtifactsPushSubscription", () => {
     expect(pending).toHaveLength(0);
   });
 
-  it("creates a real per-repo subscription and it is visible via the CF API", { skip: LIVE_SKIP }, async () => {
+  // Live legs need real CF credentials AND E2E_LIVE=1 (subscription
+  // creation mutates the account). skipIf keeps the gate honest — no
+  // fetch interception, the test either hits api.cloudflare.com for real
+  // or does not run.
+  it.skipIf(!LIVE)("creates a real per-repo subscription and it is visible via the CF API", async () => {
     const artifactsName = `dg-live-test-${Date.now().toString(36)}`;
     const pending: Promise<unknown>[] = [];
     ensureArtifactsPushSubscription(
@@ -95,7 +96,7 @@ describe("ensureArtifactsPushSubscription", () => {
     expect(del.ok).toBe(true);
   });
 
-  it("is idempotent — a second ensure for the same repo does not duplicate", { skip: LIVE_SKIP }, async () => {
+  it.skipIf(!LIVE)("is idempotent — a second ensure for the same repo does not duplicate", async () => {
     const artifactsName = `dg-live-test-${Date.now().toString(36)}`;
     const env = envOf({ CF_ACCOUNT_ID, CF_API_TOKEN });
     for (let i = 0; i < 2; i++) {
