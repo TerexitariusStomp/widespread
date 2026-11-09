@@ -1,0 +1,28 @@
+{
+  "name": "widespread-near",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "widespread on NEAR — permissionless verified-work market: contract + oracle + agent + bot + intents (NEAR HACKATHON submission)",
+  "scripts": {
+    "build": "cd contracts/market && node node_modules/near-sdk-js/lib/cli/cli.js build contract.js contract.wasm",
+    "deploy": "cd contracts/market && node deploy.js",
+    "seed": "cd contracts/market && node seed.js"
+  },
+  "dependencies": {
+    "@seer-pm/sdk": "^0.0.20",
+    "chainsig.js": "^1.1.16",
+    "esbuild": "^0.24.0",
+    "near-api-js": "^7.4.0",
+    "near-sdk-js": "^2.0.0",
+    "viem": "^2.57.17"
+  },
+  "allowScripts": {
+    "near-sdk-js": true,
+    "esbuild": true
+  },
+  "workspaces": [
+    "contracts/*",
+    "packages/*"
+  ]
+}
