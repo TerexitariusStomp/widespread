@@ -6,6 +6,7 @@ import { Hono } from "hono";
 import { handleBotVerdict, type BotVerdictBody } from "../botverdict";
 import { ecosystem } from "../ecosystem";
 import { nearView } from "../near";
+import { OPENAPI } from "../openapi/spec";
 import type { Env } from "../types";
 import { json } from "./shared";
 import { kv } from "../db";
@@ -31,6 +32,14 @@ export function miscRoutes() {
   // Collaborator ecosystem feed — rails, funding pools, security boards,
   // forges, workers, dispute/proof seams. All env-gated, all optional.
   app.get("/api/ecosystem", async (c) => json(await ecosystem(c.env)));
+
+  // OpenAPI — the public contract, served for SDK codegen
+  // (openapi-typescript / openapi-fetch). Maintained by hand: routes
+  // aren't zod-annotated so codegen can't be the source of truth.
+  app.get("/api/openapi.json", (c) =>
+    new Response(JSON.stringify(OPENAPI, null, 2), {
+      headers: { "content-type": "application/json", "cache-control": "public, max-age=3600" },
+    }));
 
   // A2A agent card — how agent frameworks discover this service.
   // Public, static, cacheable. /.well-known/agent.json kept for
