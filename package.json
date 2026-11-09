@@ -1,0 +1,9 @@
+{
+  "name": "widespread",
+  "private": true,
+  "description": "Widespread monorepo — permissionless, forge-native agent-labor and commerce protocol",
+  "workspaces": [],
+  "scripts": {
+    "test": "echo 'Per-package test commands — see README.md'"
+  }
+}
