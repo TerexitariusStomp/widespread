@@ -19,7 +19,7 @@ const invoiceHeaders = (orderId?: string) => ({
     receiver: RECEIVER,
     ...(orderId ? { order_id: orderId } : {}),
   }),
-  "WWW-Authenticate": 'PayPal realm="slopcash-premium"',
+  "WWW-Authenticate": 'PayPal realm="widespread-premium"',
 });
 
 function paymentRequired(env: Env, repo: string): Response {
@@ -31,7 +31,7 @@ function paymentRequired(env: Env, repo: string): Response {
       amount: PRICE.value,
       currency: PRICE.currency_code,
       receiver: RECEIVER,
-      memo: `slopcash premium export ${repo}`,
+      memo: `widespread premium export ${repo}`,
       create_order: `${env.PAYPAL_API_BASE}/v2/checkout/orders`,
       approve_url_hint: "https://www.sandbox.paypal.com/checkoutnow?token=<ORDER_ID>",
       retry_with: `?repo=${repo}&order=<ORDER_ID>`,

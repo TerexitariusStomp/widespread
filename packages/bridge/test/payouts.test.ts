@@ -40,7 +40,7 @@ describe("sendPayout", () => {
     expect(r.sandbox).toBe(true);
     expect(r.batch_id).toBe("BATCH9");
     expect(r.transaction_id).toBe("TXN9");
-    expect(r.sender_batch_id).toBe("slopcash-o-r-3-abcdef12");
+    expect(r.sender_batch_id).toBe("widespread-o-r-3-abcdef12");
   });
 
   it("deterministic sender_batch_id — same claim retries dedupe", async () => {

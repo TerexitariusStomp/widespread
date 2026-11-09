@@ -71,7 +71,7 @@ export interface VerifiedServiceAuth {
 
 /**
  * Verify a service-auth JWT. `expectedAud` is the gateway's own atproto
- * service identifier (e.g. `did:web:git-on-cloudflare.delta-git.workers.dev`);
+ * service identifier (e.g. `did:web:delta-git.delta-git.workers.dev`);
  * callers pass the request origin's host so previews/custom domains bind.
  */
 export async function verifyServiceAuth(

@@ -1,6 +1,6 @@
 # Commit Diff Proposal
 
-This document proposes a staged implementation for a GitHub-style "what changed in this commit" view that fits the current `git-on-cloudflare` architecture and respects the existing soft IO/subrequest budget.
+This document proposes a staged implementation for a GitHub-style "what changed in this commit" view that fits the current `delta-git` architecture and respects the existing soft IO/subrequest budget.
 
 ## Goals
 

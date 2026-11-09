@@ -1,5 +1,5 @@
 {
-  "name": "hermes-browser",
+  "name": "@widespread/hermes-browser",
   "version": "0.1.0",
   "description": "Hermes agent running fully in-browser — upstream core under Pyodide, vault-held secrets, remote-gateway relay",
   "license": "MIT",
@@ -10,8 +10,8 @@
     "pack-env": "node scripts/pack-env.mjs",
     "pack-assets": "node scripts/pack-assets.mjs",
     "assemble": "node scripts/assemble.mjs",
-    "build": "npm run vendor && npm run pack-env && npm run pack-assets && npm run pack && npm run assemble",
-    "dev": "npm run assemble && python3 -m http.server 8471 -d dist",
+    "build": "pnpm run vendor && pnpm run pack-env && pnpm run pack-assets && pnpm run pack && pnpm run assemble",
+    "dev": "pnpm run assemble && python3 -m http.server 8471 -d dist",
     "serve": "node scripts/serve.mjs",
     "smoke": "node scripts/smoke.mjs",
     "test": "node --test tests/*.test.mjs && python3 -m unittest tests.test_widespread_plugin"

@@ -1,5 +1,0 @@
-allowBuilds:
-  esbuild: true
-  near-sdk-js: true
-minimumReleaseAgeExclude:
-  - viem@2.57.17

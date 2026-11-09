@@ -1,6 +1,6 @@
 # Caching Strategy
 
-git-on-cloudflare implements a two-tier caching strategy to optimize performance and reduce load on Durable Objects and R2.
+delta-git implements a two-tier caching strategy to optimize performance and reduce load on Durable Objects and R2.
 
 ## Two-Tier Cache Architecture
 

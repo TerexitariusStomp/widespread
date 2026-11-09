@@ -1,0 +1,39 @@
+packages:
+  - "packages/*"
+  # NEAR contract dirs have no package.json of their own — they are built
+  # and deployed from the @widespread/near package. The glob is kept so a
+  # contract-level package.json is picked up automatically if one is added.
+  - "packages/near/contracts/*"
+  # NOTE: packages/delta-git/frontend/canary is an upstream pnpm project
+  # with its own lockfile/catalog — it is intentionally NOT a workspace
+  # member. Install it with `pnpm -C frontend/canary install` (delta-git's
+  # build:spa script does this automatically when node_modules is absent).
+
+# Postinstall/build scripts allowed to run. pnpm blocks dependency
+# lifecycle scripts by default; these need theirs (near-sdk-js downloads
+# platform binaries, esbuild/workerd/sharp ship prebuilt binaries).
+# Carried over from the pre-monorepo packages/near workspace config.
+minimumReleaseAgeExclude:
+  - viem@2.57.17
+
+allowBuilds:
+  bigint-buffer: true
+  bufferutil: true
+  cpu-features: true
+  esbuild: true
+  near-sdk-js: true
+  protobufjs: true
+  secp256k1: true
+  ssh2: true
+  utf-8-validate: true
+  workerd: true
+  # Denied: their install scripts fail on dev machines but the packages work
+  # without them.
+  # - onnxruntime-node: postinstall only downloads CUDA EP binaries; it crashes
+  #   on hosts with CUDA >= 13 (unsupported version detection). CPU inference
+  #   uses the bundled binaries, so skipping is safe.
+  # - sharp: only sharp@0.34.5 (via @huggingface/transformers) ships an
+  #   `install` script that misfires when a system libvips is present; runtime
+  #   loads the bundled @img/* prebuilt binaries regardless.
+  onnxruntime-node: false
+  sharp: false

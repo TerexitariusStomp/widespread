@@ -19,8 +19,8 @@ export type { RepoTaskQueueMessage, RepositoryDeleteMessage, RouteCacheSyncMessa
 
 // The queue carries repo lifecycle work as well as maintenance: compaction,
 // pack-ref backfill, route-cache repair, and repository deletion. Producers
-// use the `REPO_TASKS_QUEUE` binding; the physical queue name remains
-// `git-on-cloudflare-repo-maint` for continuity. Schemas live in
+// use the `REPO_TASKS_QUEUE` binding; the physical queue name is
+// `delta-git-repo-maint` (must match wrangler.jsonc). Schemas live in
 // `./types.ts`; this file dispatches.
 export async function handleRepoTaskQueue(
   batch: MessageBatch<unknown>,

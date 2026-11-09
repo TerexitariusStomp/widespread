@@ -62,7 +62,7 @@ export async function runQueueMessage(body: unknown, overrideEnv?: Env): Promise
       body,
     },
   ];
-  const batch = createMessageBatch("git-on-cloudflare-repo-maint", messages);
+  const batch = createMessageBatch("delta-git-repo-maint", messages);
 
   const ctx = createExecutionContext();
   await worker.queue(batch, overrideEnv ?? testEnv, ctx);

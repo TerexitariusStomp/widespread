@@ -271,7 +271,7 @@ export default {
     }
     // Sponsor-tool surface: AG Grid payout-trace viewer.
     if (pathname === "/sponsor") return sponsorPage(env);
-    if (pathname === "/healthz") return json({ ok: true, service: "slopcash-bridge" });
+    if (pathname === "/healthz") return json({ ok: true, service: "widespread-bridge" });
     if (pathname === "/api/state" && req.method === "GET") {
       // Opportunistic pickup: an open dashboard polls this route, so new ship
       // claims get reviewed without needing a cron trigger slot.

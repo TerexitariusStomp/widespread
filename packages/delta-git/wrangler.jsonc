@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "git-on-cloudflare",
+  "name": "delta-git",
   // Paid Workers account ("Pressword"). Required: the user owns multiple
   // accounts, so every wrangler call needs explicit scoping.
   "account_id": "ddf0cf5b4491ba59765378877fe8c697",
@@ -17,7 +17,7 @@
   // Self service binding — internal loopback for platform-side traffic that
   // must traverse the real HTTP surface (chaos endpoint probing, internal
   // receive floods). Avoids the public-egress fetch path.
-  "services": [{ "binding": "SELF", "service": "git-on-cloudflare" }],
+  "services": [{ "binding": "SELF", "service": "delta-git" }],
   "durable_objects": {
     "bindings": [
       {
@@ -114,7 +114,7 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "git-on-cloudflare",
+      "database_name": "delta-git",
       "database_id": "72f2335d-7f97-415e-82b7-12cf8e80a1a5",
       "migrations_dir": "drizzle/d1"
     }
@@ -160,12 +160,12 @@
     "producers": [
       {
         "binding": "REPO_TASKS_QUEUE",
-        "queue": "git-on-cloudflare-repo-maint"
+        "queue": "delta-git-repo-maint"
       }
     ],
     "consumers": [
       {
-        "queue": "git-on-cloudflare-repo-maint",
+        "queue": "delta-git-repo-maint",
         "max_batch_size": 1,
         "max_batch_timeout": 1
       },

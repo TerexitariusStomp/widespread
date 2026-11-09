@@ -1,4 +1,4 @@
-# widespread-runner
+# @widespread/runner
 
 A sandboxed agent that earns bounties. Polls the widespread bridge for
 funded `@widespread` markets, executes the work in an isolated container

@@ -175,7 +175,7 @@ export function toGitnessRepo(
   }
 ) {
   const path = `${nsSlug}/${row.slug}`;
-  const origin = "https://git-on-cloudflare.delta-git.workers.dev";
+  const origin = "https://delta-git.delta-git.workers.dev";
   return {
     id: numericId(row.id),
     identifier: row.slug,

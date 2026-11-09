@@ -1,6 +1,6 @@
 # tessera Ownership Migration Plan
 
-This plan modernizes git-on-cloudflare repository ownership and moves human identity to tessera OIDC while preserving the existing Git storage model: Workers remain stateless, RepoDO remains the per-repository metadata authority for refs and pack catalog state, and R2 remains the pack/object data plane.
+This plan modernizes delta-git repository ownership and moves human identity to tessera OIDC while preserving the existing Git storage model: Workers remain stateless, RepoDO remains the per-repository metadata authority for refs and pack catalog state, and R2 remains the pack/object data plane.
 
 The implementation is split into three phases so identity, route resolution, authorization, caching, and legacy removal do not all land in one deploy.
 
@@ -67,7 +67,7 @@ Add `drizzle-d1.config.ts`, `drizzle/d1/`, and a D1 binding in `wrangler.jsonc`:
 "d1_databases": [
   {
     "binding": "DB",
-    "database_name": "git-on-cloudflare",
+    "database_name": "delta-git",
     "database_id": "REPLACE_WITH_DATABASE_ID",
     "migrations_dir": "drizzle/d1"
   }

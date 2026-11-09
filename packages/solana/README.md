@@ -1,4 +1,4 @@
-# widespread-solana
+# @widespread/solana
 
 PYUSD bounty settlement on Solana — the Encode/Aurora leg of the
 widespread verified-work protocol.

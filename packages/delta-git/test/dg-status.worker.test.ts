@@ -87,7 +87,7 @@ beforeAll(async () => {
 describe("dg/status writeback auth", () => {
   it("rejects unsigned requests (missing-signature-headers)", async () => {
     const res = await postStatus(base, {
-      sha: "a".repeat(40), state: "success", context: "slopcash/payout",
+      sha: "a".repeat(40), state: "success", context: "widespread/payout",
     });
     expect(res.status).toBe(401);
     expect(res.body.error).toBe("agent-auth:missing-signature-headers");
@@ -107,7 +107,7 @@ describe("dg/status writeback auth", () => {
     const { didKeyFromPubkey } = await import("@/worker/agent/atpauth/didkey");
     const did = didKeyFromPubkey(pub, "ed25519");
     const body = te.encode(JSON.stringify({
-      sha: "b".repeat(40), state: "success", context: "slopcash/payout",
+      sha: "b".repeat(40), state: "success", context: "widespread/payout",
     }));
     const headers = await dgHeaders({
       pair: { publicKey: unregistered.publicKey, privateKey: unregistered.privateKey },
@@ -157,7 +157,7 @@ describe("dg/status writeback auth", () => {
     const { pair, did } = await newAgent();
     const sha = "f".repeat(40);
     const payload = {
-      sha, state: "success", context: "slopcash/payout",
+      sha, state: "success", context: "widespread/payout",
       description: "adjudicated accept (confidence 0.85)",
       target_url: "https://widespread-bridge.widespread.workers.dev/receipt?x=1",
     };
@@ -179,7 +179,7 @@ describe("dg/status writeback auth", () => {
     };
     expect(doc.statuses.length).toBe(1);
     const s = doc.statuses[0];
-    expect(s.context).toBe("slopcash/payout");
+    expect(s.context).toBe("widespread/payout");
     expect(s.state).toBe("success");
     expect(s.created_by).toBe(did);
     expect(s.target_url).toContain("widespread-bridge");

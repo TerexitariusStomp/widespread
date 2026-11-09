@@ -36,7 +36,7 @@ it("advertises streaming receive-pack capabilities including side-band-64k", asy
   expect(capsLine).toContain("atomic");
   expect(capsLine).toContain("report-status");
   expect(capsLine).toContain("ofs-delta");
-  expect(capsLine).toContain("agent=git-on-cloudflare/0.1");
+  expect(capsLine).toContain("agent=delta-git/0.1");
   // Streaming capabilities are always advertised
   expect(capsLine).toContain("side-band-64k");
   expect(capsLine).toContain("quiet");

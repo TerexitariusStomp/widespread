@@ -17,7 +17,7 @@ git pull https://your-domain.com/owner/repo
 
   Advertised capabilities (protocol v2):
   - `version 2`
-  - `agent=git-on-cloudflare/0.1`
+  - `agent=delta-git/0.1`
   - `ls-refs`
   - `fetch`
   - `side-band-64k`

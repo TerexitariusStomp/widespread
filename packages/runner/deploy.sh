@@ -68,7 +68,7 @@ WantedBy=multi-user.target
 UNIT
 
   cat > .env <<'ENV'
-BRIDGE_BASE=https://slopcash-bridge.hardwoodstablecoin.workers.dev
+BRIDGE_BASE=https://widespread-bridge.widespread.workers.dev
 FORGE_BASE=https://code.widespread.fyi
 WORK_DIR=/var/lib/widespread-runs
 SANDBOX_IMAGE=widespread-sandbox:latest

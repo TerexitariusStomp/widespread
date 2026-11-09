@@ -7,7 +7,7 @@ the repo's public op-log. This bridge picks the claim up, recomputes the
 evidence, hands it to an **AI adjudicator** (LLM, not a rules engine), and on
 `accept` releases the contributor's bounty through **PayPal Payouts**.
 
-Live demo: **https://slopcash-bridge.hardwoodstablecoin.workers.dev**
+Live demo: **https://widespread-bridge.widespread.workers.dev**
 
 ```
 agent pushes work → dg-ship-1 claim in op-log (hash-chained, signed)
@@ -19,7 +19,7 @@ Workers AI adjudicator → {verdict, reasoning, confidence}
 accept + confidence ≥ floor + valid chain → PayPal Payouts (sandbox) to the
 contributor's PayPal-linked email → PayPal transaction id on `/ops`
         ↓
-receipt written back to the forge as a signed commit status (slopcash/payout)
+receipt written back to the forge as a signed commit status (widespread/payout)
 ```
 
 ## Run it (do X → see Y)
@@ -40,7 +40,7 @@ receipt written back to the forge as a signed commit status (slopcash/payout)
 2. **Trigger the review**:
 
    ```bash
-   curl -X POST https://slopcash-bridge.hardwoodstablecoin.workers.dev/review \
+   curl -X POST https://widespread-bridge.widespread.workers.dev/review \
      -H 'content-type: application/json' \
      -d '{"repo":"slop/slopdotcash","seq":N}'
    ```
@@ -63,7 +63,7 @@ receipt written back to the forge as a signed commit status (slopcash/payout)
    GET https://code.widespread.fyi/api/slop/slopdotcash/dg/status/<commit-sha>
    ```
 
-   → `context: "slopcash/payout"` with the PayPal batch id and a link back to
+   → `context: "widespread/payout"` with the PayPal batch id and a link back to
    the `/ops` card.
 
 ## Architecture
@@ -85,7 +85,7 @@ Two safety invariants a model verdict cannot override: the hash chain must
 replay cleanly, and confidence must clear `MIN_CONFIDENCE`. Everything else —
 spec-fit, substance, claim-vs-evidence consistency — is the adjudicator's call.
 A broken chain or unparseable model output fails closed (reject / error, never
-pay). `sender_batch_id = slopcash-<repo>-<seq>` makes PayPal dedupe retries.
+pay). `sender_batch_id = widespread-<repo>-<seq>` makes PayPal dedupe retries.
 
 ## Deploy your own
 
@@ -123,13 +123,13 @@ in `wrangler.jsonc` — free tier is capped at 5 cron triggers/account) or the `
 - **Cloudflare Workers + KV** — the whole service.
 - **AG Grid Community** — the `/ops` page's sortable/filterable claims and
   bounties tables.
-- **Postman** — `postman/slopcash-bridge.postman_collection.json` replays the
+- **Postman** — `postman/widespread-bridge.postman_collection.json` replays the
   full demo (op-log read → bounty → review → receipt write-back).
 
 ## Stretch lanes
 
 - **Receipt write-back (shipped):** verdicts land on the forge as signed
-  `slopcash/payout` commit statuses — the audit trail runs both directions.
+  `widespread/payout` commit statuses — the audit trail runs both directions.
 - **x402 lane (not shipped):** an HTTP-402 paywall where agents settle API
   calls through PayPal instead of crypto is a natural next step — the payout
   client here already speaks the PayPal side.
@@ -151,7 +151,7 @@ in `wrangler.jsonc` — free tier is capped at 5 cron triggers/account) or the `
 Agents settle HTTP-402 paywalls with **PayPal Orders** — not crypto:
 
 ```bash
-curl -i "https://slopcash-bridge.hardwoodstablecoin.workers.dev/api/premium/oplog-export?repo=slop/slopdotcash"
+curl -i "https://widespread-bridge.widespread.workers.dev/api/premium/oplog-export?repo=slop/slopdotcash"
 # → 402 + {invoice: $0.01 USD → sb-hp8xg48048392@business.example.com}
 # Pay (sandbox order), then retry with ?order=<ORDER_ID> → signed /dg/export bundle
 ```

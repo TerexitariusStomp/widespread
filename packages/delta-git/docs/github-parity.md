@@ -91,7 +91,7 @@ Run through a self-signed TLS bridge (`localhost:443` in a container →
 ### Known dev-loop footgun discovered
 
 `wrangler dev` resolves the **redirected** config
-(`dist/git_on_cloudflare/wrangler.json`) and serves the _prebuilt_ bundle —
+(`dist/delta_git/wrangler.json`) and serves the _prebuilt_ bundle —
 it does not rebuild `src/` on save. After editing `src/`, run
 `npx vite build` (worker+client) before live verification, or the served
 code silently lags the source.

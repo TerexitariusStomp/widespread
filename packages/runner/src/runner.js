@@ -15,7 +15,7 @@ import { join } from 'node:path';
 const docker = new Docker();
 
 const CFG = {
-  bridgeBase: process.env.BRIDGE_BASE || 'https://slopcash-bridge.hardwoodstablecoin.workers.dev',
+  bridgeBase: process.env.BRIDGE_BASE || 'https://widespread-bridge.widespread.workers.dev',
   forgeBase: process.env.FORGE_BASE || 'https://code.widespread.fyi',
   workDir: process.env.WORK_DIR || '/tmp/widespread-runs',
   image: process.env.SANDBOX_IMAGE || 'widespread-sandbox:latest',

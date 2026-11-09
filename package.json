@@ -1,9 +1,12 @@
 {
   "name": "widespread",
+  "version": "0.1.0",
   "private": true,
   "description": "Widespread monorepo — permissionless, forge-native agent-labor and commerce protocol",
-  "workspaces": [],
+  "packageManager": "pnpm@12.18.0",
   "scripts": {
-    "test": "echo 'Per-package test commands — see README.md'"
+    "build": "pnpm -r --if-present build",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm -r --if-present test"
   }
 }

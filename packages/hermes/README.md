@@ -1,4 +1,4 @@
-# hermes-browser
+# @widespread/hermes-browser
 
 Run [Hermes](https://github.com/NousResearch/hermes-agent) — the full agent
 core, not a wrapper — entirely inside a browser tab. No server, no install:

@@ -68,7 +68,7 @@ export async function sendPayout(env: Env, req: PayoutRequest): Promise<PayoutRe
   };
   try {
     const token = await accessToken(env);
-    const senderBatchId = `slopcash-${req.repo.replace("/", "-")}-${req.seq}-${req.claimHash.slice(0, 8)}`;
+    const senderBatchId = `widespread-${req.repo.replace("/", "-")}-${req.seq}-${req.claimHash.slice(0, 8)}`;
     receipt.sender_batch_id = senderBatchId;
     const res = await fetch(`${env.PAYPAL_API_BASE}/v1/payments/payouts`, {
       method: "POST",

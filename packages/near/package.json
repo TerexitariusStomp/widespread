@@ -1,12 +1,13 @@
 {
-  "name": "widespread-near",
+  "name": "@widespread/near",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "widespread on NEAR \u2014 permissionless verified-work market: contract + oracle + agent + bot + intents (NEAR HACKATHON submission)",
+  "description": "widespread on NEAR — permissionless verified-work market: contract + oracle + agent + bot + intents (NEAR HACKATHON submission)",
   "scripts": {
-    "build": "cd contracts/market && node node_modules/near-sdk-js/lib/cli/cli.js build contract.js contract.wasm",
-    "deploy": "cd contracts/market && node deploy.js"
+    "build": "node scripts/build-contract.mjs contracts/market build/contract.wasm",
+    "deploy": "cd contracts/market && node deploy.js",
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "chainsig.js": "^1.1.16",
@@ -15,12 +16,8 @@
     "near-sdk-js": "^2.0.0",
     "viem": "^2.57.17"
   },
-  "allowScripts": {
-    "near-sdk-js": true,
-    "esbuild": true
-  },
-  "workspaces": [
-    "contracts/*",
-    "packages/*"
-  ]
+  "devDependencies": {
+    "@babel/plugin-proposal-decorators": "^7.17.2",
+    "@babel/preset-typescript": "^7.18.6"
+  }
 }

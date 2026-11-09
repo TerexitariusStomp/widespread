@@ -25,7 +25,7 @@ export async function capabilityAdvertisement(
   if (service === "git-upload-pack") {
     const chunks: Uint8Array[] = [];
     chunks.push(pktLine("version 2\n"));
-    chunks.push(pktLine(`agent=git-on-cloudflare/0.1\n`));
+    chunks.push(pktLine(`agent=delta-git/0.1\n`));
     chunks.push(pktLine("ls-refs\n"));
     // Advertise fetch with the feature set we honor: shallow/deepen boundary
     // handling, deepen-not exclusion, partial-clone filters, and negotiation
@@ -72,7 +72,7 @@ export async function capabilityAdvertisement(
     // list; they land on the op-log entry and `push` webhook payloads.
     // The capability name is plural — gitprotocol-capabilities(5).
     "push-options",
-    `agent=git-on-cloudflare/0.1`,
+    `agent=delta-git/0.1`,
   ].join(" ");
 
   const lines: Uint8Array[] = [];
