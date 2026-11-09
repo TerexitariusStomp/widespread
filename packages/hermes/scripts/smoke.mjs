@@ -76,7 +76,8 @@ if (ready) {
       'session.list', 'gateway.ping', 'setup.status', 'model.options',
       'tools.list', 'toolsets.list', 'session.create',
     ]
-    const t = setTimeout(() => resolve({ timeout: true, log, results }), 120000)
+    const EXPECTED = methods.length + 4 // + complete.path, save_key, shell.exec, battery
+    const t = setTimeout(() => resolve({ timeout: true, log, results }), 180000)
     ws.onmessage = (ev) => {
       const s = String(ev.data)
       log.push(s.slice(0, 200))
@@ -95,26 +96,38 @@ if (ready) {
           }
         }
       } catch (e) {}
-      if (Object.keys(results).length >= methods.length + 2) {
+      if (Object.keys(results).length >= EXPECTED) {
         clearTimeout(t); resolve({ log, results })
       }
     }
     ws.onopen = () => {
       methods.forEach((m, i) => ws.send(JSON.stringify({ jsonrpc: '2.0', id: 100 + i, method: m, params: {} })))
-      setTimeout(() => { clearTimeout(t); resolve({ log, results }) }, 90000)
+      // Native-module proofs (sessionless): shell.exec drives the patched
+      // subprocess -> WASIX userspace; system.battery drives the browser
+      // psutil implementation through agent.battery -> psutil.
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id: 109, method: 'shell.exec',
+        params: { command: 'uname -a; echo ---; ls / | head -20; echo ---; pwd' } }))
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id: 110, method: 'system.battery', params: {} }))
+      setTimeout(() => { clearTimeout(t); resolve({ log, results }) }, 120000)
     }
     ws.onerror = () => resolve({ error: 'ws error', log, results })
     ws.onclose = (ev) => resolve({ closed: ev.code, log, results })
   }))
   console.log('--- ws probe ---')
-  const methodNames = ['session.list', 'gateway.ping', 'setup.status', 'model.options', 'tools.list', 'toolsets.list', 'session.create', 'complete.path(wasi)', 'model.save_key']
+  const methodNames = ['session.list', 'gateway.ping', 'setup.status', 'model.options', 'tools.list', 'toolsets.list', 'session.create', 'complete.path(wasi)', 'model.save_key', 'shell.exec(wasi)', 'system.battery(psutil)']
+  const idFor = [100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110]
   for (let i = 0; i < methodNames.length; i++) {
-    const r = (rpc.results || {})[100 + i]
+    const r = (rpc.results || {})[idFor[i]]
     const out = r === undefined ? 'NO-REPLY'
       : r.error ? 'ERR ' + JSON.stringify(r.error).slice(0, 200)
       : JSON.stringify(r.result).slice(0, 400)
     console.log(' ', methodNames[i], '=>', out)
   }
+  // shell.exec proof: real WASIX uname + ls output came back through the
+  // patched subprocess module (not the wasi plugin's exec op).
+  const shellOut = JSON.stringify((rpc.results || {})[109] || {})
+  const shellPass = /Linux|GNU|wasix|WASI|wasm32/i.test(shellOut) && shellOut.includes('---')
+  console.log('  shell.exec through subprocess/WASIX =>', shellPass ? 'PASS' : 'CHECK-ABOVE')
   // Vault proof: a stored key is a labeled handle in the vault worker; the
   // raw value must not appear anywhere in the Python heap or config write.
   const vault = await page.evaluate(async () => {
@@ -132,6 +145,75 @@ if (ready) {
   console.log('  handles =>', JSON.stringify(vault))
   console.log('  save_key stored as vault handle =>',
     vault.hasHandle ? 'PASS' : 'CHECK-ABOVE')
+
+  // --- browser-native bridge probes -------------------------------------
+  // Exercises the same page-side implementations the Python coincident
+  // calls use: sysinfo (psutil/resource backing), Web Locks flock
+  // (fcntl backing), and the relayed TCP tunnel (socket backing).
+  const bridge = await page.evaluate(async () => {
+    const b = window.__HERMES_BRIDGE__
+    if (!b) return { error: 'no __HERMES_BRIDGE__' }
+    const out = {}
+    try {
+      const si = await b.sysinfo()
+      out.sysinfo = {
+        hardwareConcurrency: si.hardwareConcurrency,
+        deviceMemory: si.deviceMemory,
+        heapUsed: si.jsHeap && si.jsHeap.used,
+        heapLimit: si.jsHeap && si.jsHeap.limit,
+        storageQuota: si.storage && si.storage.quota,
+        timeOrigin: si.timeOrigin,
+      }
+    } catch (e) { out.sysinfo = { error: String(e) } }
+    try {
+      const held = await b.flock('/tmp/smoke-flock-probe', 'exclusive', true)
+      const rel = await b.flockRelease('/tmp/smoke-flock-probe')
+      out.flock = { held, rel }
+    } catch (e) { out.flock = { error: String(e) } }
+    try {
+      const st = await b.wasiStatus()
+      out.wasi = st
+    } catch (e) { out.wasi = { error: String(e) } }
+    // TCP tunnel: only meaningful when a relay is configured/reachable.
+    // tcpOpen -> /tcp-token POST -> WS /tcp -> cloudflare:sockets upstream.
+    try {
+      const t0 = Date.now()
+      const opened = await Promise.race([
+        b.tcpOpen('example.com', 80),
+        new Promise((r) => setTimeout(() => r({ error: 'probe_timeout' }), 30000)),
+      ])
+      out.tcpOpen = { ms: Date.now() - t0, ...opened }
+      if (opened && opened.id) {
+        // Real HTTP/1.0 round-trip through the tunnel.
+        const b64 = (s) => btoa(s)
+        await b.tcpSend(opened.id, b64('GET / HTTP/1.0\r\nHost: example.com\r\n\r\n'))
+        const chunks = []
+        for (let i = 0; i < 20; i++) {
+          const r = await b.tcpRecv(opened.id, 5000)
+          if (r.data) chunks.push(atob(r.data))
+          if (r.eof || r.error || r.errno) break
+        }
+        const text = chunks.join('')
+        out.tcpHttp = {
+          bytes: text.length,
+          statusLine: text.split('\r\n')[0] || '',
+          hasHtml: /<html|<!doctype/i.test(text),
+        }
+        await b.tcpClose(opened.id)
+      }
+    } catch (e) { out.tcpOpen = { error: String(e) } }
+    return out
+  })
+  console.log('--- bridge probes ---')
+  console.log(' ', JSON.stringify(bridge, null, 1).slice(0, 2000))
+  const si = bridge.sysinfo || {}
+  const sysPass = (si.hardwareConcurrency || 0) > 0 && (si.heapUsed || 0) > 0
+  console.log('  sysinfo real measurements =>', sysPass ? 'PASS' : 'CHECK-ABOVE')
+  const flockPass = bridge.flock && bridge.flock.held && bridge.flock.held.ok === true
+  console.log('  Web Locks flock roundtrip =>', flockPass ? 'PASS' : 'CHECK-ABOVE')
+  const tcp = bridge.tcpHttp || {}
+  console.log('  TCP tunnel HTTP fetch =>',
+    tcp.statusLine ? tcp.statusLine + (tcp.hasHtml ? ' PASS' : ' WEAK') : 'SKIP (no relay configured)')
   console.log('--- events ---')
   ;(rpc.log || []).slice(0, 8).forEach((l) => console.log('  ', l.slice(0, 200)))
 }
