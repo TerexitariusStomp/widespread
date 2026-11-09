@@ -1,7 +1,7 @@
 // Single-file dashboard: claim → evidence → verdict → payout, all live.
 // No build step — the Worker serves this HTML and the page polls /api/state.
 
-export const DASHBOARD_HTML = `<!doctype html>
+export const OPS_HTML = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -120,7 +120,6 @@ function claimCard(r) {
   const chainOk = r.chain && r.chain.valid;
   const commits = (r.commits||[]).map(c =>
     \`  \${c.sha.slice(0,10)}  +\${c.lines_added}/-\${c.lines_removed}  \${(c.files||[]).length} files  [\${c.source}]\`).join("\\n");
-  const firstSha = (p.commits||[])[0]||"";
   const firstSha = (p.commits||[])[0]||"";
   const payLine = pay.attempted
     ? \`batch \${pay.batch_id}\\ntxn   \${pay.transaction_id || "—"} (\${pay.transaction_status || pay.batch_status || "?"})\\n→ \${pay.receiver}  \${pay.amount} \${pay.currency}  [\${pay.sandbox ? "sandbox" : "LIVE"}]\`

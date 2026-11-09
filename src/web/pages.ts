@@ -6,7 +6,7 @@ import type { Env, FeedDoc, FeedRecord, MirrorListing } from "../types";
 import { feedDoc } from "../feed";
 import { pageShell, html, esc } from "./shell";
 import {
-  fmtUsd, fmtAmount, timeAgo, shortHash, forgeBadge, platformOf,
+  fmtUsd, fmtAmount, timeAgo, shortHash, forgeBadge, forgeLabel, platformOf,
   escrowPill, pill, bountyHref, trustLine, competitionLine, cardAmount,
 } from "./format";
 import { verifyAttestation } from "../claims";
@@ -17,12 +17,19 @@ function recordCard(rec: FeedRecord | MirrorListing): string {
   const p = escrowPill(rec);
   const platform = platformOf(rec as FeedRecord);
   const r = rec as FeedRecord;
-  const title = (rec as MirrorListing).title ?? r.title;
-  const url = (rec as MirrorListing).url ?? r.url;
-  const repo = r.repo ?? (rec as MirrorListing).repo;
+  const m = rec as MirrorListing;
+  const title = m.title ?? r.title;
+  const url = m.url ?? r.url;
+  const repo = r.repo ?? m.repo;
   const trust = trustLine(r);
   const comp = competitionLine(r);
-  return `<a class="card bounty-card" href="${bountyHref(rec)}">
+  const usd = m.claimant_share?.est_usd ?? r.est_usd ?? -1;
+  const ts = r.updated_at ?? m.updated_at ?? 0;
+  const rail = m.id
+    ? "paypal,paxos,near"
+    : (r.payout?.rails ?? []).join(",");
+  return `<a class="card bounty-card" href="${bountyHref(rec)}"
+    data-usd="${usd}" data-ts="${ts}" data-rail="${esc(rail)}" data-forge="${esc(forgeLabel(rec))}">
     <div class="bounty-meta">
       ${forgeBadge(rec)}
       ${platform ? pill("info", `also on ${platform}`) : ""}
@@ -121,6 +128,18 @@ export async function bountiesPage(env: Env, ctx?: ExecutionContext): Promise<Re
     <option value="seeking-funder">seeking funder</option>
     <option value="external">external</option>
   </select>
+  <select id="rail" onchange="filterBounties()">
+    <option value="">all payout rails</option>
+    <option value="paypal">PayPal USD</option>
+    <option value="paxos">PYUSD (Paxos)</option>
+    <option value="near">NEAR</option>
+  </select>
+  <select id="sort" onchange="filterBounties()">
+    <option value="usd-desc">value ↓</option>
+    <option value="usd-asc">value ↑</option>
+    <option value="newest">newest</option>
+    <option value="oldest">oldest</option>
+  </select>
   <span class="spacer"></span>
   <span class="mut small" id="count"></span>
 </div>
@@ -128,20 +147,22 @@ export async function bountiesPage(env: Env, ctx?: ExecutionContext): Promise<Re
 ${items.length > shown.length ? `<p class="mut small" style="margin-top:14px">+ ${items.length - shown.length} more — paginate via <code>/api/feed?limit=…</code> or filter above.</p>` : ""}
 <script>
 const cards = [...document.querySelectorAll("#list .bounty-card")];
-const forges = new Set();
-for (const c of cards) { const b = c.querySelector(".forge-badge"); if (b) forges.add(b.textContent.trim()); }
+const forges = new Set(cards.map(c => c.dataset.forge).filter(Boolean));
 const fs = document.getElementById("forge");
 for (const f of [...forges].sort()) { const o=document.createElement("option"); o.value=f; o.textContent=f; fs.appendChild(o); }
 function filterBounties() {
   const q = document.getElementById("q").value.toLowerCase();
   const f = document.getElementById("forge").value;
   const e = document.getElementById("escrow").value;
+  const rail = document.getElementById("rail").value;
+  const sort = document.getElementById("sort").value;
   let n = 0;
   for (const c of cards) {
     const txt = c.textContent.toLowerCase();
-    const fb = c.querySelector(".forge-badge")?.textContent.trim() || "";
     const pills = [...c.querySelectorAll(".pill")].map(p => p.textContent.toLowerCase());
-    const show = (!q || txt.includes(q)) && (!f || fb === f)
+    const rails = (c.dataset.rail || "").split(",");
+    const show = (!q || txt.includes(q)) && (!f || c.dataset.forge === f)
+      && (!rail || rails.includes(rail))
       && (!e || (e === "funded" ? pills.some(p=>p.includes("funded · escrowed"))
                 : e === "fiat-funded" ? pills.some(p=>p.includes("fiat-funded"))
                 : e === "seeking-funder" ? pills.some(p=>p.includes("seeking funder"))
@@ -149,6 +170,14 @@ function filterBounties() {
     c.style.display = show ? "" : "none";
     if (show) n++;
   }
+  const vis = cards.filter(c => c.style.display !== "none");
+  const key = { "usd-desc": (a,b)=>(+b.dataset.usd)-(+a.dataset.usd),
+                "usd-asc":  (a,b)=>(+a.dataset.usd)-(+b.dataset.usd),
+                "newest":   (a,b)=>(+b.dataset.ts)-(+a.dataset.ts),
+                "oldest":   (a,b)=>(+a.dataset.ts)-(+b.dataset.ts) }[sort];
+  vis.sort(key);
+  const list = document.getElementById("list");
+  for (const c of vis) list.appendChild(c);
   document.getElementById("count").textContent = n + " shown";
 }
 filterBounties();
@@ -247,7 +276,7 @@ export async function bountyPage(env: Env, ctx: ExecutionContext | undefined, id
       : "";
 
   const body = `
-<div class="mut small" style="margin-bottom:14px"><a href="/bounties">← bounties</a></div>
+<div class="mut small" style="margin-bottom:14px"><a href="/bounties">← bounties</a> · <a href="/bounty.md?id=${encodeURIComponent(id)}">markdown</a></div>
 <div class="card">
   <div class="bounty-meta" style="margin-bottom:8px">
     ${forgeBadge(mirror ?? record!)}
@@ -463,4 +492,85 @@ You never have to visit this site; everything below is also machine-readable.</p
 <h2>Receipts</h2>
 <div class="card"><p class="mut small">Every verdict writes back to the forge (<code>dg/status</code>) and mints a public receipt: <code>/receipt?mirror=&lt;id&gt;&amp;claim=&lt;hash&gt;</code> for mirrors, <code>/receipt?repo=&lt;owner/repo&gt;&amp;seq=&lt;n&gt;</code> for forge claims.</p></div>`;
   return html(pageShell({ title: "Docs", nav: "docs", path: "/docs", body }));
+}
+
+// ------------------------------------------------------- markdown twin
+
+/** `/bounty.md?id=` — agent-readable twin of the bounty detail page.
+ * Raw markdown, no HTML; mirrors the fields agents filter on. */
+export async function bountyMarkdown(env: Env, ctx: ExecutionContext | undefined, id: string): Promise<Response> {
+  const doc = await feedDoc(env, ctx);
+  const { mirror, record } = findRecord(doc, id);
+  if (!mirror && !record) {
+    return new Response("# Not found\n\nNo bounty with that id. See /feed.md for the full feed.\n",
+      { headers: { "content-type": "text/markdown; charset=utf-8" } });
+  }
+  const p = escrowPill(mirror ?? record!);
+  const r = record;
+  const m = mirror;
+  const lines: string[] = [];
+  lines.push(`# ${m?.title ?? r!.title}`);
+  lines.push("");
+  lines.push(`- **id:** \`${id}\``);
+  lines.push(`- **url:** ${m?.url ?? r!.url}`);
+  if (r?.repo ?? m?.repo) lines.push(`- **repo:** ${r?.repo ?? m?.repo}`);
+  lines.push(`- **forge:** ${forgeLabel(m ?? r!)}`);
+  const platform = r ? platformOf(r) : null;
+  if (platform) lines.push(`- **also_on:** ${platform} (mirror-only — routes through Widespread escrow)`);
+  lines.push(`- **escrow:** ${p.label}`);
+  lines.push(`- **reward:** ${m ? `${m.original?.amount ?? "?"} ${m.original?.currency ?? ""} (face) → winner ${fmtUsd(m.claimant_share?.est_usd)} after ${(m.cut_bps / 100).toFixed(0)}% platform cut` : (r!.est_usd != null ? fmtUsd(r!.est_usd) : `${r!.amount ?? "?"} ${r!.currency ?? ""}`)}`);
+  if (r?.escrow?.state === "locked" && r.escrow.locked) lines.push(`- **locked:** ${r.escrow.locked}${r.escrow.deadline ? ` · deadline ${r.escrow.deadline}` : ""}`);
+  if (r?.payout?.rails?.length) lines.push(`- **payout_rails:** ${r.payout.rails.join(", ")}`);
+  if (r?.verification?.required) lines.push(`- **verification:** ${r.verification.required}`);
+  if (r?.trust) {
+    const t = r.trust;
+    const bits: string[] = [];
+    if (t.repo_claims != null) bits.push(`${t.repo_claims} claims`);
+    if (t.repo_paid != null) bits.push(`${t.repo_paid} paid`);
+    if (t.repo_pass_rate != null) bits.push(`${Math.round(t.repo_pass_rate * 100)}% pass`);
+    if (bits.length) lines.push(`- **repo_trust:** ${bits.join(", ")}`);
+  }
+  if (r?.competition) {
+    const c = r.competition;
+    const bits: string[] = [];
+    if (c.pending_claims != null) bits.push(`${c.pending_claims} pending`);
+    if (c.unique_claimants != null) bits.push(`${c.unique_claimants} claimants`);
+    if (bits.length) lines.push(`- **competition:** ${bits.join(", ")}`);
+  }
+  if (m) {
+    lines.push(`- **mirror_id:** \`${m.id}\``);
+    lines.push(`- **spec_hash:** \`${m.spec_hash ?? "?"}\``);
+    lines.push(`- **status:** ${m.status}`);
+    lines.push("");
+    lines.push("## Claiming");
+    lines.push("");
+    lines.push(`Submit work on the source thread exactly as you would for the original platform —`);
+    lines.push(`funded mirrors auto-ingest cross-referenced submissions. Direct claim:`);
+    lines.push("");
+    lines.push("```");
+    lines.push(`POST /api/mirrors/claims`);
+    lines.push(`{"mirror_id": ${JSON.stringify(m.id)},`);
+    lines.push(` "forgeRef": "github:owner/repo#123",`);
+    lines.push(` "payout": {"pyusd_solana_address": "…"} or {"paypal_email": "…"}}`);
+    lines.push("```");
+  } else if (r?.claim?.how) {
+    lines.push("");
+    lines.push("## Claiming");
+    lines.push("");
+    lines.push(r.claim.how);
+    if (r.claim.grammar) { lines.push(""); lines.push("```"); lines.push(r.claim.grammar); lines.push("```"); }
+  }
+  const spec = m?.spec ?? r?.spec;
+  if (spec) {
+    lines.push("");
+    lines.push("## Spec");
+    lines.push("");
+    lines.push(spec);
+  }
+  lines.push("");
+  lines.push(`---`);
+  lines.push(`Machine twin: \`GET /api/feed\` · list: \`/feed.md\` · updated ${new Date((m ?? r!)!.updated_at ?? Date.now()).toISOString()}`);
+  lines.push("");
+  return new Response(lines.join("\n"),
+    { headers: { "content-type": "text/markdown; charset=utf-8" } });
 }

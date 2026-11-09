@@ -92,7 +92,7 @@ export function pill(cls: string, label: string): string {
 
 export function bountyHref(rec: FeedRecord | MirrorListing): string {
   const id = (rec as MirrorListing).id ?? (rec as FeedRecord).id;
-  return `/bounty?id=${encodeURIComponent(id)}`;
+  return `/bounties/${encodeURIComponent(id)}`;
 }
 
 export function trustLine(rec: FeedRecord): string {

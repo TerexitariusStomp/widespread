@@ -1,6 +1,7 @@
 // Widespread ⇄ delta-git bridge worker.
 //
-//   GET  /                    dashboard (claim → evidence → verdict → payout)
+//   GET  /                    market home (bounties, mirrors, receipts)
+//   GET  /ops                 ops dashboard (claim → evidence → verdict → payout)
 //   GET  /api/state           all review records + bounties (dashboard feed)
 //   POST /review              {repo, seq} one claim · {repo, all:true} outstanding
 //   GET  /review?repo&seq     same, for linkable demo runs
@@ -10,8 +11,8 @@
 //   GET  /healthz
 //   scheduled(*/5m)           scan WATCH_REPOS op-logs, review new ship claims
 
-import { DASHBOARD_HTML } from "./dash";
-import { homePage, bountiesPage, bountyPage, fundPage, receiptPage, docsPage } from "./web/pages";
+import { OPS_HTML } from "./ops";
+import { homePage, bountiesPage, bountyPage, fundPage, receiptPage, docsPage, bountyMarkdown } from "./web/pages";
 import { handlePremiumExport } from "./premium";
 import { reviewOutstanding, runReview } from "./review";
 import { handleBotVerdict, type BotVerdictBody } from "./botverdict";
@@ -49,6 +50,12 @@ const bad = (msg: string, status = 400) => json({ error: msg }, status);
  * cookie-bearing requests always bypass. */
 const pageCache = new Map<string, { body: string; expires: number }>();
 const PAGE_TTL_MS = 45_000;
+
+/** Decode a path segment that may contain %2F-encoded id characters.
+ * Malformed escapes fall back to the raw segment rather than throwing. */
+function safeDecode(s: string): string {
+  try { return decodeURIComponent(s); } catch { return s; }
+}
 
 function cacheable(req: Request): boolean {
   return req.method === "GET"
@@ -203,18 +210,53 @@ export default {
       return cachedPage(url, req, () => homePage(env, ctx));
     }
     // Human surfaces — SSR pages over the feed/mirror/claim APIs.
+    // Pretty paths: record/mirror ids contain '/', '#', ':' so they travel
+    // percent-encoded as a single segment (%2F survives in pathname).
     if (pathname === "/bounties") {
       return cachedPage(url, req, () => bountiesPage(env, ctx));
     }
-    if (pathname === "/bounty") {
+    if (pathname.startsWith("/bounties/")) {
+      const id = safeDecode(pathname.slice("/bounties/".length));
+      if (!id) return bad("id required", 400);
+      return cachedPage(url, req, () => bountyPage(env, ctx, id));
+    }
+    if (pathname === "/bounty" || pathname === "/bounty/") {
       const id = url.searchParams.get("id") ?? "";
       if (!id) return bad("id required", 400);
       return cachedPage(url, req, () => bountyPage(env, ctx, id));
+    }
+    if (pathname === "/bounty.md" || pathname === "/bounty.md/") {
+      const id = url.searchParams.get("id") ?? "";
+      if (!id) return bad("id required", 400);
+      return cachedPage(url, req, () => bountyMarkdown(env, ctx, id));
+    }
+    if (pathname.startsWith("/fund/")) {
+      const id = safeDecode(pathname.slice("/fund/".length));
+      if (!id) return bad("id required", 400);
+      return cachedPage(url, req, () => fundPage(env, ctx, id));
     }
     if (pathname === "/fund") {
       const id = url.searchParams.get("id") ?? "";
       if (!id) return bad("id required", 400);
       return cachedPage(url, req, () => fundPage(env, ctx, id));
+    }
+    if (pathname.startsWith("/receipts/m/")) {
+      // /receipts/m/<mirrorId>/<claimHash> — mirror ids stay one encoded
+      // segment; the claim hash is the final segment.
+      const rest = pathname.slice("/receipts/m/".length).split("/");
+      const claimHash = safeDecode(rest.pop() ?? "");
+      const mirrorId = safeDecode(rest.join("/"));
+      if (!mirrorId || !claimHash) return bad("mirror and claim required", 400);
+      return cachedPage(url, req, () => receiptPage(env, mirrorId, claimHash, null, null));
+    }
+    if (pathname.startsWith("/receipts/r/")) {
+      // /receipts/r/<owner>/<repo>/<seq> — repo path segments are real slashes.
+      const rest = pathname.slice("/receipts/r/".length).split("/");
+      const seqRaw = rest.pop() ?? "";
+      const repo = rest.join("/");
+      const seq = Number(seqRaw);
+      if (!repo || !Number.isFinite(seq)) return bad("repo and seq required", 400);
+      return cachedPage(url, req, () => receiptPage(env, null, null, repo, seq));
     }
     if (pathname === "/receipt") {
       const mirrorId = url.searchParams.get("mirror");
@@ -226,10 +268,12 @@ export default {
         receiptPage(env, mirrorId, claimHash, repo, Number.isFinite(seq) ? seq : null));
     }
     if (pathname === "/docs") return docsPage();
-    // Ops dashboard — the claim→evidence→verdict→payout console. Moved off
-    // "/" when the market home shipped; same auth posture as before.
+    // Ops dashboard — the claim→evidence→verdict→payout console. Gated like
+    // the other admin surfaces: open when ADMIN_TOKEN is unset (dev/testnet),
+    // Bearer-required once configured.
     if (pathname === "/ops" || pathname === "/dashboard") {
-      return new Response(DASHBOARD_HTML, {
+      if (!isAuthorized(req, env)) return bad("unauthorized", 401);
+      return new Response(OPS_HTML, {
         headers: { "content-type": "text/html; charset=utf-8" },
       });
     }

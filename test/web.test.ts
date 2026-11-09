@@ -4,7 +4,7 @@ import type { FeedDoc, FeedRecord, MirrorListing, Env } from "../src/types";
 const feedDocMock = vi.fn();
 vi.mock("../src/feed", () => ({ feedDoc: (...a: unknown[]) => feedDocMock(...a) }));
 
-import { homePage, bountiesPage, bountyPage, fundPage, docsPage } from "../src/web/pages";
+import { homePage, bountiesPage, bountyPage, fundPage, docsPage, bountyMarkdown } from "../src/web/pages";
 
 const record = (over: Partial<FeedRecord>): FeedRecord => ({
   id: "github-thirdparty:generic:o/r#1", source: "github-thirdparty:generic",
@@ -73,6 +73,16 @@ describe("web pages", () => {
     const t = await (await fundPage(env, undefined, "mirror:x")).text();
     expect(t).toContain("Funding status");
     expect(t).toContain("NEAR escrow");
+  });
+
+  it("bounty markdown twin renders agent-readable fields", async () => {
+    const res = await bountyMarkdown(env, undefined, "mirror:github-thirdparty:generic:o/r#1");
+    const t = await res.text();
+    expect(res.headers.get("content-type")).toContain("text/markdown");
+    expect(t).toContain("# Fix the parser bug");
+    expect(t).toContain("mirror_id");
+    expect(t).toContain("POST /api/mirrors/claims");
+    expect(t).toContain("platform cut");
   });
 
   it("docs page covers feed surfaces + standards status", async () => {
