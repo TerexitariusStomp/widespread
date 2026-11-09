@@ -38,7 +38,7 @@ export interface FunctionCallSpec {
 }
 
 const rpcUrl = (env: { NEAR_RPC_URL?: string }) =>
-  env.NEAR_RPC_URL ?? "https://rpc.testnet.near.org";
+  env.NEAR_RPC_URL ?? "https://near-testnet.drpc.org";
 
 /** Single-attempt provider — the old hand-rolled client never retried,
  * and the escrow reconciler depends on fast failure over silent retries. */
@@ -97,15 +97,18 @@ export async function nearFunctionCall(
     "monotonic",
   );
   const { signedTransaction } = await signer.signTransaction(tx);
-  const res = await rpc.sendTransactionUntil(signedTransaction, "FINAL");
-  // FinalExecutionOutcomeView carries `status`; the WithReceipt variant
-  // carries `receipts_outcome` — the escrow reconciler inspects either.
-  const outcome = res as unknown as {
+  // wait_until FINAL long-polls past public gateway limits (dRPC 408s);
+  // EXECUTED_OPTIMISTIC returns the receipts outcome as soon as the tx
+  // executes — all the reconciler needs, without a held connection.
+  const res = (await rpc.sendTransactionUntil(
+    signedTransaction, "EXECUTED_OPTIMISTIC",
+  )) as unknown as {
+    transaction?: { hash?: string };
     receipts_outcome?: { outcome?: { status?: unknown } }[];
     status?: unknown;
   };
   const status =
-    outcome.receipts_outcome?.map((r) => r?.outcome?.status ?? r) ?? outcome.status ?? res;
+    res.receipts_outcome?.map((r) => r?.outcome?.status ?? r) ?? res.status ?? res;
   return { txHash: res.transaction?.hash ?? "", status };
 }
 

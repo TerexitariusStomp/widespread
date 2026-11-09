@@ -19,7 +19,7 @@ const wasm = readFileSync(WASM);
 
 const cfg = {
   networkId: "testnet",
-  nodeUrl: process.env.NEAR_NODE_URL || "https://rpc.testnet.near.org",
+  nodeUrl: process.env.NEAR_NODE_URL || "https://near-testnet.drpc.org",
   walletUrl: "https://testnet.mynearwallet.com/",
   helperUrl: "https://helper.testnet.near.org",
 };

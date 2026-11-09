@@ -15,7 +15,7 @@ import { Account, KeyPair, KeyPairSigner } from "near-api-js";
 
 const LIVE = process.env.E2E_LIVE === "1";
 const CREDS = path.join(os.homedir(), ".widespread-near.json");
-const NODE = "https://rpc.testnet.near.org";
+const NODE = "https://near-testnet.drpc.org";
 
 function loadAccount() {
   if (!existsSync(CREDS)) throw new Error(`no creds at ${CREDS} — run contracts/market/deploy.js first`);

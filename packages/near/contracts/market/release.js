@@ -10,7 +10,7 @@ import os from "os"; import path from "path";
 import crypto from "crypto";
 
 const c = JSON.parse(readFileSync(path.join(os.homedir(), ".widespread-near.json")));
-const account = new Account(c.accountId, "https://rpc.testnet.near.org",
+const account = new Account(c.accountId, "https://near-testnet.drpc.org",
                             new KeyPairSigner(KeyPair.fromString(c.secretKey)));
 const [cmd, ...rest] = process.argv.slice(2);
 
@@ -22,7 +22,7 @@ async function call(methodName, args, deposit = "0") {
 }
 
 async function view(methodName, args = {}) {
-  const r = await fetch("https://rpc.testnet.near.org", {
+  const r = await fetch("https://near-testnet.drpc.org", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: "w", method: "query",
       params: { request_type: "call_function", finality: "final",

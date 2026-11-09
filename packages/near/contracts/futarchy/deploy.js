@@ -18,7 +18,7 @@ if (!existsSync(WASM)) {
 const wasm = readFileSync(WASM);
 
 const cfg = {
-  nodeUrl: process.env.NEAR_NODE_URL || "https://rpc.testnet.near.org",
+  nodeUrl: process.env.NEAR_NODE_URL || "https://near-testnet.drpc.org",
   helperUrl: "https://helper.testnet.near.org",
 };
 

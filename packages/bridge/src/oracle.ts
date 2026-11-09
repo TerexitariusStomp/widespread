@@ -58,7 +58,7 @@ export function oracleEnv(env: {
   }
   return {
     contract: env.NEAR_CONTRACT,
-    rpc: env.NEAR_RPC_URL ?? "https://rpc.testnet.near.org",
+    rpc: env.NEAR_RPC_URL ?? "https://near-testnet.drpc.org",
     accountId: env.ORACLE_ACCOUNT ?? "",
     secretKey: env.ORACLE_SECRET_KEY ?? "",
     oracleKeyHex: env.ORACLE_SEED_HEX,

@@ -5,7 +5,7 @@ export async function nearView(
   method: string,
   args: object
 ): Promise<unknown> {
-  const rpc = env.NEAR_RPC_URL ?? "https://rpc.testnet.near.org";
+  const rpc = env.NEAR_RPC_URL ?? "https://near-testnet.drpc.org";
   const res = await fetch(rpc, {
     method: "POST",
     headers: { "content-type": "application/json" },

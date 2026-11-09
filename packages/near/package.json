@@ -9,11 +9,16 @@
     "deploy": "cd contracts/market && node deploy.js",
     "deploy:hats": "cd contracts/hats && node deploy.js",
     "deploy:futarchy": "cd contracts/futarchy && node deploy.js",
-    "test": "node --test test/*.test.mjs"
+    "test": "NEAR_WORKSPACES_NO_LOGS=1 node --test test/*.test.mjs"
   },
   "dependencies": {
     "esbuild": "^0.24.0",
     "near-api-js": "^7.4.0",
     "near-sdk-js": "^2.0.0"
+  },
+  "devDependencies": {
+    "@babel/plugin-proposal-decorators": "^8.0.2",
+    "@babel/preset-typescript": "^8.0.7",
+    "near-workspaces": "5.0.0"
   }
 }
