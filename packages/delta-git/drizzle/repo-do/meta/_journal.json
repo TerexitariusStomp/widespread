@@ -5,8 +5,92 @@
     {
       "idx": 0,
       "version": "6",
-      "when": 1794197080521,
-      "tag": "0000_youthful_ronan",
+      "when": 1758232042203,
+      "tag": "0000_natural_lyja",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1758273951790,
+      "tag": "0001_icy_ulik",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1774747531891,
+      "tag": "0002_ambiguous_ares",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1775310305206,
+      "tag": "0003_abandoned_whirlwind",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1791077331352,
+      "tag": "0004_modern_exodus",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1791138908746,
+      "tag": "0005_pretty_valkyrie",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1791174819912,
+      "tag": "0006_harsh_mongu",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1791177525406,
+      "tag": "0007_careful_shaman",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1791311240838,
+      "tag": "0008_unknown_spencer_smythe",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1791312804197,
+      "tag": "0009_icy_red_ghost",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1791313772132,
+      "tag": "0010_hard_gauntlet",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1791314766308,
+      "tag": "0011_vengeful_quentin_quire",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1791742307931,
+      "tag": "0012_slippery_demogoblin",
       "breakpoints": true
     }
   ]
