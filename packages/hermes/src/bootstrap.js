@@ -1,0 +1,1521 @@
+/**
+ * bootstrap.js — runs BEFORE the vendored Hermes dist-webapp bundle.
+ *
+ * Installs the __HERMES_* globals the upstream browser bridge reads, then
+ * replaces window.fetch and window.WebSocket so every same-origin /api/*
+ * call is served by the in-page Pyodide backend worker. The vendored
+ * renderer is byte-identical to upstream.
+ *
+ * Transport: coincident (MIT) — synchronous worker->page proxy calls over
+ * SharedArrayBuffer + Atomics. Python parks inside proxy.pullInbound(ms)
+ * until the page hands over buffered inbound frames; worker->page events
+ * remain plain postMessage (fire-and-forget is fine in that direction).
+ */
+(function () {
+  'use strict'
+
+  var BASE_PATH = ''
+  var origin = window.location.origin
+
+  // --- 1. Hermes webapp bootstrap globals -------------------------------
+  window.__HERMES_UI_SURFACE__ = 'webapp'
+  window.__HERMES_BASE_PATH__ = BASE_PATH
+  window.__HERMES_AUTH_REQUIRED__ = false
+
+  var sessionKey = 'hermes.webapp.session.v1:' + JSON.stringify([origin, BASE_PATH])
+  var sessionToken
+  try {
+    sessionToken = sessionStorage.getItem(sessionKey)
+    if (!sessionToken || !/^[A-Za-z0-9_-]{43}$/.test(sessionToken)) {
+      var bytes = new Uint8Array(32)
+      crypto.getRandomValues(bytes)
+      sessionToken = btoa(String.fromCharCode.apply(null, bytes))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '').slice(0, 43)
+      sessionStorage.setItem(sessionKey, sessionToken)
+    }
+  } catch (e) {
+    sessionToken = 'x'.repeat(43)
+  }
+
+  // --- 1b. window.hermesDesktop connection-config patch ------------------
+  // The vendored webapp installs its own browser-hosted bridge at module
+  // load. Upstream's bridge throws "Gateway reconfiguration is not available
+  // in the browser-hosted Desktop" on every connection-config write and
+  // reports probes unreachable — so Settings → Gateway can neither save nor
+  // point anywhere. We capture the assignment via a property setter and
+  // patch ONLY the connection-config surface: saves persist to localStorage
+  // (works on every browser incl. old Chrome/Safari — no OPFS or OS keychain
+  // needed) and secrets go to the vault. The in-browser backend keeps
+  // serving /api/* regardless of the configured endpoint — this build never
+  // dials a remote gateway, so "apply" is a persist, not a redial.
+  var CONN_CFG_KEY = 'hermes.connectionConfig'
+  var HOME_FILE_KEY = 'hermes.home:'
+
+  function connCfgRead() {
+    try { return JSON.parse(localStorage.getItem(CONN_CFG_KEY) || '{}') || {} }
+    catch (e) { return {} }
+  }
+
+  function connCfgProfileKey(profile) {
+    return String(profile || '').trim() || 'default'
+  }
+
+  function connCfgView(rec, base) {
+    base = base || {}
+    return {
+      cloudOrg: rec.cloudOrg || '',
+      envOverride: false,
+      mode: rec.mode || 'local',
+      profile: rec.profile || null,
+      remoteAuthMode: rec.remoteAuthMode || 'token',
+      remoteOauthConnected: !!rec.remoteOauthConnected,
+      remoteTokenPlainText: false,
+      remoteTokenPreview: rec.remoteTokenPreview || null,
+      remoteTokenSet: !!rec.remoteTokenSet,
+      remoteUrl: rec.remoteUrl || base.remoteUrl || origin,
+      secureTokenStorage: true, // tokens live in the vault, not plain files
+      sshHost: rec.sshHost || '',
+      sshKeyPath: rec.sshKeyPath || '',
+      sshPort: rec.sshPort || null,
+      sshRemoteHermesPath: rec.sshRemoteHermesPath || '',
+      sshRemoteProfile: rec.sshRemoteProfile || '',
+      sshUser: rec.sshUser || '',
+    }
+  }
+
+  function connCfgSave(payload) {
+    payload = payload || {}
+    var all = connCfgRead()
+    var key = connCfgProfileKey(payload.profile)
+    var prev = all[key] || {}
+    var pick = function (name) {
+      return payload[name] !== undefined ? payload[name] : (prev[name] || '')
+    }
+    var rec = {
+      cloudOrg: pick('cloudOrg'),
+      mode: payload.mode || prev.mode || 'local',
+      profile: payload.profile || null,
+      remoteAuthMode: pick('remoteAuthMode') || 'token',
+      remoteOauthConnected: prev.remoteOauthConnected,
+      remoteTokenHandle: prev.remoteTokenHandle,
+      remoteTokenPreview: prev.remoteTokenPreview,
+      remoteTokenSet: prev.remoteTokenSet,
+      remoteUrl: pick('remoteUrl'),
+      sshHost: pick('sshHost'),
+      sshKeyPath: pick('sshKeyPath'),
+      sshPort: payload.sshPort !== undefined ? payload.sshPort : (prev.sshPort || null),
+      sshRemoteHermesPath: pick('sshRemoteHermesPath'),
+      sshRemoteProfile: pick('sshRemoteProfile'),
+      sshUser: pick('sshUser'),
+    }
+    var finish = function (handle) {
+      if (handle) {
+        rec.remoteTokenHandle = handle
+        rec.remoteTokenSet = true
+        var t = String(payload.remoteToken)
+        rec.remoteTokenPreview = t.slice(0, 3) + '…' + t.slice(-4)
+      }
+      all[key] = rec
+      try { localStorage.setItem(CONN_CFG_KEY, JSON.stringify(all)) }
+      catch (e) { console.warn('[hermes-web] connection config persist failed:', e) }
+      return connCfgView(rec)
+    }
+    // A raw token is a secret: vault it like every other credential write;
+    // only the vault:<handle> + a masked preview reach localStorage.
+    if (typeof payload.remoteToken === 'string' && payload.remoteToken) {
+      return vaultCall('storeSecret', {
+        value: payload.remoteToken, label: 'connection.remoteToken:' + key,
+      }).then(function (resp) {
+        return finish(resp && resp.handle ? 'vault:' + resp.handle : '')
+      }).catch(function () { return finish('') })
+    }
+    if (payload.mode && payload.mode !== 'remote') {
+      rec.remoteTokenSet = false
+      rec.remoteTokenPreview = null
+      rec.remoteTokenHandle = ''
+      rec.remoteOauthConnected = false
+    }
+    return Promise.resolve(finish(''))
+  }
+
+  function sameOriginUrl(u) {
+    try { return new URL(String(u || ''), origin).origin === origin }
+    catch (e) { return false }
+  }
+
+  var REMOTE_UNAVAILABLE =
+    'Remote gateways are unavailable in this in-browser build — ' +
+    'the backend runs on this device.'
+
+  function patchHermesDesktop(b) {
+    if (!b || typeof b !== 'object') return b
+    var origGet = b.getConnectionConfig
+    var origTest = b.testConnectionConfig
+    b.saveConnectionConfig = connCfgSave
+    b.applyConnectionConfig = connCfgSave
+    b.getConnectionConfig = function (profile) {
+      var baseP = origGet ? origGet(profile) : Promise.resolve({})
+      return Promise.resolve(baseP).catch(function () { return {} }).then(function (base) {
+        var rec = connCfgRead()[connCfgProfileKey(profile)]
+        return rec ? connCfgView(rec, base) : base
+      })
+    }
+    b.probeConnectionConfig = function (remoteUrl) {
+      var baseUrl = String(remoteUrl || '')
+      var u
+      try { u = new URL(baseUrl, origin) } catch (e) {
+        return Promise.resolve({
+          authMode: 'unknown', baseUrl: baseUrl, error: 'Invalid URL',
+          providers: [], reachable: false, version: null,
+        })
+      }
+      if (u.origin !== origin) {
+        return Promise.resolve({
+          authMode: 'unknown', baseUrl: u.href, error: REMOTE_UNAVAILABLE,
+          providers: [], reachable: false, version: null,
+        })
+      }
+      // Probe the live in-browser gateway for real — the fetch shim routes
+      // same-origin /api/* to the backend worker.
+      return window.fetch('/api/status', {
+        headers: { 'x-hermes-session-token': sessionToken },
+      }).then(function (resp) {
+        return {
+          authMode: 'token', baseUrl: origin + (BASE_PATH || ''),
+          error: resp.ok ? null : ('Gateway answered ' + resp.status),
+          providers: [], reachable: resp.ok, version: null,
+        }
+      }).catch(function (e) {
+        return {
+          authMode: 'token', baseUrl: origin + (BASE_PATH || ''),
+          error: String(e), providers: [], reachable: false, version: null,
+        }
+      })
+    }
+    b.testConnectionConfig = function (payload) {
+      if (payload && payload.mode === 'remote' && payload.remoteUrl &&
+          !sameOriginUrl(payload.remoteUrl)) {
+        return Promise.resolve({
+          baseUrl: String(payload.remoteUrl), error: REMOTE_UNAVAILABLE,
+          ok: false, reachable: false, version: null,
+        })
+      }
+      if (origTest) return origTest(payload)
+      return Promise.resolve({ baseUrl: origin, ok: true, reachable: true, version: null })
+    }
+    return b
+  }
+
+  try {
+    var _hermesDesktopValue
+    Object.defineProperty(window, 'hermesDesktop', {
+      configurable: true,
+      enumerable: true,
+      get: function () { return _hermesDesktopValue },
+      set: function (v) { _hermesDesktopValue = patchHermesDesktop(v) },
+    })
+  } catch (e) { /* ancient engines keep the stock bridge */ }
+
+  // Mirrored ~/.hermes config files (see backend-worker.mjs): on browsers
+  // without OPFS sync-access (old Chrome, old macOS Safari) the Pyodide home
+  // is MEMFS — the worker ships every small config write here and it lands
+  // in localStorage, then ships back in the next boot message.
+  function collectHomeFiles() {
+    var out = []
+    try {
+      for (var i = 0; i < localStorage.length; i++) {
+        var k = localStorage.key(i)
+        if (k && k.indexOf(HOME_FILE_KEY) === 0) {
+          out.push({ path: k.slice(HOME_FILE_KEY.length), b64: localStorage.getItem(k) })
+        }
+      }
+    } catch (e) {}
+    return out
+  }
+
+  // --- 2. Inbound frame buffer to the backend worker ---------------------
+  // The worker pulls: its pump is a sync proxy.pullInbound(ms) call that
+  // parks until frames exist or the timeout elapses, then resolves with
+  // the drained array (JSON strings — py_gateway.handle parses each).
+  var inbound = []
+  var pullWaiter = null
+
+  // The frontend sends `gateway.ping` JSON-RPC frames every ~15s and kills
+  // the socket when no response lands inside its liveness deadline (~45s).
+  // Upstream answers inside handle_ws on the cooperative loop — but a turn
+  // parks the interpreter inside a synchronous proxy fetch for the whole
+  // generation, so a ping sent mid-turn waits page-side far past that
+  // deadline. The transport (this page <-> worker channel) is what the
+  // heartbeat actually measures, so ack it here. The frame still queues
+  // for the backend: upstream's activity accounting sees it when it
+  // drains, and its id-keyed reply is dropped client-side as a consumed
+  // id — JSON-RPC semantics stay intact.
+  function maybeAckGatewayPing(msg) {
+    var data = msg.data
+    if (typeof data !== 'string' || data.indexOf('ping') === -1) return
+    var req
+    try { req = JSON.parse(data) } catch (e) { return }
+    // Both are upstream's transport-liveness methods, documented as
+    // answered on the WS reader thread even mid-turn — which the
+    // cooperative runtime cannot do, so the page answers for it.
+    var result = req && req.method === 'gateway.ping' ? { ok: true }
+      : req && req.method === 'ping' ? { pong: true }
+      : null
+    if (result === null || req.id === undefined || req.id === null) return
+    var reply = JSON.stringify({ jsonrpc: '2.0', result: result, id: req.id })
+    var cid = remoteSocks[msg.id]
+    if (cid !== undefined) {
+      // Remote client through the share relay — shareSend handles the
+      // e2e ciphertext envelope for /api/e2e-ws channels.
+      shareSend({ t: 'ws-msg', cid: cid, data: reply })
+      return
+    }
+    var sock = sockets[msg.id]
+    if (sock) {
+      sock._onWorkerEvent({ type: 'ws-event', id: msg.id, event: 'message', data: reply })
+    }
+  }
+
+  function postToWorker(msg) {
+    inbound.push(msg)
+    if (msg.t === 'ws-send') maybeAckGatewayPing(msg)
+    if (pullWaiter) {
+      var r = pullWaiter
+      pullWaiter = null
+      r()
+    }
+  }
+
+  // --- 3. Vault boundary ------------------------------------------------
+  // Secrets the user enters (model.save_key etc.) are intercepted BEFORE the
+  // backend worker sees them: the raw value goes to the vault worker, and
+  // the .env/config write carries only a `vault:<handle>` placeholder.
+  // Outbound fetches resolving `vault:` placeholders go through the same
+  // worker — key material never enters the Pyodide heap or page JS.
+
+  var vaultWorkerPromise = null
+
+  function vaultCall(op, payload) {
+    // Lazily construct the coincident worker — the same dynamic import that
+    // loads the backend's transport class.
+    if (!vaultWorkerPromise) {
+      vaultWorkerPromise = import('./vendor/coincident-main.js').then(function (mod) {
+        return new (mod.default().Worker)('./vault-worker.mjs', { type: 'module' })
+      })
+      vaultWorkerPromise.catch(function (e) {
+        console.error('[vault] worker init failed: ' + e)
+        vaultWorkerPromise = null
+      })
+    }
+    return vaultWorkerPromise.then(function (w) {
+      return withTimeout(w.proxy.call(op, payload || {}), 15000, 'vault ' + op)
+    })
+  }
+
+  var SECRET_WRITE_METHODS = {
+    'model.save_key': ['api_key'],
+    'model.save_credential': ['key', 'secret', 'api_key'],
+    'config.set_secret': ['value'],
+    'connectors.connect': ['token', 'api_key', 'secret'],
+  }
+
+  async function vaultResolveHeaders(headers, grant) {
+    // Replace any `vault:<handle>` header values with the real secret.
+    // `grant` is the broker grant of the session that originated the request;
+    // the worker fails fast on handles outside its scope (remote sub-grants).
+    var out = {}
+    for (var k in headers) {
+      var v = headers[k]
+      if (typeof v === 'string' && v.indexOf('vault:') !== -1) {
+        var resp = await vaultCall('resolveHeader', { value: v, grant: grant || undefined })
+        if (resp && resp.error) throw new Error(resp.error)
+        out[k] = (resp && resp.value) || v
+      } else {
+        out[k] = v
+      }
+    }
+    return out
+  }
+
+  // --- 4. Backend worker --------------------------------------------------
+  // coincident wraps Worker: worker code calls proxy.<fn> synchronously;
+  // we register the handlers here. `native` false means no cross-origin
+  // isolation — the backend cannot park, so boot fails loudly instead of
+  // hanging.
+  var CoWorker = null       // coincident's Worker class (module import below)
+  var worker = null
+  var bootReady = false
+  var bootWaiters = []
+
+  var pendingFetch = {}
+  var sockets = {}
+  var nextId = 1
+
+  // --- Share-as-gateway: remote session state ----------------------------
+  // A remote client (Desktop pointed at baseUrl+token, curl) arrives through
+  // the relay as multiplexed frames. Each remote ws client gets a local
+  // socket id in the same numeric space; each remote REST call a local fetch
+  // id. Worker->page replies for those ids route back to the relay instead
+  // of resolving a page-side promise.
+  var share = null
+  var remoteRest = {}     // localFetchId -> relay request id
+  var remoteSocks = {}    // localSocketId -> cid
+  var remoteByCid = {}    // cid -> localSocketId
+  var rpcMethods = {}     // 'sockId:rpcId' -> method (for session.create results)
+
+  // Mint a broker grant for a freshly created agent session, then bind it
+  // worker-side so fetches on `prompt-turn-<sid>` carry the grant id.
+  // Sessions are separate key domains: local sessions parent to the shared
+  // grant (inheriting secrets written outside a session context), remote
+  // sessions parent to the share broker grant — never the shared tier. A
+  // secret written inside a session is added to that session's grant only.
+  var sessionGrants = {}    // session_id -> grant id
+  var sockGrants = {}       // socketId -> grant id (that socket's session)
+  var sharedGrantPromise = null
+
+  function sharedGrant() {
+    if (!sharedGrantPromise) {
+      sharedGrantPromise = vaultCall('createGrant', { kind: 'shared', handles: [] })
+        .then(function (r) { return (r && r.grant) || null })
+      sharedGrantPromise.catch(function () { sharedGrantPromise = null })
+    }
+    return sharedGrantPromise
+  }
+
+  function bindSessionGrant(sid, isRemote, sockId) {
+    var specP = isRemote
+      ? Promise.resolve({ kind: 'remote', session_id: sid, parent: share && share.grant || null, handles: [] })
+      : sharedGrant().then(function (sg) {
+          return { kind: 'session', session_id: sid, parent: sg, handles: [] }
+        })
+    specP.then(function (spec) {
+      if (!spec) return
+      return vaultCall('createGrant', spec).then(function (r) {
+        if (r && r.grant) {
+          sessionGrants[sid] = r.grant
+          if (sockId !== undefined) sockGrants[sockId] = r.grant
+          postToWorker({ t: 'grant-bind', session: sid, grant: r.grant })
+        }
+      })
+    })
+  }
+
+  // Inspect an inbound JSON-RPC response for a session.create result.
+  function maybeBindSession(sockId, data) {
+    var m
+    try { m = JSON.parse(data) } catch (e) { return }
+    if (m.id === undefined) return
+    var method = rpcMethods[sockId + ':' + m.id]
+    delete rpcMethods[sockId + ':' + m.id]
+    if (method === 'session.create' && m.result && m.result.session_id) {
+      bindSessionGrant(m.result.session_id, remoteSocks[sockId] !== undefined, sockId)
+    }
+  }
+
+  function trackRpcMethod(sockId, data) {
+    var m
+    try { m = JSON.parse(data) } catch (e) { return }
+    if (m.method !== undefined && m.id !== undefined) {
+      rpcMethods[sockId + ':' + m.id] = m.method
+    }
+  }
+
+  function onWorkerMessage(ev) {
+    var msg = ev.data
+    if (msg.type === 'fetch-response' && remoteRest[msg.id] !== undefined) {
+      var rr = remoteRest[msg.id]
+      delete remoteRest[msg.id]
+      // E2E entries hold {id, e2e}; plaintext entries hold the bare relay id.
+      var rid = typeof rr === 'object' ? rr.id : rr
+      if (rr && rr.e2e && share && share.key) {
+        e2eEncrypt(share.key, JSON.stringify({
+          status: msg.status, headers: msg.headers, bodyB64: msg.bodyB64,
+        })).then(function (ct) {
+          // Real status/headers ride inside the ciphertext; the visible
+          // envelope is a constant 200/octet-stream so the DO can't even
+          // glean response codes.
+          shareSend({
+            t: 'rest-res', id: rid, status: 200,
+            headers: { 'content-type': 'application/octet-stream' },
+            bodyB64: ct,
+          })
+        })
+        return
+      }
+      shareSend({ t: 'rest-res', id: rid, status: msg.status, headers: msg.headers, bodyB64: msg.bodyB64 })
+      return
+    }
+    if (msg.type === 'ws-event' && remoteSocks[msg.id] !== undefined) {
+      var cid = remoteSocks[msg.id]
+      if (msg.event === 'open') {
+        shareSend({ t: 'ws-opened', cid: cid })
+      } else if (msg.event === 'message') {
+        maybeBindSession(msg.id, msg.data)
+        shareSend({ t: 'ws-msg', cid: cid, data: msg.data })
+      } else if (msg.event === 'close' || msg.event === 'error') {
+        shareSend({ t: 'ws-close', cid: cid, code: msg.code || 1000, reason: msg.reason || '' })
+        delete remoteSocks[msg.id]
+        if (remoteByCid[cid] === msg.id) delete remoteByCid[cid]
+      }
+      return
+    }
+    if (msg.type === 'fetch-response' && pendingFetch[msg.id]) {
+      var p = pendingFetch[msg.id]
+      delete pendingFetch[msg.id]
+      var bodyBytes = null
+      if (msg.bodyB64) {
+        var bin = atob(msg.bodyB64)
+        bodyBytes = new Uint8Array(bin.length)
+        for (var i = 0; i < bin.length; i++) bodyBytes[i] = bin.charCodeAt(i)
+      }
+      p.resolve(new Response(bodyBytes, { status: msg.status, headers: msg.headers }))
+    } else if (msg.type === 'ws-event' && sockets[msg.id]) {
+      sockets[msg.id]._onWorkerEvent(msg)
+    } else if (msg.type === 'log') {
+      (msg.stream === 'err' ? console.warn : console.log)('[backend]', msg.text)
+    } else if (msg.type === 'boot-ready') {
+      bootReady = true
+      window.__HERMES_BACKEND_READY__ = true
+      bootWaiters.splice(0).forEach(function (f) { f() })
+    } else if (msg.type === 'boot-failed') {
+      console.error('[hermes-web] backend boot failed:', msg.error)
+    }
+  }
+
+  // coincident proxy handlers — the worker's synchronous calls land here
+  // and the returned promise's resolution is handed back on the parked
+  // thread. Each mirrors an old net-request/substrate-request/... message.
+  function registerProxyHandlers(w) {
+    w.proxy.pullInbound = function (ms) {
+      return new Promise(function (resolve) {
+        var drain = function () {
+          pullWaiter = null
+          resolve(inbound.splice(0).map(JSON.stringify))
+        }
+        if (inbound.length) return drain()
+        pullWaiter = drain
+        if (ms > 0 && ms < 2147483647) {
+          setTimeout(function () {
+            if (pullWaiter === drain) drain()
+          }, ms)
+        }
+      })
+    }
+    w.proxy.fetchRequest = function (url, method, headersJson, bodyB64, grant) {
+      return fetchRequestDirect(url, method, headersJson, bodyB64, grant)
+    }
+    w.proxy.substrateRequest = function (op, argsJson) {
+      return withTimeout(substrateCall(op, JSON.parse(argsJson || '{}')),
+        100000, 'substrate')
+    }
+    w.proxy.wasiRequest = function (op, argsJson) {
+      return withTimeout(wasiCall(op, JSON.parse(argsJson || '{}')), 60000, 'wasi')
+    }
+    w.proxy.pwaRequest = function (op, argsJson) {
+      return withTimeout(pwaHandle(op, JSON.parse(argsJson || '{}')), 60000, 'pwa')
+    }
+    w.proxy.hostRequest = function (op, argsJson) {
+      return withTimeout(hostHandle(op, JSON.parse(argsJson || '{}')), 60000, 'host')
+    }
+    w.proxy.nearRequest = function (op, argsJson, grant) {
+      return withTimeout(nearHandle(op, JSON.parse(argsJson || '{}'), grant),
+        120000, 'near')
+    }
+    w.proxy.persistFile = function (path, b64) {
+      // ~/.hermes config mirror — only small config files get mirrored
+      // (py_gateway whitelists); localStorage keeps them across reloads on
+      // browsers where OPFS can't.
+      try {
+        localStorage.setItem(HOME_FILE_KEY + String(path || ''), String(b64 || ''))
+        return { ok: true }
+      } catch (e) {
+        console.warn('[hermes-web] home mirror write failed:', e)
+        return { error: String(e) }
+      }
+    }
+  }
+
+  import('./vendor/coincident-main.js').then(function (mod) {
+    var co = mod.default()
+    CoWorker = co.Worker
+    var w = new CoWorker('./backend-worker.mjs', { type: 'module' })
+    registerProxyHandlers(w)
+    w.onmessage = onWorkerMessage
+    worker = w
+    worker.postMessage({
+      type: 'boot',
+      interruptSab: interruptSab,
+      pyodideUrl: './pyodide/',
+      pyZipUrl: './hermes-py.zip',
+      envZipUrl: './hermes-env.zip',
+      overlayManifestUrl: './overlay/manifest.json',
+      persistHome: true,
+      homeFiles: collectHomeFiles(),
+      sessionToken: sessionToken,
+      publicHost: window.location.hostname,
+      // Deploy-time non-secret config overlay (provider/model defaults for
+      // smoke tests and self-hosts) — deep-merged into config.yaml at boot.
+      extraConfigJson: window.__HERMES_EXTRA_CONFIG__ ||
+        localStorage.getItem('hermes.extraConfigJson') || '',
+      // Non-secret env passthrough for the backend worker (test pins like
+      // HERMES_TUI_TOOLSETS). Set via window.__HERMES_ENV__ or
+      // localStorage['hermes.env'] as JSON.
+      env: (function () {
+        try {
+          return window.__HERMES_ENV__ ||
+            JSON.parse(localStorage.getItem('hermes.env') || '{}')
+        } catch (e) { return {} }
+      })(),
+    })
+  }).catch(function (e) {
+    console.error('[hermes-web] transport init failed:', e)
+  })
+
+  // The backend's Python httpx transport asks the page to perform fetches so
+  // vault resolution happens outside the agent's heap.
+  // --- local model endpoint ----------------------------------------------
+  // `local-llm.hermes` never hits the network: requests route to the in-page
+  // wllama engine (local-llm.js, lazy-loaded). OpenAI-compatible surface so
+  // upstream's named-provider machinery drives it unchanged. No secrets
+  // involved — vault is bypassed by design (weights are public).
+  var LOCAL_LLM_HOST = 'local-llm.hermes'
+  var localLlmMod = null
+
+  // Worker-side timeout loops are gone (sync proxy calls return results
+  // directly), so page handlers impose the deadlines themselves.
+  function withTimeout(p, ms, label) {
+    return new Promise(function (resolve) {
+      var timer = setTimeout(function () {
+        resolve({ error: label + ' timeout' })
+      }, ms)
+      Promise.resolve(p).then(function (r) {
+        clearTimeout(timer)
+        resolve(r)
+      }, function (e) {
+        clearTimeout(timer)
+        resolve({ error: String(e).slice(0, 300) })
+      })
+    })
+  }
+
+  function localLlmFetch(url, method, bodyB64) {
+    var u = new URL(url)
+    var bodyText = ''
+    if (bodyB64) {
+      try {
+        var raw = Uint8Array.from(atob(bodyB64), function (c) { return c.charCodeAt(0) })
+        bodyText = new TextDecoder().decode(raw)
+      } catch (e) {}
+    }
+    var modP = localLlmMod
+      ? Promise.resolve(localLlmMod)
+      : import('./local-llm.js').then(function (m) { localLlmMod = m; return m })
+    console.log('[local-llm] ' + method + ' ' + u.pathname)
+    return modP.then(function (m) {
+      return m.handleRequest(u.pathname, method, bodyText)
+    }).then(function (r) {
+      var b = unescape(encodeURIComponent(r.body || ''))
+      return { status: r.status, headers: r.headers || {}, body: btoa(b) }
+    }).catch(function (e) {
+      console.log('[local-llm] ERR ' + String(e).slice(0, 200))
+      return { status: 500, headers: { 'content-type': 'application/json' },
+        body: btoa(JSON.stringify({ error: { message: String(e).slice(0, 300) } })) }
+    })
+  }
+
+  // --- PWA grant bridge ---------------------------------------------------
+  // Browser-native capability ops (notifications, FSA, mic, wake lock,
+  // periodic sync) run against the page's own APIs via pwa-bridge.js —
+  // fixed op vocabulary, no code crosses the boundary.
+  var pwaMod = null
+
+  function pwaHandle(op, args) {
+    var modP = pwaMod
+      ? Promise.resolve(pwaMod)
+      : import('./pwa-bridge.js').then(function (m) { pwaMod = m; return m })
+    return modP.then(function (m) {
+      return m.handle(op, args || {})
+    }).catch(function (e) {
+      return { error: String(e).slice(0, 300) }
+    })
+  }
+
+  // --- Local host substrate (P6/T3, opt-in) -------------------------------
+  // Fixed-op bridge to a companion host-agent.py the user runs on their own
+  // machine; the pairing token resolves via vault like provider secrets.
+  var hostMod = null
+
+  function hostHandle(op, args) {
+    var modP = hostMod
+      ? Promise.resolve(hostMod)
+      : import('./host-bridge.js').then(function (m) { hostMod = m; return m })
+    return modP.then(function (m) {
+      return m.handle(op, args || {}, {
+        vaultCall: vaultCall,
+        resolveHeaders: function (h) { return vaultResolveHeaders(h, '') },
+      })
+    }).catch(function (e) {
+      return { error: String(e).slice(0, 300) }
+    })
+  }
+
+  // --- NEAR substrate ------------------------------------------------------
+  // Fixed-op bridge (near-bridge.js): audited SDKs do the protocol work,
+  // the vault worker holds keys and enforces grant scope, the bridge
+  // enforces the owner's spending policy before any signature.
+  var nearMod = null
+
+  function nearHandle(op, args, grant) {
+    var modP = nearMod
+      ? Promise.resolve(nearMod)
+      : import('./near-bridge.js').then(function (m) { nearMod = m; return m })
+    return modP.then(function (m) {
+      return m.handle(op, args || {}, grant || '', {
+        vaultCall: vaultCall,
+        confirm: function (msg) { return Promise.resolve(window.confirm(msg)) },
+        resolveHeaders: function (h, g) { return vaultResolveHeaders(h, g || '') },
+      })
+    }).catch(function (e) {
+      return { error: String(e).slice(0, 300) }
+    })
+  }
+
+  function fetchRequestDirect(url, method, headersJson, bodyB64, grant) {
+    var headersIn = {}
+    try { headersIn = JSON.parse(headersJson || '{}') } catch (e) {}
+    try {
+      if (new URL(url).hostname === LOCAL_LLM_HOST) {
+        return localLlmFetch(url, method, bodyB64)
+      }
+      // Hosts that send no CORS headers (Nous Portal device auth,
+      // inference API) are routed through the allowlisted Cloudflare
+      // Worker proxy so browser fetch never hits CORS.
+      var CORS_PROXY_HOSTS = {
+        'portal.nousresearch.com': 1,
+        'inference-api.nousresearch.com': 1,
+        'welcome-api.nousresearch.com': 1,
+      }
+      var pu = new URL(url)
+      if (CORS_PROXY_HOSTS[pu.hostname]) {
+        url = CORS_PROXY + pu.hostname + pu.pathname + pu.search
+      }
+    } catch (e) {}
+    var urlTag = url.split('?')[0]
+    return withTimeout(
+      vaultResolveHeaders(headersIn, grant).then(function (headers) {
+        // Bare-browser fetch is subject to each provider's CORS header
+        // allowlist; headers outside it fail preflight. x-stainless-* are
+        // OpenAI-SDK build diagnostics with no request semantics; upstream's
+        // X-OpenRouter-Cache(-TTL) response-cache hints are absent from
+        // openrouter.ai's Access-Control-Allow-Headers (they degrade to
+        // uncached responses, the request still succeeds). Non-CORS-capable
+        // providers belong on the extension/native substrate instead.
+        var HOST_HEADER_DENY = {
+          'openrouter.ai': ['x-openrouter-cache', 'x-openrouter-cache-ttl'],
+        }
+        var hostDeny = null
+        try {
+          hostDeny = HOST_HEADER_DENY[new URL(url).hostname] || null
+        } catch (e) {}
+        Object.keys(headers).forEach(function (k) {
+          var kl = k.toLowerCase()
+          if (kl.indexOf('x-stainless-') === 0) delete headers[k]
+          else if (hostDeny && hostDeny.indexOf(kl) !== -1) delete headers[k]
+        })
+        var init = { method: method, headers: headers }
+        if (bodyB64) init.body = Uint8Array.from(atob(bodyB64), function (c) { return c.charCodeAt(0) })
+        console.log('[net] -> ' + method + ' ' + urlTag)
+        return realFetch(url, init).then(function (resp) {
+          console.log('[net] ' + method + ' ' + urlTag + ' -> ' + resp.status)
+          return resp.arrayBuffer().then(function (ab) {
+            var bytes = new Uint8Array(ab)
+            // Chunked base64: byte-at-a-time concat is O(n²) and a ~30MB
+            // catalog response wedges the page main thread for minutes.
+            var bin = ''
+            var CH = 0x8000
+            for (var i = 0; i < bytes.length; i += CH)
+              bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH))
+            var hs = {}
+            resp.headers.forEach(function (v, k) { hs[k] = v })
+            return { status: resp.status, headers: hs, body: btoa(bin) }
+          })
+        })
+      }).catch(function (e) {
+        console.log('[net] ' + method + ' ' + urlTag + ' -> ERR ' + String(e).slice(0, 120))
+        return { status: 599, headers: {}, body: '', error: String(e) }
+      }), 120000, 'fetch').then(function (r) {
+        if (r && r.error === 'fetch timeout') {
+          return { status: 599, headers: {}, body: '', error: 'fetch timeout' }
+        }
+        return r
+      })
+  }
+
+  // --- 5. fetch shim ------------------------------------------------------
+  var realFetch = window.fetch
+  // Allowlisted CORS proxy for hosts that send no ACAO (Nous Portal auth,
+  // inference API) — used by both the Python->page path and this shim.
+  // Default is the same-origin /proxy/ route served by dist/_worker.js on
+  // Pages (and scripts/serve.mjs in dev); deployments without it can point
+  // at a standalone worker via window.__HERMES_CORS_PROXY__ or
+  // localStorage['hermes.corsProxy'] (e.g. 'https://<worker>/proxy/').
+  var CORS_PROXY = window.__HERMES_CORS_PROXY__ ||
+    localStorage.getItem('hermes.corsProxy') || '/proxy/'
+  var CORS_PROXY_HOSTS = {
+    'portal.nousresearch.com': 1,
+    'inference-api.nousresearch.com': 1,
+    'welcome-api.nousresearch.com': 1,
+  }
+  window.fetch = function (input, init) {
+    var url
+    try {
+      var href = input instanceof Request ? input.url : String(input)
+      url = new URL(href, origin)
+    } catch (e) {
+      return realFetch.apply(this, arguments)
+    }
+    // CORS-deaf hosts (Nous Portal/inference) route through the allowlisted
+    // Cloudflare Worker proxy — covers renderer-originated calls, not just
+    // the Python->page fetchRequest path.
+    if (CORS_PROXY_HOSTS[url.hostname]) {
+      var proxied = CORS_PROXY + url.hostname + url.pathname + url.search
+      if (input instanceof Request) input = new Request(proxied, input)
+      else input = proxied
+      return realFetch.call(this, input, init)
+    }
+    if (url.origin !== origin || !url.pathname.startsWith('/api/')) {
+      return realFetch.apply(this, arguments)
+    }
+    var method = (init && init.method) || (input && input.method) || 'GET'
+    return new Promise(function (resolve, reject) {
+      var id = nextId++
+      pendingFetch[id] = { resolve: resolve, reject: reject }
+      var bodyPromise
+      if (init && init.body !== undefined && init.body !== null) {
+        if (typeof init.body === 'string') bodyPromise = Promise.resolve({ text: init.body })
+        else if (init.body instanceof Blob) {
+          bodyPromise = init.body.arrayBuffer().then(function (ab) {
+            var b = new Uint8Array(ab), s = ''
+            for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i])
+            return { b64: btoa(s), type: init.body.type }
+          })
+        } else bodyPromise = Promise.resolve({ text: String(init.body) })
+      } else if (input instanceof Request && input.method !== 'GET' && input.method !== 'HEAD') {
+        bodyPromise = input.arrayBuffer().then(function (ab) {
+          var b = new Uint8Array(ab), s = ''
+          for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i])
+          return { b64: btoa(s) }
+        })
+      } else bodyPromise = Promise.resolve(null)
+      bodyPromise.then(function (body) {
+        // A real browser request carries Host/Origin; the shim synthesizes
+        // them so the app's DNS-rebinding middleware sees the true surface.
+        // Headers may arrive as a Headers instance, a Request, a pair array,
+        // or a plain object — normalize through Headers, then flatten.
+        var hdrs = {}
+        var merge = function (h) {
+          if (!h) return
+          new Headers(h).forEach(function (v, k) { hdrs[k] = v })
+        }
+        merge(input instanceof Request ? input.headers : null)
+        merge(init && init.headers)
+        if (!hdrs.host) hdrs.host = url.host
+        // Ambient private-session auth — the same credential upstream injects
+        // into index.html. Callers that already set the header keep theirs.
+        if (!hdrs['x-hermes-session-token'] && !hdrs['authorization']) {
+          hdrs['x-hermes-session-token'] = sessionToken
+        }
+        postToWorker({
+          t: 'rest', id: id, method: method,
+          path: url.pathname + url.search,
+          headers: hdrs,
+          body: body,
+        })
+      }).catch(reject)
+    })
+  }
+
+  // --- 6. WebSocket shim --------------------------------------------------
+  var RealWebSocket = window.WebSocket
+
+  function LocalSocket(url, protocols) {
+    var u = new URL(url, origin)
+    this.url = url
+    this.readyState = 0
+    this.onopen = null; this.onmessage = null; this.onclose = null; this.onerror = null
+    this._id = nextId++
+    this._listeners = {}
+    this._queue = []
+    sockets[this._id] = this
+    var wsHeaders = { host: u.host, origin: window.location.origin }
+    if (protocols) {
+      wsHeaders['sec-websocket-protocol'] =
+        Array.isArray(protocols) ? protocols.join(', ') : String(protocols)
+    }
+    postToWorker({ t: 'ws-open', id: this._id, path: u.pathname + u.search, headers: wsHeaders })
+    this._path = u.pathname + u.search
+  }
+  LocalSocket.CONNECTING = 0; LocalSocket.OPEN = 1
+  LocalSocket.CLOSING = 2; LocalSocket.CLOSED = 3
+  LocalSocket.prototype = {
+    get CONNECTING() { return 0 }, get OPEN() { return 1 },
+    get CLOSING() { return 2 }, get CLOSED() { return 3 },
+    send: function (d) {
+      if (this.readyState === 0) { this._queue.push(d); return }
+      if (this.readyState !== 1) { throw new Error('WebSocket is not open') }
+      var self = this
+      trackRpcMethod(this._id, d)
+      // Intercept secret writes: strip the raw key, store via vault worker,
+      // forward only the vault: handle downstream.
+      var handled = maybeVaultWrite(d, this._id)
+      if (handled) {
+        handled.then(function (rewritten) {
+          if (rewritten) {
+            postToWorker({ t: 'ws-send', id: self._id, data: rewritten })
+          }
+        }).catch(function (e) { console.error('[vault] write chain failed: ' + e) })
+        return
+      }
+      postToWorker({ t: 'ws-send', id: this._id, data: d })
+    },
+    close: function (code, reason) {
+      if (this.readyState >= 2) return
+      this.readyState = 3
+      postToWorker({ t: 'ws-close', id: this._id, code: code, reason: reason })
+      this._fire('close', { code: code || 1000, reason: reason || '', wasClean: true })
+    },
+    addEventListener: function (t, f) { (this._listeners[t] = this._listeners[t] || []).push(f) },
+    removeEventListener: function (t, f) {
+      var l = this._listeners[t] || []
+      var i = l.indexOf(f); if (i >= 0) l.splice(i, 1)
+    },
+    _fire: function (t, ev) {
+      ev = ev || {}; ev.type = t; if (ev.target === undefined) ev.target = this
+      if (typeof this['on' + t] === 'function') this['on' + t](ev)
+      var l = this._listeners[t] || []
+      for (var i = 0; i < l.length; i++) l[i].call(this, ev)
+    },
+    _onWorkerEvent: function (msg) {
+      if (msg.event === 'open') {
+        this.readyState = 1
+        this._fire('open')
+        for (var i = 0; i < this._queue.length; i++) this.send(this._queue[i])
+        this._queue = []
+      } else if (msg.event === 'message') {
+        maybeBindSession(this._id, msg.data)
+        this._fire('message', { data: msg.data })
+      } else if (msg.event === 'close') {
+        this.readyState = 3
+        delete sockGrants[this._id]
+        delete sockets[this._id]
+        this._fire('close', { code: msg.code || 1000, reason: msg.reason || '', wasClean: true })
+      } else if (msg.event === 'error') {
+        this._fire('error', {})
+      }
+    },
+  }
+
+  function maybeVaultWrite(data, sockId) {
+    var parsed
+    try { parsed = JSON.parse(data) } catch (e) { return null }
+    var fields = parsed && SECRET_WRITE_METHODS[parsed.method]
+    if (!fields) return null
+    var copies = fields.filter(function (f) { return parsed.params && typeof parsed.params[f] === 'string' })
+    if (!copies.length) return null
+    var isRemote = sockId !== undefined && remoteSocks[sockId] !== undefined
+    // Attribute each stored handle to the writer's own session grant — the
+    // grant this socket's session.create minted, or the session named in
+    // params. A write with no session context falls to the shared tier
+    // locally (all local sessions inherit it) or the share broker grant
+    // remotely (all remote sub-grants inherit it — the old behavior).
+    var writerGrant =
+      (parsed.params && sessionGrants[parsed.params.session_id]) ||
+      sockGrants[sockId] || null
+    var fallbackP = isRemote
+      ? Promise.resolve(share && share.grant)
+      : sharedGrant()
+    console.log('[vault] storeSecret for ' + parsed.method + ' fields=' + copies.join(','))
+    return Promise.all(copies.map(function (f) {
+      return vaultCall('storeSecret', { value: parsed.params[f], label: parsed.method + ':' + f })
+        .then(function (resp) {
+          // Never forward the raw secret — a failed store becomes an explicit
+          // dead placeholder so downstream resolution fails loudly.
+          parsed.params[f] = resp && resp.handle ? 'vault:' + resp.handle : 'vault:unavailable'
+          if (resp && resp.handle) {
+            var g = writerGrant
+            ;(g ? Promise.resolve(g) : fallbackP).then(function (grant) {
+              if (grant) vaultCall('grantAddHandle', { grant: grant, handle: resp.handle })
+            })
+          }
+        })
+    })).then(function () { return JSON.stringify(parsed) })
+  }
+
+  window.WebSocket = function (url, protocols) {
+    try {
+      var u = new URL(url, origin)
+      if (u.host === window.location.host && u.pathname.startsWith('/api/')) {
+        return new LocalSocket(url, protocols)
+      }
+    } catch (e) { /* fall through */ }
+    return protocols !== undefined ? new RealWebSocket(url, protocols) : new RealWebSocket(url)
+  }
+  window.WebSocket.CONNECTING = 0; window.WebSocket.OPEN = 1
+  window.WebSocket.CLOSING = 2; window.WebSocket.CLOSED = 3
+  window.WebSocket.prototype = RealWebSocket.prototype
+
+  // --- 6b. Extension substrate client ------------------------------------
+  // The Hermes substrate extension's content script exposes fixed browser ops
+  // (navigate/click/type/scroll/snapshot/screenshot on agent-owned tabs,
+  // grant-gated + audited there). Page JS supplies only data — never code.
+  // Responses ride the same ECDH channel as the fetch bridge: the page
+  // mints an ephemeral keypair, the extension encrypts results to it.
+
+  var subKeyPairPromise = crypto.subtle.generateKey(
+    { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey'])
+  var substrateExtPub = null   // JWK — learned from rooted-extension-pong
+  var substratePresent = null  // null = unknown, true/false after first ping
+  var substratePending = {}
+  var substrateSeq = 1
+
+  function hexToBytes(h) {
+    var b = new Uint8Array(h.length / 2)
+    for (var i = 0; i < b.length; i++) b[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16)
+    return b
+  }
+
+  window.addEventListener('message', function (ev) {
+    if (ev.source !== window || !ev.data) return
+    var d = ev.data
+    if (d.type === 'rooted-extension-pong' && d.pubKey) {
+      substrateExtPub = d.pubKey
+      substratePresent = true
+    } else if (d.type === 'hermes-substrate-response') {
+      var p = substratePending[d.id]
+      if (p) { delete substratePending[d.id]; p(d) }
+    }
+  })
+
+  function substratePing(timeoutMs) {
+    if (substratePresent === true) return Promise.resolve(true)
+    return new Promise(function (resolve) {
+      var timer = setTimeout(function () {
+        if (substratePresent === null) substratePresent = false
+        resolve(substratePresent === true)
+      }, timeoutMs || 800)
+      window.postMessage({ type: 'rooted-extension-ping', id: 'subping' + Date.now() }, window.location.origin)
+      // pong handler sets substratePresent; resolve early if it lands
+      var poll = setInterval(function () {
+        if (substratePresent === true) { clearInterval(poll); clearTimeout(timer); resolve(true) }
+      }, 40)
+    })
+  }
+
+  function substrateCall(op, args, opts) {
+    return substratePing().then(function (present) {
+      if (!present) return { error: 'extension_absent' }
+      return subKeyPairPromise.then(function (kp) {
+        return crypto.subtle.exportKey('jwk', kp.publicKey).then(function (ephPub) {
+          var id = 'sub' + (substrateSeq++)
+          return new Promise(function (resolve) {
+            var timer = setTimeout(function () {
+              delete substratePending[id]
+              resolve({ error: 'substrate_timeout' })
+            }, (opts && opts.timeoutMs) || 90000)
+            substratePending[id] = function (d) {
+              clearTimeout(timer)
+              if (d.error) return resolve({ error: d.error })
+              if (d.result) return resolve(d.result)
+              if (d.iv && d.ct && substrateExtPub) {
+                crypto.subtle.importKey('jwk', substrateExtPub,
+                  { name: 'ECDH', namedCurve: 'P-256' }, false, []
+                ).then(function (extPub) {
+                  return crypto.subtle.deriveKey(
+                    { name: 'ECDH', public: extPub }, kp.privateKey,
+                    { name: 'AES-GCM', length: 256 }, false, ['decrypt'])
+                }).then(function (shared) {
+                  return crypto.subtle.decrypt(
+                    { name: 'AES-GCM', iv: hexToBytes(d.iv) }, shared, hexToBytes(d.ct))
+                }).then(function (pt) {
+                  resolve(JSON.parse(new TextDecoder().decode(pt)))
+                }).catch(function () { resolve({ error: 'decrypt_failed' }) })
+                return
+              }
+              resolve({ error: 'empty_response' })
+            }
+            window.postMessage({
+              type: 'hermes-substrate-call', id: id, op: op,
+              args: args || {}, ephPub: ephPub,
+            }, window.location.origin)
+          })
+        })
+      })
+    })
+  }
+
+  window.__HERMES_SUBSTRATE__ = {
+    call: substrateCall,
+    present: substratePing,
+  }
+  // Read-side vault surface for the grants UI and smoke tests — stores and
+  // resolutions still flow through the same worker ops; nothing here hands
+  // raw secret values to page JS (resolve ops return to the worker only).
+  window.__HERMES_VAULT__ = { call: vaultCall }
+
+  // --- 6b. WASI runner (in-page cowasm userspace) ---------------------------
+  // The runner bundle is lazily imported on first wasi op — it installs
+  // window.__HERMES_WASI__ and boots the cowasm kernel on demand. Until it
+  // loads, ops report unavailable honestly rather than pretending a shell
+  // exists.
+
+  var wasiRunnerPromise = null
+  function wasiRunner() {
+    if (!wasiRunnerPromise) {
+      wasiRunnerPromise = import('./wasi/wasi-runner.js').then(function () {
+        var r = window.__HERMES_WASI__
+        if (!r || typeof r.call !== 'function') throw new Error('wasi runner did not register')
+        return r
+      })
+      wasiRunnerPromise.catch(function () { wasiRunnerPromise = null })
+    }
+    return wasiRunnerPromise
+  }
+
+  function wasiCall(op, args) {
+    return wasiRunner().then(function (runner) {
+      return runner.call(op, args || {})
+    }).then(function (r) {
+      return r && typeof r === 'object' ? r : { error: 'wasi_bad_response' }
+    }).catch(function (e) {
+      if (op === 'status') {
+        return { available: false, reason: String(e && e.message || e) }
+      }
+      return { error: String(e && e.message || e) }
+    })
+  }
+
+  // --- 7. Share-as-gateway -----------------------------------------------
+  // The tab dials OUT to a rendezvous relay; remote
+  // clients arrive multiplexed over that one socket and are fed into the
+  // same worker frames the local webapp uses — upstream code sees a stock
+  // sidecar socket, the relay sees only opaque envelopes. Secret writes
+  // from remote clients get the same vault interception as local ones.
+  //
+  // E2E: the relay persists token hashes only, but frame payloads still
+  // transit the DO under TLS termination — a compromised relay would see
+  // prompts/responses. startShare mints an AES-GCM-256 key that ships in
+  // the share URL's #k= fragment (never sent on the wire); E2E-capable
+  // clients (scripts/e2e-shim.mjs) encrypt every payload so the DO pipes
+  // ciphertext — only routing metadata (cid liveness, sizes, timing) is
+  // visible. Stock clients still work in plaintext; mode is per-channel.
+
+  var e2eCids = {}          // cid -> true for /api/e2e-ws channels
+
+  function e2eEncrypt(key, text) {
+    var iv = crypto.getRandomValues(new Uint8Array(12))
+    return crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key,
+      new TextEncoder().encode(text)).then(function (ct) {
+        var out = new Uint8Array(iv.length + ct.byteLength)
+        out.set(iv, 0)
+        out.set(new Uint8Array(ct), iv.length)
+        var bin = '', CH = 0x8000
+        for (var i = 0; i < out.length; i += CH)
+          bin += String.fromCharCode.apply(null, out.subarray(i, i + CH))
+        return btoa(bin)
+      })
+  }
+
+  function e2eDecrypt(key, b64) {
+    var raw = Uint8Array.from(atob(b64), function (c) { return c.charCodeAt(0) })
+    return crypto.subtle.decrypt({ name: 'AES-GCM', iv: raw.subarray(0, 12) },
+      key, raw.subarray(12)).then(function (pt) {
+        return new TextDecoder().decode(pt)
+      })
+  }
+
+  function shareSend(obj) {
+    if (!(share && share.ws && share.ws.readyState === 1)) return
+    // E2E channels carry ciphertext payloads only; routing fields (t/cid/id)
+    // stay plaintext — the DO needs them to demux.
+    if (obj.t === 'ws-msg' && e2eCids[obj.cid] && share.key) {
+      e2eEncrypt(share.key, obj.data).then(function (ct) {
+        if (share && share.ws && share.ws.readyState === 1) {
+          share.ws.send(JSON.stringify({ t: 'ws-msg', cid: obj.cid, data: ct }))
+        }
+      })
+      return
+    }
+    share.ws.send(JSON.stringify(obj))
+  }
+
+  // Remote REST requests never carry the client's auth — the page
+  // synthesizes the ambient session token + host the local shim injects.
+  function remoteHeaders(h) {
+    var hdrs = Object.assign({}, h)
+    delete hdrs['x-hermes-session-token']
+    delete hdrs['authorization']
+    hdrs['x-hermes-session-token'] = sessionToken
+    hdrs.host = window.location.host
+    return hdrs
+  }
+
+  function onRelayMessage(ev) {
+    var m
+    try { m = JSON.parse(ev.data) } catch (e) { return }
+    if (m.t === 'ws-open' && typeof m.cid === 'string') {
+      var id = nextId++
+      remoteSocks[id] = m.cid
+      remoteByCid[m.cid] = id
+      // /api/e2e-ws channels carry AES-GCM ciphertext payloads keyed by the
+      // share fragment — the DO forwarded the client's upgrade path, we
+      // mark the cid and every ws-msg on it crosses as ciphertext.
+      if (m.path === '/api/e2e-ws') e2eCids[m.cid] = true
+      // Synthesize the same upgrade the local webapp makes: same session
+      // token, same host/origin — upstream's guard sees a stock sidecar.
+      postToWorker({
+        t: 'ws-open', id: id,
+        path: '/api/ws?token=' + sessionToken,
+        headers: { host: window.location.host, origin: window.location.origin },
+      })
+    } else if (m.t === 'ws-msg' && typeof m.cid === 'string') {
+      var lid = remoteByCid[m.cid]
+      if (lid === undefined) return
+      var feed = function (data) {
+        trackRpcMethod(lid, data)
+        var handled = maybeVaultWrite(data, lid)   // remote secret writes -> vault too
+        if (handled) {
+          handled.then(function (rw) { if (rw) postToWorker({ t: 'ws-send', id: lid, data: rw }) })
+        } else {
+          postToWorker({ t: 'ws-send', id: lid, data: data })
+        }
+      }
+      if (e2eCids[m.cid] && share && share.key) {
+        // Wrong-key ciphertext can only produce noise — drop it rather
+        // than feed a plaintext fallback.
+        e2eDecrypt(share.key, m.data).then(feed, function () {})
+      } else {
+        feed(m.data)
+      }
+    } else if (m.t === 'ws-close' && typeof m.cid === 'string') {
+      var lid2 = remoteByCid[m.cid]
+      if (lid2 === undefined) return
+      delete e2eCids[m.cid]
+      delete sockGrants[lid2]
+      postToWorker({ t: 'ws-close', id: lid2, code: m.code, reason: m.reason })
+    } else if (m.t === 'rest' && typeof m.id === 'string') {
+      var rid = nextId++
+      // E2E REST envelope: POST /api/e2e carries an AES-GCM ciphertext body
+      // decrypting to {method, path, headers, bodyB64}. The DO saw only the
+      // opaque envelope; the reply is re-encrypted before it goes back.
+      if (m.method === 'POST' && /^\/api\/e2e(\?|$)/.test(m.path || '') &&
+          share && share.key) {
+        var relayId = m.id
+        e2eDecrypt(share.key, m.bodyB64 || '').then(function (pt) {
+          var inner = JSON.parse(pt)
+          remoteRest[rid] = { id: relayId, e2e: true }
+          postToWorker({
+            t: 'rest', id: rid, method: inner.method || 'GET',
+            path: inner.path, headers: remoteHeaders(inner.headers),
+            body: inner.bodyB64 ? { b64: inner.bodyB64 } : null,
+          })
+        }, function () {
+          shareSend({ t: 'rest-res', id: relayId, status: 400, headers: {}, bodyB64: '' })
+        })
+        return
+      }
+      remoteRest[rid] = m.id
+      postToWorker({
+        t: 'rest', id: rid, method: m.method || 'GET',
+        path: m.path, headers: remoteHeaders(m.headers),
+        body: m.bodyB64 ? { b64: m.bodyB64 } : null,
+      })
+    } else if (m.t === 'end') {
+      stopShare(m.reason || 'ended')
+    }
+  }
+
+  function defaultRelayBase() {
+    return window.__HERMES_RELAY_URL__ ||
+      (function () { try { return localStorage.getItem('hermes.relayUrl') } catch (e) { return null } })() ||
+      window.location.origin
+  }
+
+  function startShare(relayBase) {
+    relayBase = (relayBase || defaultRelayBase()).replace(/\/+$/, '')
+    if (share) return Promise.resolve(share.meta)
+    return realFetch(relayBase + '/s', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then(function (res) {
+      if (!res.ok) throw new Error('relay mint failed: ' + res.status)
+      return res.json()
+    }).then(function (meta) {
+      // Broker grant the remote sessions sub-scope under — revoking it (via
+      // stopShare or the grants UI) locks every remote client out of vault.
+      return vaultCall('createGrant', { kind: 'broker', handles: [] }).then(function (r) {
+        return { meta: meta, grant: (r && r.grant) || null }
+      })
+    }).then(function (m0) {
+      var meta = m0.meta
+      var wsBase = relayBase.replace(/^http/, 'ws')
+      var url = wsBase + '/s/' + meta.sid + '/agent?token=' + encodeURIComponent(meta.agentToken)
+      // E2E share key: minted here, exported into the share URL's #k=
+      // fragment — fragments are never transmitted, so the relay never
+      // sees it. E2E-capable clients derive the same key from the URL.
+      var e2eKeyP = crypto.subtle.generateKey(
+        { name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']
+      ).then(function (k) {
+        return crypto.subtle.exportKey('raw', k).then(function (raw) {
+          var bytes = new Uint8Array(raw), bin = ''
+          for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
+          var b64 = btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+          meta.shareUrl = meta.baseUrl + '?token=' + encodeURIComponent(meta.token) + '#k=' + b64
+          return k
+        })
+      }).catch(function () { return null })
+      return Promise.all([import('./vendor/partysocket-ws.js'), e2eKeyP]).then(function (arr) {
+        var mod = arr[0]
+        var e2eKey = arr[1]
+        // partysocket's ReconnectingWebSocket owns retry/backoff/send-queue.
+        // Reconnect only on abnormal drops (1006): a clean 1000 is the relay
+        // ending or replacing this session — never redial that. Explicit
+        // stopShare()/close() also disables retry inside the library.
+        var ws = new mod.default(url, null, {
+          WebSocket: RealWebSocket,
+          maxRetries: 25,
+          shouldReconnectOnClose: function (ev) { return ev.code === 1006 },
+        })
+        share = { ws: ws, meta: meta, grant: m0.grant, relayBase: relayBase, key: e2eKey, state: 'connecting' }
+        ws.onmessage = onRelayMessage
+        ws.onopen = function () { if (share) { share.state = 'live'; updateShareUI() } }
+        ws.onclose = function (ev) {
+          if (!share || share.ws !== ws) return
+          if (ev && ev.code === 1006 && ws.retryCount < 25) {
+            // The DO fails all client sockets on agent disconnect; close the
+            // corresponding local sidecars so a redial starts clean.
+            for (var lid in remoteSocks) {
+              postToWorker({ t: 'ws-close', id: Number(lid), code: 1006, reason: 'relay-drop' })
+              delete sockGrants[lid]
+            }
+            remoteSocks = {}
+            remoteByCid = {}
+            remoteRest = {}
+            e2eCids = {}
+            share.state = 'reconnecting'
+            updateShareUI()
+            return
+          }
+          stopShare('relay-closed')
+        }
+        ws.onerror = function () { if (share) { share.state = 'error'; updateShareUI() } }
+        updateShareUI()
+        return meta
+      })
+    })
+  }
+
+  function stopShare(reason) {
+    if (!share) return Promise.resolve()
+    var s = share
+    // Tear down server-side first so the session is gone before the agent
+    // socket closes (and clients get a definite end, not a dangling 503).
+    var done = realFetch(s.relayBase + '/s/' + s.meta.sid + '?token=' + encodeURIComponent(s.meta.agentToken), { method: 'DELETE' })
+      .catch(function () { /* offline — DO expires on its own */ })
+      .then(function () {
+        try { s.ws.close(1000, reason || 'stopped') } catch (e) { /* gone */ }
+      })
+    // Tell the backend every remote socket is gone.
+    for (var lid in remoteSocks) {
+      postToWorker({ t: 'ws-close', id: Number(lid), code: 1001, reason: 'share-ended' })
+      delete sockGrants[lid]
+    }
+    remoteSocks = {}
+    remoteByCid = {}
+    remoteRest = {}
+    e2eCids = {}
+    // Revoke the broker grant and every remote sub-grant it minted — any
+    // in-flight or future vault resolution by those sessions fails fast.
+    if (s.grant) {
+      vaultCall('revokeGrant', { grant: s.grant })
+      vaultCall('listGrants').then(function (r) {
+        ;(r && r.grants || []).forEach(function (g) {
+          if (g.parent === s.grant && !g.revoked) vaultCall('revokeGrant', { grant: g.grant })
+        })
+      })
+    }
+    share = null
+    updateShareUI()
+    return done
+  }
+
+  window.__HERMES_SHARE__ = {
+    start: startShare,
+    stop: stopShare,
+    get session() { return share && share.meta },
+    get state() { return share ? share.state : 'off' },
+  }
+
+  // --- Share UI: self-contained chip + dialog ----------------------------
+  // The vendored webapp is byte-identical upstream; the share surface is a
+  // floating control injected by this bootstrap so no upstream file changes.
+  var shareChip, sharePanel, shareBody
+  function updateShareUI() {
+    if (!shareChip) return
+    var on = !!share
+    shareChip.textContent = on ? (share.state === 'live' ? 'Gateway live' : 'Gateway: ' + share.state) : 'Share gateway'
+    shareChip.style.borderColor = on && share.state === 'live' ? '#4caf50' : ''
+    if (sharePanel && sharePanel.style.display !== 'none') renderSharePanel()
+  }
+  function renderSharePanel() {
+    if (!shareBody) return
+    if (!share) {
+      shareBody.innerHTML = ''
+      var p = document.createElement('p')
+      p.textContent = 'Expose this tab as a remote Hermes gateway. Point Desktop (Settings → Gateway) or any stock client at the URL + token. Everything stays client-side; the relay only pipes frames.'
+      p.style.cssText = 'margin:0 0 10px;color:#bbb;font-size:12px;line-height:1.5'
+      var btn = document.createElement('button')
+      btn.textContent = 'Start sharing'
+      btn.style.cssText = 'padding:6px 14px;background:#4caf50;color:#fff;border:0;border-radius:4px;cursor:pointer'
+      btn.onclick = function () {
+        btn.disabled = true; btn.textContent = 'Starting…'
+        startShare().catch(function (e) {
+          btn.disabled = false; btn.textContent = 'Start sharing'
+          var err = document.createElement('div')
+          err.style.cssText = 'color:#f66;font-size:12px;margin-top:8px'
+          err.textContent = String(e)
+          shareBody.appendChild(err)
+        }).then(function () { updateShareUI() })
+      }
+      shareBody.appendChild(p); shareBody.appendChild(btn)
+      return
+    }
+    var rows = [
+      ['Status', share.state],
+      ['baseUrl', share.meta.baseUrl],
+      ['token', share.meta.token],
+    ]
+    if (share.meta.shareUrl) rows.push(['e2e shareUrl', share.meta.shareUrl])
+    shareBody.innerHTML = ''
+    var hint = document.createElement('p')
+    hint.textContent = 'Desktop: Settings → Gateway → remote → baseUrl + token. For relay-blind E2E (recommended): run `node relay/scripts/e2e-shim.mjs "<shareUrl>"` on the client machine and point it at the shim instead.'
+    hint.style.cssText = 'margin:0 0 8px;color:#bbb;font-size:12px'
+    shareBody.appendChild(hint)
+    rows.forEach(function (r) {
+      var div = document.createElement('div')
+      div.style.cssText = 'font-size:12px;margin:4px 0;word-break:break-all'
+      var b = document.createElement('b'); b.textContent = r[0] + ': '
+      var span = document.createElement('span'); span.textContent = r[1]
+      span.style.cssText = 'font-family:monospace;color:#9fd'
+      div.appendChild(b); div.appendChild(span); shareBody.appendChild(div)
+    })
+    var stop = document.createElement('button')
+    stop.textContent = 'Stop sharing'
+    stop.style.cssText = 'margin-top:8px;padding:6px 14px;background:#a33;color:#fff;border:0;border-radius:4px;cursor:pointer'
+    stop.onclick = function () { stopShare('stopped'); updateShareUI() }
+    shareBody.appendChild(stop)
+  }
+  function injectShareUI() {
+    if (shareChip || !document.body) return
+    shareChip = document.createElement('button')
+    shareChip.textContent = 'Share gateway'
+    shareChip.style.cssText = 'position:fixed;right:14px;bottom:14px;z-index:99999;padding:6px 12px;' +
+      'background:#222;color:#ddd;border:1px solid #555;border-radius:14px;font-size:12px;cursor:pointer;opacity:.85'
+    sharePanel = document.createElement('div')
+    sharePanel.style.cssText = 'display:none;position:fixed;right:14px;bottom:52px;z-index:99999;width:340px;' +
+      'background:#181818;color:#eee;border:1px solid #444;border-radius:8px;padding:14px;box-shadow:0 4px 24px #000a'
+    shareBody = document.createElement('div')
+    sharePanel.appendChild(shareBody)
+    shareChip.onclick = function () {
+      sharePanel.style.display = sharePanel.style.display === 'none' ? 'block' : 'none'
+      renderSharePanel()
+    }
+    document.body.appendChild(shareChip)
+    document.body.appendChild(sharePanel)
+
+    // Grants panel — per-capability revoke over vault handles and broker
+    // grants. Revoking a grant tombstones it in the worker; every future
+    // resolve under it fails fast (instant lockout for remote sessions).
+    var gChip = document.createElement('button')
+    gChip.textContent = 'Grants'
+    gChip.style.cssText = 'position:fixed;right:124px;bottom:14px;z-index:99999;padding:6px 12px;' +
+      'background:#222;color:#ddd;border:1px solid #555;border-radius:14px;font-size:12px;cursor:pointer;opacity:.85'
+    var gPanel = document.createElement('div')
+    gPanel.style.cssText = 'display:none;position:fixed;right:124px;bottom:52px;z-index:99999;width:380px;max-height:60vh;overflow:auto;' +
+      'background:#181818;color:#eee;border:1px solid #444;border-radius:8px;padding:14px;box-shadow:0 4px 24px #000a'
+
+    function gRow(text, onRevoke) {
+      var d = document.createElement('div')
+      d.style.cssText = 'display:flex;justify-content:space-between;align-items:center;' +
+        'padding:5px 0;border-bottom:1px solid #2a2a2a;font-size:12px'
+      var s = document.createElement('span')
+      s.textContent = text
+      s.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:270px'
+      d.appendChild(s)
+      var b = document.createElement('button')
+      b.textContent = 'Revoke'
+      b.style.cssText = 'padding:2px 8px;background:#5a2020;color:#fbb;border:1px solid #833;border-radius:4px;cursor:pointer;font-size:11px'
+      b.onclick = function () { onRevoke().then(renderGrants) }
+      d.appendChild(b)
+      return d
+    }
+
+    function renderGrants() {
+      gPanel.innerHTML = ''
+      var h = document.createElement('div')
+      h.textContent = 'Vault secrets & grants'
+      h.style.cssText = 'font-weight:600;margin-bottom:8px;font-size:13px'
+      gPanel.appendChild(h)
+      vaultCall('list').then(function (r) {
+        var hs = (r && r.handles) || []
+        if (!hs.length) {
+          var e = document.createElement('div')
+          e.textContent = 'No secrets in vault.'
+          e.style.cssText = 'color:#999;font-size:12px'
+          gPanel.appendChild(e)
+        }
+        hs.forEach(function (x) {
+          gPanel.appendChild(gRow(
+            (x.revoked ? '[revoked] ' : '') + (x.label || x.handle),
+            function () { return vaultCall('revoke', { handle: x.handle }) }))
+        })
+      })
+      vaultCall('listGrants').then(function (r) {
+        var gs = (r && r.grants) || []
+        if (gs.length) {
+          var h2 = document.createElement('div')
+          h2.textContent = 'Session & remote grants'
+          h2.style.cssText = 'font-weight:600;margin:12px 0 6px;font-size:13px'
+          gPanel.appendChild(h2)
+        }
+        gs.forEach(function (g) {
+          var scope = g.handles === '*' ? '*' : (g.handles || []).length + ' handles'
+          gPanel.appendChild(gRow(
+            (g.revoked ? '[revoked] ' : '') + g.kind + ' ' + (g.session_id || '') + ' (' + scope + ')',
+            function () { return vaultCall('revokeGrant', { grant: g.grant }) }))
+        })
+      })
+    }
+
+    gChip.onclick = function () {
+      gPanel.style.display = gPanel.style.display === 'none' ? 'block' : 'none'
+      if (gPanel.style.display === 'block') renderGrants()
+    }
+    document.body.appendChild(gChip)
+    document.body.appendChild(gPanel)
+    updateShareUI()
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', injectShareUI)
+  } else {
+    injectShareUI()
+  }
+
+  // --- 8. Interrupt channel ------------------------------------------------
+  // Debug aid: page writes 2 to interruptSab[0] to SIGINT a wedged boot or
+  // a runaway prompt turn. The SAB rides the boot message; no COI needed
+  // for it beyond what coincident already requires.
+  var interruptSab = new SharedArrayBuffer(8)
+  window.__HERMES_INTERRUPT__ = new Int32Array(interruptSab)
+
+  window.__HERMES_BOOTSTRAP__ = { sessionToken: sessionToken, intercepted: true }
+  console.log('[hermes-web] bootstrap installed')
+})()

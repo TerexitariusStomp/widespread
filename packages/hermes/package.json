@@ -1,0 +1,41 @@
+{
+  "name": "hermes-browser",
+  "version": "0.1.0",
+  "description": "Hermes agent running fully in-browser — upstream core under Pyodide, vault-held secrets, remote-gateway relay",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "vendor": "bash scripts/vendor.sh",
+    "pack": "node scripts/pack-python.mjs",
+    "pack-env": "node scripts/pack-env.mjs",
+    "pack-assets": "node scripts/pack-assets.mjs",
+    "assemble": "node scripts/assemble.mjs",
+    "build": "npm run vendor && npm run pack-env && npm run pack-assets && npm run pack && npm run assemble",
+    "dev": "npm run assemble && python3 -m http.server 8471 -d dist",
+    "serve": "node scripts/serve.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "test": "node --test tests/*.test.mjs && python3 -m unittest tests.test_widespread_plugin"
+  },
+  "dependencies": {
+    "@a2a-js/sdk": "^1.3.0",
+    "@fastnear/intents": "^2.5.0",
+    "@fastnear/x402": "^2.5.0",
+    "@huggingface/transformers": "^3.8.1",
+    "@mlc-ai/web-llm": "^0.2.82",
+    "@noble/ed25519": "^3.2.0",
+    "@x402/near": "^2.29.0",
+    "coincident": "^4.1.1",
+    "idb": "^8.0.3",
+    "near-api-js": "^7.4.0",
+    "partysocket": "^1.3.0",
+    "penpal": "^7.0.6",
+    "pyodide": "0.28.3"
+  },
+  "devDependencies": {
+    "@wasmer/sdk": "0.19.0",
+    "@wllama/wllama": "^3.6.1",
+    "esbuild": "^0.25.0",
+    "fake-indexeddb": "^6.2.5",
+    "playwright": "1.63.0"
+  }
+}

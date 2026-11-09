@@ -1,0 +1,19 @@
+.browser-cache/
+dist/
+/vendor/
+# src/vendor/ is tracked — checked-in vendored browser deps (idb.mjs etc.)
+# that vault-ops resolves under plain node for unit tests.
+!src/vendor/
+node_modules/
+.wrangler/
+__pycache__/
+.pytest_cache/
+*.pyc
+package-lock.json
+
+# Local wrangler config (deploy-specific); example template is tracked.
+wrangler.toml
+relay/package-lock.json
+spikes/
+measure-tmp.cjs
+chrome/
