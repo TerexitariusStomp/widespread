@@ -17,6 +17,7 @@
 // signed, portable, verifiable offline against ORACLE_PUBKEY_HEX.
 
 import type { Env } from "./types";
+import { postRepEvent } from "./erc8004";
 import { kv } from "./db";
 
 const EVENT_PREFIX = "rep:event:";
@@ -61,6 +62,9 @@ async function appendEvent(env: Env, ev: Omit<RepEvent, "sig">): Promise<void> {
     : undefined;
   const key = `${EVENT_PREFIX}${ev.actor}:${ev.at}:${crypto.randomUUID().slice(0, 8)}`;
   await env.QUALITY.put(key, JSON.stringify({ ...ev, ...(sig ? { sig } : {}) }));
+  // Mirror the signed event onto ERC-8004's Reputation Registry when a
+  // signer key is configured — fire-and-forget: a down RPC never blocks.
+  await postRepEvent(env, { ...ev, ...(sig ? { sig } : {}) }).catch(() => undefined);
 }
 
 async function bumpCounter(env: Env, actor: string, field: keyof RepCounters): Promise<void> {

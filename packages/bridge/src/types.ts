@@ -36,6 +36,10 @@ export interface Env {
   ORACLE_SECRET_KEY?: string;
   // NEAR AI Cloud signed inference (provider_tee verdicts)
   NEAR_AI_API_KEY?: string;
+  // ERC-8004 rep posting (Base) — optional; absence = posting disabled
+  ERC8004_SIGNER_KEY?: string;
+  ERC8004_RPC_URL?: string;
+  ERC8004_REP_REGISTRY?: `0x${string}`;
   NEAR_AI_BASE?: string;
   NEAR_AI_MODEL?: string;
   // Unified bounty feed — source credentials + watchlists (all optional;

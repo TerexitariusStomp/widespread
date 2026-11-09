@@ -26,6 +26,7 @@
     "@widespread/protocol": "workspace:*",
     "axios": "^1.21.0",
     "hono": "^4.13.17",
-    "near-api-js": "^7.4.0"
+    "near-api-js": "^7.4.0",
+    "viem": "^2.57.17"
   }
 }
