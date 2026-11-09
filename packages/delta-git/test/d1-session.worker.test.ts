@@ -1,5 +1,5 @@
 import { env, exports as workerExports } from "cloudflare:workers";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import {
   D1_BOOKMARK_COOKIE_MAX_AGE_SECONDS,
@@ -10,42 +10,38 @@ import {
 import { ensureD1Migrations } from "./util/d1Setup";
 import { setupRepoForTests } from "./util/repoSeed";
 
-// The D1 Sessions middleware decision is observed through a spy that
-// wraps `env.DB.withSession`. The wrapper records the chosen anchor and
-// optionally substitutes a deterministic outbound bookmark so emit-side
-// assertions don't depend on whether workerd's local D1 advances a real
-// bookmark for read-only queries. `D1SessionBookmark` and
-// `D1SessionConstraint` are global ambient types from
-// `worker-configuration.d.ts`. `undefined` is included to match the
+// The D1 Sessions middleware decision is observed through a pass-through
+// wrapper installed directly on `env.DB.withSession`. The wrapper records
+// the chosen anchor and delegates EVERY call to the real D1 session —
+// no query is intercepted, no result is fabricated, and bookmarks are the
+// real Lamport tokens workerd's local D1 issues. This is observability
+// ("which anchor did the middleware pick?"), not a service fake: deleting
+// the wrapper changes nothing about what D1 serves.
+//
+// `D1SessionBookmark` and `D1SessionConstraint` are global ambient types
+// from `worker-configuration.d.ts`. `undefined` is included to match the
 // original signature shape even though the middleware always passes a
 // concrete value.
 type D1SessionAnchor = D1SessionBookmark | D1SessionConstraint | undefined;
-
-type InstrumentOptions = {
-  // When set, the wrapped `getBookmark()` returns this value verbatim
-  // instead of delegating to the real session. `null` is meaningful (no
-  // emit). `undefined` (default) delegates to the real session.
-  fakeOutboundBookmark?: string | null;
-};
 
 type Instrumentation = {
   readonly anchors: ReadonlyArray<D1SessionAnchor>;
   readonly sessionPrepareCalls: number;
   readonly getBookmarkCalls: number;
-  setFakeBookmark(bookmark: string | null | undefined): void;
   reset(): void;
   restore(): void;
 };
 
-function instrumentSessions(options: InstrumentOptions = {}): Instrumentation {
+function instrumentSessions(): Instrumentation {
   const anchors: D1SessionAnchor[] = [];
   let sessionPrepareCalls = 0;
   let getBookmarkCalls = 0;
-  let fakeBookmark: string | null | undefined = options.fakeOutboundBookmark;
-  const original = env.DB.withSession.bind(env.DB);
-  const spy = vi.spyOn(env.DB, "withSession").mockImplementation((anchor) => {
+  const db = env.DB;
+  const originalWithSession = db.withSession;
+
+  db.withSession = function wrappedWithSession(anchor?: D1SessionBookmark | D1SessionConstraint) {
     anchors.push(anchor);
-    const session = original(anchor);
+    const session = originalWithSession.call(db, anchor);
     const wrapped: D1DatabaseSession = {
       prepare(query) {
         sessionPrepareCalls += 1;
@@ -56,12 +52,12 @@ function instrumentSessions(options: InstrumentOptions = {}): Instrumentation {
       },
       getBookmark() {
         getBookmarkCalls += 1;
-        if (fakeBookmark !== undefined) return fakeBookmark;
         return session.getBookmark();
       },
     };
     return wrapped;
-  });
+  };
+
   return {
     get anchors() {
       return anchors;
@@ -72,16 +68,13 @@ function instrumentSessions(options: InstrumentOptions = {}): Instrumentation {
     get getBookmarkCalls() {
       return getBookmarkCalls;
     },
-    setFakeBookmark(bookmark) {
-      fakeBookmark = bookmark;
-    },
     reset() {
       anchors.length = 0;
       sessionPrepareCalls = 0;
       getBookmarkCalls = 0;
     },
     restore() {
-      spy.mockRestore();
+      db.withSession = originalWithSession;
     },
   };
 }
@@ -97,14 +90,16 @@ afterEach(() => {
   activeInstrumentation = null;
 });
 
-function instrument(options: InstrumentOptions = {}): Instrumentation {
-  const handle = instrumentSessions(options);
+function instrument(): Instrumentation {
+  const handle = instrumentSessions();
   activeInstrumentation = handle;
   return handle;
 }
 
 const ALWAYS_PRIMARY = "first-primary";
 const ALWAYS_REPLICA = "first-unconstrained";
+// D1 bookmarks are 59-char Lamport tokens (`8-8-8-32` hex groups).
+const BOOKMARK_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{32}$/;
 
 describe("D1 Sessions middleware", () => {
   it("opens exactly one session per request and routes c.var.db through it", async () => {
@@ -271,17 +266,22 @@ describe("D1 Sessions middleware", () => {
     expect(probe.anchors[0]).toBe(ALWAYS_PRIMARY);
   });
 
-  it("emits header + cookie when the bookmark advances past the inbound value", async () => {
+  it("emits header + cookie carrying the real advanced bookmark", async () => {
     const owner = `sess-emit-${Math.random().toString(36).slice(2, 8)}`;
     await setupRepoForTests(env, owner, "repo");
-    const fakeBookmark = "advanced-bookmark-001";
-    const probe = instrument({ fakeOutboundBookmark: fakeBookmark });
+    const probe = instrument();
 
-    const res = await workerExports.default.fetch(`https://example.com/${owner}`);
+    const res = await workerExports.default.fetch(
+      `https://example.com/api/v1/repos/${owner}/repo/+`
+    );
+    expect(res.status).toBe(200);
     expect(probe.anchors[0]).toBe(ALWAYS_REPLICA);
-    expect(res.headers.get(D1_BOOKMARK_HEADER)).toBe(fakeBookmark);
+    // The emitted bookmark is the real Lamport token the session's
+    // getBookmark() returned — local D1 issues genuine bookmarks.
+    const emitted = res.headers.get(D1_BOOKMARK_HEADER);
+    expect(emitted).toMatch(BOOKMARK_PATTERN);
     const cookie = parseBookmarkCookie(res.headers.get("set-cookie"));
-    expect(cookie?.value).toBe(fakeBookmark);
+    expect(cookie?.value).toBe(emitted);
     expect(cookie?.attributes.Path).toBe("/");
     expect(cookie?.attributes.HttpOnly).toBe(true);
     expect(cookie?.attributes.Secure).toBe(true);
@@ -302,14 +302,16 @@ describe("D1 Sessions middleware", () => {
     expect(parseBookmarkCookie(res.headers.get("set-cookie"))).toBeNull();
   });
 
-  it("does not emit when the outbound bookmark matches the inbound bookmark", async () => {
-    const matchedBookmark = "no-advance-bookmark";
-    const probe = instrument({ fakeOutboundBookmark: matchedBookmark });
+  it("does not emit when the outbound bookmark equals the inbound bookmark", async () => {
+    // A session anchored at a bookmark D1 cannot resolve echoes that
+    // bookmark back from getBookmark(), so inbound === outbound and the
+    // emitter correctly suppresses header/cookie churn.
+    const probe = instrument();
     const res = await workerExports.default.fetch("https://example.com/", {
-      headers: { [D1_BOOKMARK_HEADER]: matchedBookmark },
+      headers: { [D1_BOOKMARK_HEADER]: "unresolvable-bookmark-zzz" },
     });
     expect(res.status).toBe(200);
-    expect(probe.anchors[0]).toBe(matchedBookmark);
+    expect(probe.anchors[0]).toBe("unresolvable-bookmark-zzz");
     expect(res.headers.get(D1_BOOKMARK_HEADER)).toBeNull();
     expect(parseBookmarkCookie(res.headers.get("set-cookie"))).toBeNull();
   });
@@ -339,26 +341,23 @@ describe("D1 Sessions middleware", () => {
     expect(probe.anchors[0]).toBe(ALWAYS_REPLICA);
   });
 
-  it("round-trips a bookmark from a write to a follow-up read", async () => {
-    // The write half: a mutating request returns a bookmark cookie.
-    // We force a known outbound bookmark so the assertion is decoupled
-    // from whether the local D1 actually advanced state for the 401
-    // response that gets returned.
-    const issuedBookmark = "round-trip-bookmark-xyz";
-    const writeProbe = instrument({ fakeOutboundBookmark: issuedBookmark });
-    const writeRes = await workerExports.default.fetch(
-      "https://example.com/auth/api/repositories",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Origin: "https://example.com" },
-        body: "{}",
-      }
-    );
-    expect(writeProbe.anchors[0]).toBe(ALWAYS_PRIMARY);
+  it("round-trips a real bookmark from a write to a follow-up read", async () => {
+    // The write half: POST /api/agents performs a real D1 insert, so the
+    // primary-anchored session's getBookmark() returns a genuine advanced
+    // bookmark that the middleware emits as header + cookie.
+    const pubkey = Array.from(crypto.getRandomValues(new Uint8Array(32)))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+    const writeRes = await workerExports.default.fetch("https://example.com/api/agents", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pubkey, label: `sess-rt-${Date.now().toString(36)}` }),
+    });
+    expect(writeRes.status).toBe(200);
+    const issuedBookmark = writeRes.headers.get(D1_BOOKMARK_HEADER);
+    expect(issuedBookmark).toMatch(BOOKMARK_PATTERN);
     const cookie = parseBookmarkCookie(writeRes.headers.get("set-cookie"));
     expect(cookie?.value).toBe(issuedBookmark);
-    writeProbe.restore();
-    activeInstrumentation = null;
 
     // The read half: the browser would echo the cookie on the next
     // navigation. A read-like request consumes it as the session anchor.
@@ -367,7 +366,7 @@ describe("D1 Sessions middleware", () => {
     const readProbe = instrument();
     await workerExports.default.fetch(`https://example.com/${owner}`, {
       headers: {
-        Cookie: `${D1_BOOKMARK_COOKIE_HEADER_NAME}=${encodeURIComponent(issuedBookmark)}`,
+        Cookie: `${D1_BOOKMARK_COOKIE_HEADER_NAME}=${encodeURIComponent(issuedBookmark!)}`,
       },
     });
     expect(readProbe.anchors[0]).toBe(issuedBookmark);

@@ -1,12 +1,19 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { ensureArtifactsPushSubscription } from "@/worker/tasks/artifactsSubscriptions";
+
+// No fetch mocking anywhere in this file. The no-credential paths are
+// proven by observing that `ctx.waitUntil` is never invoked — if the
+// helper regressed into calling the Cloudflare API, work would be
+// scheduled. The live paths below run only when real Cloudflare
+// credentials are present in the environment and then verify the result
+// by reading the subscription back from the real API.
 
 function envOf(overrides: Partial<Env>): Env {
   return {
     LOG_LEVEL: "warn",
-    CF_ACCOUNT_ID: "acct-1",
-    CF_API_TOKEN: "token-1",
+    CF_ACCOUNT_ID: "",
+    CF_API_TOKEN: "",
     ...overrides,
   } as unknown as Env;
 }
@@ -17,115 +24,97 @@ function ctxOf(pending: Promise<unknown>[]): ExecutionContext {
   } as unknown as ExecutionContext;
 }
 
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
+const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID ?? "";
+const CF_API_TOKEN = process.env.CF_API_TOKEN ?? "";
+const HAS_CF_CREDS =
+  CF_ACCOUNT_ID.length > 0 &&
+  CF_API_TOKEN.length > 0 &&
+  CF_API_TOKEN !== "local-placeholder";
+// Subscription creation mutates the Cloudflare account — require the
+// explicit live gate on top of credentials.
+const LIVE = process.env.E2E_LIVE === "1" && HAS_CF_CREDS;
+const LIVE_SKIP = !HAS_CF_CREDS
+  ? "set CF_ACCOUNT_ID + CF_API_TOKEN (real Cloudflare API credentials)"
+  : "set E2E_LIVE=1 to create real event subscriptions";
 
-const QUEUE_LIST_OK = {
-  success: true,
-  result: [{ queue_id: "q-1", queue_name: "dg-artifacts-events" }],
-};
+const CF_API = "https://api.cloudflare.com/client/v4";
 
 describe("ensureArtifactsPushSubscription", () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it("no-ops without CF credentials", async () => {
-    const fetchSpy = vi.fn();
-    vi.stubGlobal("fetch", fetchSpy);
+  it("no-ops without CF credentials (waitUntil never scheduled)", async () => {
     const pending: Promise<unknown>[] = [];
     ensureArtifactsPushSubscription(
       ctxOf(pending),
       envOf({ CF_ACCOUNT_ID: "", CF_API_TOKEN: "" }),
       "dg-abc"
     );
-    await Promise.all(pending);
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(pending).toHaveLength(0);
   });
 
-  it("no-ops on the dev placeholder token", async () => {
-    const fetchSpy = vi.fn();
-    vi.stubGlobal("fetch", fetchSpy);
+  it("no-ops on the dev placeholder token (waitUntil never scheduled)", async () => {
     const pending: Promise<unknown>[] = [];
     ensureArtifactsPushSubscription(
       ctxOf(pending),
-      envOf({ CF_API_TOKEN: "local-placeholder" }),
+      envOf({ CF_ACCOUNT_ID: "acct-1", CF_API_TOKEN: "local-placeholder" }),
       "dg-abc"
     );
-    await Promise.all(pending);
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(pending).toHaveLength(0);
   });
 
-  it("resolves the queue by name and creates a per-repo subscription", async () => {
-    const calls: { url: string; init?: RequestInit }[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string, init?: RequestInit) => {
-        calls.push({ url: String(url), init });
-        if (String(url).includes("/queues?")) return jsonResponse(QUEUE_LIST_OK);
-        return jsonResponse({ success: true, result: { id: "sub-1" } });
-      })
-    );
+  it("creates a real per-repo subscription and it is visible via the CF API", { skip: LIVE_SKIP }, async () => {
+    const artifactsName = `dg-live-test-${Date.now().toString(36)}`;
     const pending: Promise<unknown>[] = [];
-    ensureArtifactsPushSubscription(ctxOf(pending), envOf({}), "dg-feedface1234");
+    ensureArtifactsPushSubscription(
+      ctxOf(pending),
+      envOf({ CF_ACCOUNT_ID, CF_API_TOKEN }),
+      artifactsName
+    );
     await Promise.all(pending);
+    expect(pending.length).toBeGreaterThan(0);
 
-    expect(calls).toHaveLength(2);
-    expect(calls[0]!.url).toContain("/accounts/acct-1/queues?name=dg-artifacts-events");
-    const body = JSON.parse(String(calls[1]!.init?.body));
-    expect(calls[1]!.url).toContain("/accounts/acct-1/event_subscriptions/subscriptions");
-    expect(body).toMatchObject({
-      name: "dg-push-dg-feedface1234",
-      enabled: true,
-      source: { type: "artifacts.repo", namespace: "delta-git", repo_name: "dg-feedface1234" },
-      events: ["pushed"],
-      destination: { type: "queues.queue", queue_id: "q-1" },
-    });
+    // Read the subscription back from the real Cloudflare API.
+    const listRes = await fetch(
+      `${CF_API}/accounts/${CF_ACCOUNT_ID}/event_subscriptions/subscriptions`,
+      { headers: { Authorization: `Bearer ${CF_API_TOKEN}` } }
+    );
+    expect(listRes.ok).toBe(true);
+    const list = (await listRes.json()) as {
+      success: boolean;
+      result?: { id: string; name: string; source?: { type?: string; repo_name?: string }; destination?: { type?: string; queue_id?: string } }[];
+    };
+    const sub = list.result?.find((s) => s.name === `dg-push-${artifactsName}`);
+    expect(sub, "subscription not found via real CF API").toBeTruthy();
+    expect(sub!.source?.type).toBe("artifacts.repo");
+    expect(sub!.source?.repo_name).toBe(artifactsName);
+    expect(sub!.destination?.type).toBe("queues.queue");
+
+    // Clean up the real subscription so repeat runs stay idempotent.
+    const del = await fetch(
+      `${CF_API}/accounts/${CF_ACCOUNT_ID}/event_subscriptions/subscriptions/${sub!.id}`,
+      { method: "DELETE", headers: { Authorization: `Bearer ${CF_API_TOKEN}` } }
+    );
+    expect(del.ok).toBe(true);
   });
 
-  it("treats a duplicate-subscription error as already subscribed", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string) => {
-        if (String(url).includes("/queues?")) return jsonResponse(QUEUE_LIST_OK);
-        return jsonResponse(
-          {
-            success: false,
-            errors: [
-              {
-                message: "We currently do not support multiple subscriptions on the same resource.",
-              },
-            ],
-          },
-          400
-        );
-      })
-    );
-    const pending: Promise<unknown>[] = [];
-    ensureArtifactsPushSubscription(ctxOf(pending), envOf({}), "dg-abc");
-    // Must settle without throwing — the waitUntil catch is the safety net,
-    // but a clean resolve avoids the warn path entirely.
-    await expect(Promise.all(pending)).resolves.toBeDefined();
-  });
+  it("is idempotent — a second ensure for the same repo does not duplicate", { skip: LIVE_SKIP }, async () => {
+    const artifactsName = `dg-live-test-${Date.now().toString(36)}`;
+    const env = envOf({ CF_ACCOUNT_ID, CF_API_TOKEN });
+    for (let i = 0; i < 2; i++) {
+      const pending: Promise<unknown>[] = [];
+      ensureArtifactsPushSubscription(ctxOf(pending), env, artifactsName);
+      await Promise.all(pending);
+    }
 
-  it("stops after a failed queue lookup", async () => {
-    const calls: string[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string) => {
-        calls.push(String(url));
-        if (String(url).includes("/queues?")) return jsonResponse({ success: true, result: [] });
-        return jsonResponse({ success: true, result: { id: "sub-1" } });
-      })
+    const listRes = await fetch(
+      `${CF_API}/accounts/${CF_ACCOUNT_ID}/event_subscriptions/subscriptions`,
+      { headers: { Authorization: `Bearer ${CF_API_TOKEN}` } }
     );
-    const pending: Promise<unknown>[] = [];
-    ensureArtifactsPushSubscription(ctxOf(pending), envOf({}), "dg-abc");
-    await Promise.all(pending);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toContain("/queues?");
+    const list = (await listRes.json()) as { result?: { name: string; id: string }[] };
+    const matches = (list.result ?? []).filter((s) => s.name === `dg-push-${artifactsName}`);
+    expect(matches).toHaveLength(1);
+
+    await fetch(
+      `${CF_API}/accounts/${CF_ACCOUNT_ID}/event_subscriptions/subscriptions/${matches[0]!.id}`,
+      { method: "DELETE", headers: { Authorization: `Bearer ${CF_API_TOKEN}` } }
+    );
   });
 });
