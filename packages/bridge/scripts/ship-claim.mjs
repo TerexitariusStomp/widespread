@@ -28,12 +28,13 @@ if (!COMMITS.length || COMMITS.some((c) => !/^[0-9a-f]{40}$/i.test(c))) {
   process.exit(1);
 }
 
+import { signDg1Request } from "@widespread/protocol";
+
 const te = new TextEncoder();
 const toHex = (b) =>
   [...new Uint8Array(b instanceof Uint8Array ? b : new Uint8Array(b))]
     .map((x) => x.toString(16).padStart(2, "0"))
     .join("");
-const sha256Hex = async (d) => toHex(await crypto.subtle.digest("SHA-256", d));
 
 // 1. Register an ephemeral agent identity.
 const pair = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
@@ -51,20 +52,14 @@ console.log(`agent  ${did}`);
 const path = `/api/${REPO}/dg/ship`;
 const body = { session_id: SESSION, tool: TOOL, commits: COMMITS.map((c) => c.toLowerCase()) };
 const bodyBytes = te.encode(JSON.stringify(body));
-const ts = String(Math.floor(Date.now() / 1000));
-const nonce = crypto.randomUUID().replace(/-/g, "");
-const payload = await sha256Hex(
-  te.encode(`dg1\n${did}\n${ts}\n${nonce}\nPOST\n${path}\n${await sha256Hex(bodyBytes)}`)
-);
-const sig = toHex(await crypto.subtle.sign("Ed25519", pair.privateKey, te.encode(payload)));
+const headers = await signDg1Request({
+  did, privateKey: pair.privateKey, method: "POST", path, body: bodyBytes,
+});
 const res = await fetch(`${HOST}${path}`, {
   method: "POST",
   headers: {
     "content-type": "application/json",
-    "x-dg-did": did,
-    "x-dg-ts": ts,
-    "x-dg-nonce": nonce,
-    "x-dg-sig": sig,
+    ...headers,
   },
   body: bodyBytes,
 });

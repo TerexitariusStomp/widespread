@@ -21,6 +21,7 @@
  */
 import { openDB } from 'idb'
 import { ed25519 } from '@noble/curves/ed25519.js'
+import { base58 } from '@scure/base'
 
 const DB_NAME = 'hermes-vault'
 const SECRETS_STORE = 'secrets'
@@ -133,41 +134,11 @@ async function resolveHeader(db, value, grantId) {
 //     under the device key; @noble/curves ed25519 signs inside this worker.
 // Either way, raw key material never crosses to page JS or the Python heap —
 // callers see `vault:<handle>` and sign through `nearSign` under a grant.
-const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
-
-function b58encode(bytes) {
-  const digits = [0]
-  for (const b of bytes) {
-    let carry = b
-    for (let i = 0; i < digits.length; i++) {
-      carry += digits[i] << 8
-      digits[i] = carry % 58
-      carry = (carry / 58) | 0
-    }
-    while (carry) { digits.push(carry % 58); carry = (carry / 58) | 0 }
-  }
-  let zeros = 0
-  while (zeros < bytes.length && bytes[zeros] === 0) zeros++
-  return '1'.repeat(zeros) +
-    digits.reverse().map((d) => B58[d]).join('')
-}
-
-function b58decode(str) {
-  const bytes = [0]
-  for (const ch of str) {
-    const v = B58.indexOf(ch)
-    if (v < 0) throw new Error('bad base58')
-    let carry = v
-    for (let i = 0; i < bytes.length; i++) {
-      carry += bytes[i] * 58
-      bytes[i] = carry & 0xff
-      carry >>= 8
-    }
-    while (carry) { bytes.push(carry & 0xff); carry >>= 8 }
-  }
-  let zeros = 0
-  while (zeros < str.length && str[zeros] === '1') zeros++
-  return Uint8Array.from(new Array(zeros).fill(0).concat(bytes.reverse()))
+// NEAR `ed25519:<base58>` secrets — base58btc via @scure/base (no checksum,
+// matching NEAR's encoding).
+const nearB58Encode = (bytes) => base58.encode(bytes)
+function nearB58Decode(str) {
+  try { return base58.decode(str) } catch { throw new Error('bad base58') }
 }
 
 const b64url = (buf) => b64(buf).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
@@ -186,14 +157,14 @@ async function webcryptoEd25519() {
 async function parseNearSecret(secret) {
   const raw = String(secret || '').trim()
   const body = raw.startsWith('ed25519:') ? raw.slice(8) : raw
-  const bytes = b58decode(body)
+  const bytes = nearB58Decode(body)
   if (bytes.length !== 64 && bytes.length !== 32)
     throw new Error('NEAR secret must be 64-byte secret_key or 32-byte seed (base58)')
   const seed = bytes.slice(0, 32)
   const pub = new Uint8Array(ed25519.getPublicKey(seed))
-  if (bytes.length === 64 && b58encode(bytes.slice(32)) !== b58encode(pub))
+  if (bytes.length === 64 && nearB58Encode(bytes.slice(32)) !== nearB58Encode(pub))
     throw new Error('NEAR secret pubkey suffix does not match the seed')
-  return { seed, pubkey: 'ed25519:' + b58encode(pub), pubBytes: pub }
+  return { seed, pubkey: 'ed25519:' + nearB58Encode(pub), pubBytes: pub }
 }
 
 async function importCryptoKey(seed, pubBytes) {
@@ -328,7 +299,7 @@ export const ops = {
         const pubBytes = new Uint8Array(
           await crypto.subtle.exportKey('raw', pair.publicKey))
         const handle = 'h_' + crypto.randomUUID().replace(/-/g, '')
-        const pubkey = 'ed25519:' + b58encode(pubBytes)
+        const pubkey = 'ed25519:' + nearB58Encode(pubBytes)
         await db.put(NEAR_KEYS_STORE, {
           handle, pubkey, accountId: m.accountId || '', label: m.label || 'near',
           created: Date.now(), revoked: false, kind: 'cryptokey',
@@ -338,7 +309,7 @@ export const ops = {
       } catch (e) { /* fall through */ }
     }
     const seed = crypto.getRandomValues(new Uint8Array(32))
-    const parsed = await parseNearSecret('ed25519:' + b58encode(seed))
+    const parsed = await parseNearSecret('ed25519:' + nearB58Encode(seed))
     return storeNearKey(db, {
       seed: parsed.seed, pubkey: parsed.pubkey, pubBytes: parsed.pubBytes,
       label: m.label, accountId: m.accountId,

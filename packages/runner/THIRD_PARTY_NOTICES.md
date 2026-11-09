@@ -15,7 +15,6 @@ stack; everything below carries its own license.
 - @defuse-protocol/one-click-sdk-typescript — ISC
 - probot — ISC; @octokit/rest — MIT (GitHub App surface)
 - isomorphic-git — MIT; dockerode — Apache-2.0 (runner)
-- @noble/ed25519 — MIT (agent/verdict identities)
 - sigstore, @sigstore/rekor-types — Apache-2.0 (Rekor attestations)
 - kleros — MIT (dispute arbitration interface)
 - hermes-agent — MIT (agent runtime)

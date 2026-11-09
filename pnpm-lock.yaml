@@ -425,6 +425,9 @@ importers:
       '@noble/curves':
         specifier: ^1.9.0
         version: 1.9.7
+      '@scure/base':
+        specifier: ^1.1.6
+        version: 1.2.6
       '@x402/near':
         specifier: ^2.29.0
         version: 2.30.0(@near-js/keystores@2.5.1(@near-js/crypto@2.5.1(@near-js/types@2.5.1)(@near-js/utils@2.5.1(@near-js/types@2.5.1)))(@near-js/types@2.5.1))(@near-js/types@2.5.1)
