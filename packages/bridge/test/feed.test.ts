@@ -3,7 +3,8 @@
 // through the real feedstore. No stubs anywhere.
 
 import { describe, expect, it } from "vitest";
-import { queryFeed, feedRss, handleMcp } from "../src/feed";
+import { queryFeed, feedRss, handleMcp, slopToRecord } from "../src/feed";
+import slopFixture from "./fixtures/slop-projects.json";
 import { seedFeedDoc, feedRecord, realEnv } from "./helpers";
 import type { FeedDoc, FeedRecord } from "../src/types";
 
@@ -71,6 +72,58 @@ describe("feedRss", () => {
     expect(xml).toContain("a &lt;b&gt; &amp; &quot;c&quot;");
     expect(xml).toContain("2 claims");
     expect(xml).not.toContain("<b>");
+  });
+});
+
+// slopToRecord maps Slop's public project registry (fixture = trimmed real
+// payload from GET slop.cash/api/v1/projects) into feed records.
+interface SlopFixtureProject {
+  id: string; status?: string; slug?: string; name?: string;
+  repositories?: { id?: string }[];
+  contribution?: { approvedScope?: string };
+  reward?: { kind?: string; monthlyCapDisplay?: string; rewardStartAt?: string };
+  authority?: { proof?: { url?: string } };
+}
+const slopProjects = (slopFixture as { projects: SlopFixtureProject[] }).projects;
+const slopProject = (id: string) => slopProjects.find((p) => p.id === id)!;
+
+describe("slopToRecord", () => {
+  const env = () => realEnv();
+
+  it("maps a USD monthly pool to a mirrorable external record", () => {
+    const r = slopToRecord(env(), slopProject("asi"))!;
+    expect(r.id).toBe("external:slop:asi");
+    expect(r.source).toBe("external:slop");
+    expect(r.forge).toBe("github");
+    expect(r.repo).toBe("SlopDotCash/asi");
+    expect(r.locator).toBe("https://github.com/SlopDotCash/asi");
+    expect(r.amount).toBe("250");
+    expect(r.currency).toBe("USD");
+    expect(r.est_usd).toBe(250);
+    expect(r.escrow.state).toBe("external");
+    expect(r.payout?.note).toContain("pledged");
+    expect(r.url).toBe("https://slop.cash/projects/asi");
+    expect(r.spec).toContain("Authority proof:");
+    expect(r.widespread_offer).toMatchObject({ action: "mirror" });
+  });
+
+  it("parses token-denominated caps without fabricating USD", () => {
+    const r = slopToRecord(env(), slopProject("hyperliquid-source"))!;
+    expect(r.amount).toBe("10000000");
+    expect(r.currency).toBe("EPYH");
+    expect(r.est_usd).toBeUndefined();
+  });
+
+  it("omits amount for $0 caps but still lists the project", () => {
+    const r = slopToRecord(env(), slopProject("delta-star"))!;
+    expect(r.amount).toBeUndefined();
+    expect(r.est_usd).toBeUndefined();
+    expect(r.title).toContain("prize share");
+  });
+
+  it("skips non-active projects and projects without repositories", () => {
+    expect(slopToRecord(env(), slopProject("beam"))).toBeNull(); // status: paused
+    expect(slopToRecord(env(), { id: "x", status: "active" })).toBeNull();
   });
 });
 

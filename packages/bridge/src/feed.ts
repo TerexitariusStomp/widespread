@@ -44,7 +44,7 @@ function mirrorOffer(env: Env, amount?: string, currency?: string): MirrorOffer 
 
 // Rough USD estimates for sort only — never settlement truth.
 const USD_MAP: Record<string, number> = {
-  USD: 1, USDC: 1, USDT: 1, PYUSD: 1, DAI: 1,
+  USD: 1, USDC: 1, USDT: 1, PYUSD: 1, DAI: 1, USDG: 1,
   NEAR: 5, SOL: 200, ETH: 3500,
 };
 
@@ -457,6 +457,88 @@ async function pollImmunefi(env: Env): Promise<FeedRecord[]> {
   }).filter((r) => r.title);
 }
 
+// ------------------------------------------------------------------- slop
+
+/** Subset of Slop's public project registry (GET slop.cash/api/v1/projects,
+ * schemaVersion "1"). Only the fields the feed consumes are typed. */
+interface SlopProject {
+  id: string; slug?: string; name?: string; headline?: string; description?: string;
+  status?: string;
+  repositories?: { id?: string; githubUrl?: string }[];
+  contribution?: { approvedScope?: string };
+  reward?: {
+    kind?: string; currency?: string; chain?: string;
+    monthlyCapDisplay?: string; rewardStartAt?: string;
+    fundingState?: string; paymentMode?: string;
+  };
+  authority?: { proof?: { url?: string; commitSha?: string; verifiedAt?: string } };
+}
+
+/** Parse Slop's display cap: "$250" → USD, "10,000,000 EPYH" → token
+ * symbol, "$0"/missing → no amount (uncapped or unpriced pools still list). */
+function slopCap(display: string | undefined): { amount?: string; currency?: string } {
+  const d = (display ?? "").trim();
+  const usd = d.match(/^\$\s*([\d,]+(?:\.\d+)?)/);
+  if (usd) {
+    const n = parseFloat(usd[1].replace(/,/g, ""));
+    return n > 0 ? { amount: String(n), currency: "USD" } : {};
+  }
+  const tok = d.match(/^([\d,]+(?:\.\d+)?)\s+([A-Za-z0-9]+)/);
+  if (tok) {
+    const n = parseFloat(tok[1].replace(/,/g, ""));
+    return n > 0 ? { amount: String(n), currency: tok[2].toUpperCase() } : {};
+  }
+  return {};
+}
+
+/** One Slop registry project → one feed record. Exported for tests. */
+export function slopToRecord(env: Env, p: SlopProject): FeedRecord | null {
+  if (p.status && p.status !== "active") return null;
+  const repo = p.repositories?.find((r) => r.id)?.id;
+  if (!repo) return null;
+  const { amount, currency } = slopCap(p.reward?.monthlyCapDisplay);
+  const usd = estUsd(amount, currency);
+  const scope = p.contribution?.approvedScope ?? p.description ?? "";
+  const proofUrl = p.authority?.proof?.url;
+  const spec = proofUrl ? `${scope}\n\nAuthority proof: ${proofUrl}` : scope;
+  const slug = p.slug ?? p.id;
+  const kindLabel = p.reward?.kind === "external-prize-share" ? "prize share" : "monthly pool";
+  return {
+    id: `external:slop:${p.id}`,
+    source: "external:slop", forge: "github", kind: "bounty",
+    repo, locator: `https://github.com/${repo}`,
+    title: `${p.name ?? p.id} — Slop ${kindLabel}`.slice(0, 200),
+    ...(spec ? { spec } : {}),
+    ...(amount ? { amount } : {}),
+    ...(currency ? { currency } : {}),
+    ...(usd ? { est_usd: usd } : {}),
+    escrow: { state: "external" },
+    payout: {
+      rails: ["slop-vault", "near-intents"],
+      note: "Slop monthly pool — published terms (fundingState pledged, payments activate per-project); settled by Slop's non-custodial vaults, not Widespread escrow",
+    },
+    verification: { required: "slopbot-review+human-exception" },
+    url: `https://slop.cash/projects/${slug}`,
+    claim: {
+      how: `mirror only — Slop pays contributors via its own vaults after Slopbot/human review; for Widespread-escrowed settlement mirror into a market at face value (platform takes ${cutBps(env) / 100}% cut)`,
+      grammar: "@widespread <amount> <spec>",
+    },
+    widespread_offer: mirrorOffer(env, amount, currency),
+    execution: EXEC_BROWSER,
+    ...(p.reward?.rewardStartAt ? { created_at: Date.parse(p.reward.rewardStartAt) || undefined } : {}),
+    updated_at: Date.now(),
+  };
+}
+
+async function pollSlop(env: Env): Promise<FeedRecord[]> {
+  // Errors propagate to runSource, which stamps the source ok:false —
+  // same failure isolation as every other upstream.
+  const data = await fetchJson("https://slop.cash/api/v1/projects", {}, 15000) as { projects?: SlopProject[] };
+  return (data?.projects ?? [])
+    .map((p) => slopToRecord(env, p))
+    .filter((r): r is FeedRecord => r !== null);
+}
+
 // ----------------------------------------------------------------- merge
 
 const SOURCE_INTERVALS: Record<string, number> = {
@@ -464,6 +546,7 @@ const SOURCE_INTERVALS: Record<string, number> = {
   github: 15 * 60 * 1000, tangled: FEED_TTL_MS,
   forgejo: 60 * 60 * 1000, codeberg: 60 * 60 * 1000, gitlab: 60 * 60 * 1000,
   radicle: 60 * 60 * 1000, "external:immunefi": 6 * 60 * 60 * 1000,
+  "external:slop": 60 * 60 * 1000,
 };
 
 async function runSource(env: Env, name: string, fn: () => Promise<FeedRecord[]>): Promise<{ stamp: SourceStamp; records: FeedRecord[] }> {
@@ -529,19 +612,20 @@ export async function refreshFeed(env: Env, ctx?: ExecutionContext): Promise<Fee
     if (existing) return existing;
   }
   try {
-    const [nearR, kvR, ghR, tgR, fwR, imR, trust] = await Promise.all([
+    const [nearR, kvR, ghR, tgR, fwR, imR, slR, trust] = await Promise.all([
       runSource(env, "near-chain", () => pollNearChain(env)),
       runSource(env, "kv-registry", () => pollKvRegistry(env)),
       runSource(env, "github", () => pollGithub(env)),
       runSource(env, "tangled", () => pollTangled(env)),
       runSource(env, "forgejo", () => pollForgeWatch(env)),
       runSource(env, "external:immunefi", () => pollImmunefi(env)),
+      runSource(env, "external:slop", () => pollSlop(env)),
       trustIndex(env),
     ]);
     const sources: FeedDoc["sources"] = {};
     for (const [name, r] of Object.entries({
       "near-chain": nearR, "kv-registry": kvR, github: ghR, tangled: tgR,
-      forgejo: fwR, "external:immunefi": imR,
+      forgejo: fwR, "external:immunefi": imR, "external:slop": slR,
     })) sources[name] = r.stamp;
 
     // Merge: fresh records replace stale ones by id; records from
@@ -549,7 +633,7 @@ export async function refreshFeed(env: Env, ctx?: ExecutionContext): Promise<Fee
     const prior = await getFeedDoc(env);
     const byId = new Map<string, FeedRecord>();
     for (const r of prior?.records ?? []) byId.set(r.id, r);
-    for (const r of [...nearR.records, ...kvR.records, ...ghR.records, ...tgR.records, ...fwR.records, ...imR.records]) {
+    for (const r of [...nearR.records, ...kvR.records, ...ghR.records, ...tgR.records, ...fwR.records, ...imR.records, ...slR.records]) {
       const t = r.repo ? trust.get(r.repo) : undefined;
       byId.set(r.id, { ...r, ...(t ? { trust: t } : {}) });
     }
@@ -930,6 +1014,15 @@ verification{required,spec_hash}, url, claim{how,grammar},
 execution{recommended,isolation}, trust{repo_claims,repo_paid,
 repo_pass_rate}, competition{pending_claims,unique_claimants},
 widespread_offer?, created_at, updated_at}\`
+
+## Sources
+
+\`near-chain\` (on-chain markets) · \`kv-registry\` · \`github\` /
+\`github-watch\` · \`github-thirdparty:<platform>\` (algora, polar,
+opire, issuehunt, gitpay, generic) · \`tangled\` · \`radicle\` ·
+\`forgejo\`/\`gitlab\`/\`codeberg\` watchlists · \`external:immunefi\` ·
+\`external:slop\` (slop.cash project registry — monthly contribution
+pools with published reward terms)
 
 ## Trust model
 

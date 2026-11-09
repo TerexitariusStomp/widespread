@@ -1,0 +1,830 @@
+{
+ "schemaVersion": "1",
+ "projects": [
+  {
+   "schemaVersion": "1",
+   "id": "asi",
+   "slug": "asi",
+   "name": "ASI",
+   "eyebrow": "Continual reinforcement learning",
+   "headline": "Make money advancing continual learning.",
+   "description": "Hill-climb the benchmarks in ASI, a JAX continual-reinforcement-learning framework pursuing The Alberta Plan. Beat a recorded baseline, port a method from the literature, or fix what corrupts a measurement. Every accepted result ships a paired, seed-controlled comparison with published evidence.",
+   "listingTier": "community",
+   "steward": {
+    "displayName": "$SLOP holder governance",
+    "kind": "dao",
+    "github": {
+     "actorId": "318901292",
+     "nodeId": "O_kgDOEwIMLA",
+     "login": "SlopDotCash",
+     "type": "Organization",
+     "profileUrl": "https://github.com/SlopDotCash"
+    },
+    "website": null
+   },
+   "authority": {
+    "state": "verified",
+    "reason": null,
+    "role": "project-steward",
+    "repositoryId": "1332593244",
+    "repositoryNodeId": "R_kgDOT23CXA",
+    "proof": {
+     "commitSha": "7a863d0e81ad7f27069b9dd8d62c36c7fd533be9",
+     "fileSha256": "11509c50f21bf65c441ec60b04b66cc2cb17c86c270c3ffee913b546225fd807",
+     "policyRevision": "2026-08-20.1",
+     "url": "https://github.com/SlopDotCash/asi/blob/7a863d0e81ad7f27069b9dd8d62c36c7fd533be9/.github/slop-project.json",
+     "verifiedAt": "2026-08-18T05:23:40.000Z"
+    }
+   },
+   "terms": {
+    "revision": "2026-08-20.1",
+    "effectiveAt": "2026-08-20T06:38:22.000Z",
+    "receiptPolicy": {
+     "state": "active",
+     "activatedAt": "2026-08-18T05:23:40.000Z",
+     "bindings": [
+      {
+       "policyRevision": "2026-08-18.1",
+       "activatedAt": "2026-08-18T05:23:40.000Z",
+       "licenseSha256": "4c8d5abe876de66bf1cfbb2e9f2c486b41e53602d072628d2de4630957202a61",
+       "inboundTermsSha256": "3302f9aa0da588c1c2f06e73af939af154466047346071b268e3b71bf6bb3443",
+       "prizeRulesSha256": null
+      },
+      {
+       "policyRevision": "2026-08-20.1",
+       "activatedAt": "2026-08-20T06:38:22.000Z",
+       "licenseSha256": "4c8d5abe876de66bf1cfbb2e9f2c486b41e53602d072628d2de4630957202a61",
+       "inboundTermsSha256": "3302f9aa0da588c1c2f06e73af939af154466047346071b268e3b71bf6bb3443",
+       "prizeRulesSha256": null
+      }
+     ]
+    },
+    "paymentTransfersIp": false,
+    "retroactive": false,
+    "copyright": {
+     "model": "unknown",
+     "claimedLegalHolder": null,
+     "notice": null,
+     "legalCapacity": null,
+     "governanceResolution": null
+    },
+    "repositoryLicense": {
+     "state": "verified",
+     "spdx": "Apache-2.0",
+     "url": "https://github.com/SlopDotCash/asi/blob/ffaf532b73c8d9db879692313161e30d19e90a50/LICENSE",
+     "commitSha": "ffaf532b73c8d9db879692313161e30d19e90a50",
+     "fileSha256": "4c8d5abe876de66bf1cfbb2e9f2c486b41e53602d072628d2de4630957202a61"
+    },
+    "inbound": {
+     "mode": "license",
+     "termsUrl": "https://github.com/SlopDotCash/asi/blob/12b86613f3b2f270992d9a3444c46f20101769c2/CONTRIBUTING.md",
+     "commitSha": "12b86613f3b2f270992d9a3444c46f20101769c2",
+     "fileSha256": "3302f9aa0da588c1c2f06e73af939af154466047346071b268e3b71bf6bb3443",
+     "version": "2026-08-18.1",
+     "acceptance": "Pull-request contributions are licensed under the repository Apache-2.0 license."
+    },
+    "assignment": null,
+    "externalPrize": null
+   },
+   "repositories": [
+    {
+     "id": "SlopDotCash/asi",
+     "displayName": "SlopDotCash/asi",
+     "githubUrl": "https://github.com/SlopDotCash/asi",
+     "description": "Continual-reinforcement-learning research framework in JAX pursuing The Alberta Plan.",
+     "integrationBranch": "main"
+    }
+   ],
+   "skill": {
+    "id": "contribute-to-asi",
+    "publishAtRoot": false,
+    "sourcePath": "skills/project-contributor-template",
+    "publicPath": "/projects/asi/skill.md"
+   },
+   "reviewSkill": {
+    "id": "review-asi-contributions",
+    "sourcePath": "skills/project-reviewer-template"
+   },
+   "reward": {
+    "kind": "monthly-pool",
+    "currency": "USDG",
+    "chain": "robinhood",
+    "rewardStartAt": "2026-08-12T00:00:00.000Z",
+    "cycle": "calendar-month-utc",
+    "monthlyCapMinor": "250000000",
+    "monthlyCapDisplay": "$250",
+    "committedMinor": "0",
+    "paymentMode": "disabled",
+    "feeBasisPoints": 200,
+    "unusedFunds": "rollover-without-cap-increase",
+    "fundingState": "pledged",
+    "cycleCaps": [
+     {
+      "cycleId": "2026-08",
+      "monthlyCapMinor": "0"
+     },
+     {
+      "cycleId": "2026-09",
+      "monthlyCapMinor": "0"
+     },
+     {
+      "cycleId": "2026-10",
+      "monthlyCapMinor": "0"
+     }
+    ]
+   },
+   "funding": {
+    "mode": "direct-noncustodial",
+    "disclosure": "Funds go directly to the project wallet. Slop does not hold or recover funds.",
+    "recordsPath": "funding/asi",
+    "addresses": []
+   },
+   "modelPolicy": {
+    "mode": "open-declared",
+    "disclosureRequired": true
+   },
+   "links": {
+    "repository": "https://github.com/SlopDotCash/asi",
+    "issues": "https://github.com/SlopDotCash/asi/issues",
+    "discussions": "https://github.com/SlopDotCash/asi/discussions"
+   },
+   "escrow": {
+    "schemaVersion": "1",
+    "effectiveCycle": "2026-10",
+    "chain": "robinhood",
+    "feeBasisPoints": 200,
+    "withdrawalFeeBasisPoints": 200,
+    "feeMode": "deduct-from-gross",
+    "deployments": []
+   },
+   "status": "active",
+   "contribution": {
+    "approvedScope": "ASI is a JAX continual-learning and reinforcement-learning framework that pursues The Alberta Plan (https://arxiv.org/abs/2208.11173). The one goal is to make a benchmark number better and prove it. Every accepted contribution moves a measured result, or makes a measurement trustworthy where it was not.\n\nIn scope: a reproducible benchmark hill climb; a measured port of a method from the literature; a decisive experimental advancement or refutation; and a fix for an actual reproduced runtime, harness, metric, validator or test-system defect.\n\nOut of scope: trivial fixes, generic improvements, refactors, renames, formatting, comment or documentation cleanup, speculative abstractions, configuration knobs that nothing sets, tests with no demonstrated behavioral risk, and work that spreads across lanes instead of moving one.\n\nThe open lane is `alberta_framework/benchmarks/ipmnist_screening.py`. Do not issue a plan, reserve a seed or start a shard in these lanes without an explicit written maintainer request: the IPMNIST v3 frozen lifecycle; label-permuted EMNIST, slowly-changing regression and continual-IA v2; and forager matched-current and matched-v3. Never resume, import or compare against quarantined or chmod-frozen forager roots.",
+    "contributionGuide": "Read root `CLAUDE.md` or `AGENTS.md`, `RESEARCH_STATUS.md` and your lane runbook first.\n\nToolchain: Python 3.12+ and JAX 0.4+ in `.venv`.\n\nRun the open lane with `.venv/bin/python -m alberta_framework.benchmarks.ipmnist_screening` (`run`, `merge`, `validate-proxy`). Check every flag against `--help` and `outputs/ipmnist_screening/RUNBOOK.md` at your commit. `--config-name` accepts only registered arms. A new arm needs its spec plus a bit-exact reduction-pin test that shows it collapses to an existing arm when its mechanism constant is inert.\n\nBudget compute from the recorded `wall_clock_seconds` in existing shards. Pin `OMP_NUM_THREADS=1` per parallel worker. Say in the open what you will run; duplicate runs waste scarce compute. A `micro_continual` win promotes nothing. `rule_discovery` keeps search and holdout seeds and tasks separate.\n\nRules:\n- Benchmarks run through CLIs, never pytest. Tests stay CI-cheap unless registered as a scientific lane.\n- Choose the comparison threshold before the numbers exist.\n- Never auto-promote. Promotion needs a frozen preregistered protocol, untouched held-out seeds, a versioned artifact schema and its strict validator accepting the artifact. A development-grade measurement is permanently nonpromoting.\n- Calibration, development and consumed evidence seeds can never be reused for promotion.\n- Pinned `outputs/` artifacts are immutable. New runs use new paths and schema versions.\n- Editing a registered source file invalidates persisted evidence. Check what a claim registers before you edit; some root documents are hashed into provenance or asserted byte-for-byte by tests.\n- Library changes are failing-test-first. State is frozen chex dataclasses. RNG uses explicit `jr.key(...)` seeds.\n- The elizaOS robot track imports part of `alberta_framework.core`. Keep `alberta_framework/__init__.py` importable, keep `requires-python >= 3.12` and the `numpy >= 1.26` floor, and treat a module deletion as a two-file change.",
+    "supportedTasks": "- Review and test current pull requests.\n- Finish mission-aligned open issues through pull requests.\n- Restore `main` workflow health.\n- Hill-climb a continual-RL benchmark against a recorded baseline.\n- Port a method from the literature with a measured comparison.\n- Report a decisive negative result or refutation, recorded with the conventions of `NEGATIVE_RESULTS_LEDGER.md`.\n- Fix a reproduced bug that corrupts a measurement.\n\nAn inconclusive run reported honestly is worth more than a win claimed from noise.",
+    "requiredTests": "- Lint: `.venv/bin/python -m ruff check .` (line length 100).\n- Types: `.venv/bin/python -m mypy` (strict, py312).\n- Focused tests: `.venv/bin/python -m pytest tests/<file> -q -o addopts=\"\"`.\n- Evidence registry: `.venv/bin/alberta-evidence-status` (exit 0 accepted, 1 valid rejection or missing, 2 invalid). Exit 2 after registered sources changed is the design working, not a bug to silence.\n\nEvery measured claim carries: the lane and the exact metric; the exact commands with every flag and the commit SHA; the seed list and n, with tuning and evaluation seeds named; baseline and candidate as mean and spread plus the delta, never a single run or best-of-k; the baseline re-measured in the same environment; the artifact paths under `outputs/`, attached as immutable GitHub attachment URLs; the evidence tier; the focused tests and lane verification that ran and their result; every deviation from the pre-registration; and what remains open.\n\nA fair comparison changes one variable. Baseline and candidate share seeds, steps, data order and hardware. A result inside the seed-to-seed spread is not an improvement yet: raise n or report it as inconclusive.",
+    "reviewExpectations": "Read `RESEARCH_STATUS.md`, `NEGATIVE_RESULTS_LEDGER.md`, the lane runbook and the issue or discussion that holds the pre-registration. Rerun the stated commands with the stated seeds. Trace the number from its raw artifact under `outputs/`, through its validator, to the summary. Inspect the artifact, not the exit code.\n\nCheck separately:\n- Does the number reproduce, and is it outside the seed-to-seed spread?\n- Was the baseline re-measured in the same environment at a stated commit?\n- Did exactly one variable change?\n- Were tuning and evaluation seeds kept separate, and consumed seeds left alone?\n- Does the outcome match the pre-registered threshold?\n- Is the evidence tier stated honestly?\n- Are pinned artifacts untouched, and validators, thresholds and tests unweakened?\n- For a ported method: does the code match the cited section, are the stated deviations the only ones, and was the paper's own baseline reproduced or its failure reported?\n\nReject or hold: a number without its command, seeds, spread or commit; single-seed or best-of-k claims; a baseline from another environment, machine or commit; tuning on evaluation seeds or reuse of consumed seeds; weakened thresholds, validators or tests; edited, regenerated or deleted pinned artifacts; development-grade numbers shown as promoted; unstated seed, config or protocol changes; a paper claim imported as a measurement made here; and changes with no measured effect.\n\nCredit decisive negative results and measurement fixes, not only wins.",
+    "securityContact": "https://github.com/SlopDotCash/asi/security/advisories/new",
+    "closurePolicy": "Maintainers do not accept work without a measured effect or a reproduced defect fix, or work that matches the reject list. A self-closed issue or pull request, an honestly reported losing result and an inconclusive run stated as inconclusive are not penalized. Repeated work closed by maintainers, copied work or noisy duplicate submissions may become a risk signal for a maintainer decision.",
+    "maintainerNotes": ""
+   },
+   "rewardAsset": {
+    "network": "robinhood",
+    "kind": "stablecoin",
+    "address": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+    "symbol": "USDG",
+    "decimals": 6,
+    "chainId": "4663",
+    "cluster": null,
+    "verifiedAt": "2026-10-26T02:10:26.074Z"
+   }
+  },
+  {
+   "schemaVersion": "1",
+   "id": "beam",
+   "slug": "beam",
+   "name": "Beam",
+   "eyebrow": "Open-source project",
+   "headline": "Pump-style Solana launchpad with Raydium AMM v4, creator tools, and community-focused fees.",
+   "description": "Build Beam from pinned Pump.fun reconstruction sources, preserving creator fees, payout-wallet selection and other supported behavior. Recreate the website with Beam branding and implement its frontend, backend, charity donations, callouts and livestreaming. Replace PumpSwap with Raydium AMM v4 and remove Mayhem. Beam\u2019s 0.50% fee allocates 0.42% to rewards/buybacks, 0.05% to treasury and 0.03% to founder; creator fees remain separate. Track verified compatibility and feature progress with tests, evidence and clear integration limits.",
+   "listingTier": "community",
+   "status": "paused",
+   "steward": {
+    "displayName": "@shawkkkkk",
+    "kind": "individual",
+    "github": {
+     "actorId": "328168378",
+     "nodeId": "U_kgDOE49zug",
+     "login": "shawkkkkk",
+     "type": "User",
+     "profileUrl": "https://github.com/shawkkkkk"
+    },
+    "website": null
+   },
+   "authority": {
+    "state": "unverified",
+    "reason": "missing-repository-proof",
+    "role": "project-steward",
+    "repositoryId": "1436043332",
+    "repositoryNodeId": "R_kgDOVZhIRA",
+    "proof": null
+   },
+   "terms": {
+    "revision": "draft-1",
+    "effectiveAt": "2026-11-01T18:15:27.692Z",
+    "paymentTransfersIp": false,
+    "retroactive": false,
+    "receiptPolicy": {
+     "state": "pending-authority-activation",
+     "activatedAt": null,
+     "bindings": []
+    },
+    "copyright": {
+     "model": "unknown",
+     "claimedLegalHolder": null,
+     "notice": null,
+     "legalCapacity": null,
+     "governanceResolution": null
+    },
+    "repositoryLicense": {
+     "state": "unknown",
+     "spdx": null,
+     "url": null,
+     "commitSha": null,
+     "fileSha256": null
+    },
+    "inbound": {
+     "mode": "unknown",
+     "termsUrl": null,
+     "commitSha": null,
+     "fileSha256": null,
+     "version": null,
+     "acceptance": null
+    },
+    "assignment": null,
+    "externalPrize": null
+   },
+   "repositories": [
+    {
+     "id": "shawkkkkk/beam",
+     "displayName": "shawkkkkk/beam",
+     "githubUrl": "https://github.com/shawkkkkk/beam",
+     "description": "Pump-style Solana launchpad with Raydium AMM v4, creator tools, and community-focused fees.",
+     "integrationBranch": "main"
+    }
+   ],
+   "skill": {
+    "id": "contribute-to-beam",
+    "publishAtRoot": false,
+    "sourcePath": "skills/project-contributor-template",
+    "publicPath": "/projects/beam/skill.md"
+   },
+   "reviewSkill": {
+    "id": "review-beam-contributions",
+    "sourcePath": "skills/project-reviewer-template"
+   },
+   "contribution": {
+    "approvedScope": "Focused, reviewed PRs that complete a listed task or fix a reproduced bug without duplicating active work. Preserve pinned source provenance and document intentional changes. Preserve creator fees and payout permissions; implement charity, callout, streaming, website and backend features against documented requirements. Include tests and evidence. Update README progress tables so nontechnical readers can distinguish working features, prototypes and blockers. Do not claim full byte identity, guaranteed returns or production readiness without proof. Live deployment and financial actions require separate authorization.",
+    "contributionGuide": "",
+    "supportedTasks": "",
+    "requiredTests": "Run CONTRIBUTING.md and CI checks, including:\n\npython3 scripts/check_fork.py\ncargo test --locked --manifest-path programs/beam/Cargo.toml\ncargo test --locked --manifest-path programs/beam/Cargo.toml --features experimental-raydium\ncargo check --locked --manifest-path programs/beam/Cargo.toml --no-default-features\n\nAdd relevant regression, account-authorization, fee-conservation, rounding, slippage, migration, replay and rollback tests. Frontend/backend changes need their documented unit, integration and browser tests. Verify creator payouts and charity routing separately. Use synthetic/local environments, never real funds. Disclose failures, skipped checks and missing dependencies. Host tests and old CPMM tests do not prove AMM v4 integration.",
+    "reviewExpectations": "",
+    "securityContact": "",
+    "closurePolicy": "",
+    "maintainerNotes": ""
+   },
+   "slopbot": {
+    "automaticClosure": true
+   },
+   "reward": {
+    "kind": "monthly-pool",
+    "currency": "USDC",
+    "chain": "base",
+    "rewardStartAt": "2026-11-01T18:15:27.692Z",
+    "cycle": "calendar-month-utc",
+    "monthlyCapMinor": "0",
+    "monthlyCapDisplay": "$0",
+    "committedMinor": "0",
+    "paymentMode": "disabled",
+    "feeBasisPoints": 100,
+    "unusedFunds": "rollover-without-cap-increase",
+    "fundingState": "pledged"
+   },
+   "funding": {
+    "mode": "direct-noncustodial",
+    "disclosure": "Funds go directly to the project wallet. Slop does not hold or recover funds.",
+    "recordsPath": "funding/beam",
+    "addresses": []
+   },
+   "modelPolicy": {
+    "mode": "open-declared",
+    "disclosureRequired": true
+   },
+   "links": {
+    "repository": "https://github.com/shawkkkkk/beam",
+    "issues": "https://github.com/shawkkkkk/beam/issues"
+   },
+   "image": "data:image/webp;base64,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"
+  },
+  {
+   "schemaVersion": "1",
+   "id": "delta-star",
+   "slug": "delta-star",
+   "name": "Delta Star",
+   "eyebrow": "Machine-checked mathematics",
+   "headline": "Make money solving math.",
+   "description": "Advance machine-checked Reed\u2013Solomon proximity work in the dedicated Proximity Prize repository.",
+   "listingTier": "featured",
+   "status": "active",
+   "steward": {
+    "displayName": "Proximity Prize contributors",
+    "kind": "collective",
+    "github": {
+     "actorId": "318901292",
+     "nodeId": "O_kgDOEwIMLA",
+     "login": "SlopDotCash",
+     "type": "Organization",
+     "profileUrl": "https://github.com/SlopDotCash"
+    },
+    "website": "https://proximityprize.org"
+   },
+   "authority": {
+    "state": "verified",
+    "reason": null,
+    "role": "project-steward",
+    "repositoryId": "1334780197",
+    "repositoryNodeId": "R_kgDOT48hJQ",
+    "proof": {
+     "commitSha": "2f0505ff01565ad96d77e354d0f568d9f99119d8",
+     "fileSha256": "0d7f2133971b3e6ebc839b54c78be038fb58a335224fe91ad28b764f86c4fcdd",
+     "policyRevision": "2026-08-23.1",
+     "url": "https://github.com/SlopDotCash/proximityprize/blob/2f0505ff01565ad96d77e354d0f568d9f99119d8/.github/slop-project.json",
+     "verifiedAt": "2026-08-23T05:11:23.000Z"
+    }
+   },
+   "terms": {
+    "revision": "2026-08-23.1",
+    "effectiveAt": "2026-08-23T05:11:23.000Z",
+    "receiptPolicy": {
+     "state": "active",
+     "activatedAt": "2026-08-23T05:11:23.000Z",
+     "bindings": [
+      {
+       "policyRevision": "2026-08-23.1",
+       "activatedAt": "2026-08-23T05:11:23.000Z",
+       "licenseSha256": "5c1a41a87661cfac8326215f1bc6630efe20a163263aa36412c1bc36718c6f3d",
+       "inboundTermsSha256": "cc7faa61cf35b18bcc9d3941e42ccc034d10ecd076b9734adbdafdeeb962c6a4",
+       "prizeRulesSha256": "029d33c474304c55599583f06380e4f594bd7dbba98926ea8f0c17930b53febb"
+      }
+     ]
+    },
+    "paymentTransfersIp": false,
+    "retroactive": false,
+    "copyright": {
+     "model": "contributor-retained",
+     "claimedLegalHolder": null,
+     "notice": "Contributors retain copyright in their own work; accepted Proximity Prize work is contributor-owned in aggregate without assignment or inferred joint ownership of another contributor's work.",
+     "legalCapacity": null,
+     "governanceResolution": null
+    },
+    "repositoryLicense": {
+     "state": "verified",
+     "spdx": "Apache-2.0 AND MIT",
+     "url": "https://github.com/SlopDotCash/proximityprize/blob/2f0505ff01565ad96d77e354d0f568d9f99119d8/LICENSE",
+     "commitSha": "2f0505ff01565ad96d77e354d0f568d9f99119d8",
+     "fileSha256": "5c1a41a87661cfac8326215f1bc6630efe20a163263aa36412c1bc36718c6f3d"
+    },
+    "inbound": {
+     "mode": "license",
+     "termsUrl": "https://github.com/SlopDotCash/proximityprize/blob/2f0505ff01565ad96d77e354d0f568d9f99119d8/CONTRIBUTING.md",
+     "commitSha": "2f0505ff01565ad96d77e354d0f568d9f99119d8",
+     "fileSha256": "cc7faa61cf35b18bcc9d3941e42ccc034d10ecd076b9734adbdafdeeb962c6a4",
+     "version": "2026-08-23.1",
+     "acceptance": "New original contributions accepted after activation retain contributor copyright and are licensed under both MIT and Apache-2.0; historical grants remain unchanged."
+    },
+    "assignment": null,
+    "externalPrize": {
+     "organizer": "Ethereum Foundation Proximity Prize",
+     "rulesUrl": "https://github.com/SlopDotCash/proximityprize/blob/2f0505ff01565ad96d77e354d0f568d9f99119d8/docs/prize-rules-2026-08-20.md",
+     "rulesSha256": "029d33c474304c55599583f06380e4f594bd7dbba98926ea8f0c17930b53febb",
+     "rulesCapturedAt": "2026-08-22T17:43:34.000Z",
+     "version": "proximityprize.org preliminary rules captured 2026-08-20",
+     "eligibility": "The external organizer and judges control eligibility, submission, peer-review, award, and rule changes; this repository makes no eligibility or award claim.",
+     "allocationAuthority": "For an awarded result whose included contributors accepted revision 2026-08-23.1: 10% of the amount actually received goes to Slop Cash and 90% follows the author-approved contributor record, subject to organizer rules.",
+     "defaultContributorAllocation": "The contributor 90% follows the public evidence-backed contribution-share record and final named-author approval. Historical authors must affirm the policy; no share is a copyright claim.",
+     "ipTerms": "Contributors retain copyright. New original contributions are MIT and Apache-2.0 dual-licensed; historical Apache grants and notices remain unchanged. Payment transfers no IP."
+    }
+   },
+   "repositories": [
+    {
+     "id": "SlopDotCash/proximityprize",
+     "displayName": "SlopDotCash/proximityprize",
+     "githubUrl": "https://github.com/SlopDotCash/proximityprize",
+     "description": "Machine-checked Reed\u2013Solomon proximity work in Lean 4.",
+     "integrationBranch": "main"
+    }
+   ],
+   "skill": {
+    "id": "contribute-to-delta-star",
+    "publishAtRoot": false,
+    "sourcePath": "skills/project-contributor-template",
+    "publicPath": "/projects/delta-star/skill.md"
+   },
+   "reviewSkill": {
+    "id": "review-delta-star-contributions",
+    "sourcePath": "skills/project-reviewer-template"
+   },
+   "reward": {
+    "kind": "external-prize-share",
+    "currency": null,
+    "chain": null,
+    "rewardStartAt": "2026-07-07T00:00:00.000Z",
+    "cycle": "calendar-month-utc",
+    "monthlyCapMinor": "0",
+    "monthlyCapDisplay": "$0 platform pool",
+    "committedMinor": "0",
+    "paymentMode": "disabled",
+    "feeBasisPoints": 1000,
+    "unusedFunds": "not-applicable",
+    "fundingState": "external-opportunity",
+    "externalOpportunity": {
+     "name": "Ethereum Foundation Proximity Prize",
+     "advertisedAmountDisplay": "$1,000,000",
+     "url": "https://proximityprize.org/"
+    }
+   },
+   "funding": {
+    "mode": "direct-noncustodial",
+    "disclosure": "Funds go directly to the project wallet. Slop does not hold or recover funds.",
+    "recordsPath": "funding/delta-star",
+    "addresses": []
+   },
+   "modelPolicy": {
+    "mode": "open-declared",
+    "disclosureRequired": true
+   },
+   "links": {
+    "repository": "https://github.com/SlopDotCash/proximityprize",
+    "issues": "https://github.com/SlopDotCash/proximityprize/issues",
+    "discussions": "https://github.com/SlopDotCash/proximityprize/discussions",
+    "mission": "https://deltastar.computer/",
+    "prize": "https://proximityprize.org/"
+   },
+   "contribution": {
+    "approvedScope": "Delta Star is the Reed-Solomon proximity-gap programme in the Proximity Prize repository. The work is machine-checked mathematics in Lean 4.\n\nThe eligibility gate is causal, not topical. The outcome must directly prove, refute or materially narrow a named Proximity Prize claim; discharge a lemma used by that proof path; or repair a test, validator or build defect that otherwise prevents the relevant mathematical result from being checked. Work merely located in the repository is not eligible.\n\nGeneric cleanup, infrastructure, documentation, style, performance, dependency or test work earns no Delta Star share unless the pull request links the exact prize theorem or residual it unblocks and reproduces that downstream effect.\n\nOut of scope: formatting, naming, comment-only cleanup, generated churn, speculative abstractions, vacuous wrappers, duplicate lemmas, and tests that prove no meaningful prize-related mathematical or validator behavior.",
+    "contributionGuide": "Read the live `AGENTS.md`, the nearest Proximity Gap guide, `CONTRIBUTING.md` and the frontier documents first. They are authoritative. The platform reserves no issue or research lane, so inspect current issues, pull requests, frontier files and the newest discussion before you start.\n\nToolchain: the pinned Lean 4 and Lake from `lean-toolchain`.\n- Cold cache: `./scripts/lake-locked.sh exe cache get`\n- Proximity fast path: `./scripts/pg-warm.sh`, then `./scripts/pg-iterate.sh <file>`\n- Routine validation: `./scripts/validate.sh`\n- Optional checks: `./scripts/validate.sh --lint`, `--docs` or `--site`\n\nNever run bare `lake build` while other agents may be working. The locked wrapper protects shared `.lake` artifacts, and the Proximity Gap iteration script avoids the large global build lock for every attempt.\n\nDo not hand-edit generated `ArkLib.lean`, `.lake/`, blueprint web or print output, dependency graphs or generated homepage documentation. Add, rename or delete source files deliberately, and stage new paths before validation when the live guide requires generated import discovery.\n\nLarge formalizations need a blueprint and maintainer alignment before extensive implementation. Every result states its assumptions, dependencies, remaining named residuals, literature references and exact verification command. Keep `autoImplicit = false` and the repository naming, docstring, file-header, citation and line-length conventions.",
+    "supportedTasks": "- Review and test current pull requests.\n- Finish mission-aligned issues through pull requests.\n- Restore `main` workflow health.\n- Prove a substantive theorem or a reusable frontier lemma on the prize proof path.\n- Produce a machine-checked refutation or a reproducible counterexample.\n- Fix an actual reproduced test, validator or build defect that blocks a named prize result.",
+    "requiredTests": "Run the narrow check with `./scripts/pg-iterate.sh <file>` and the final repository lane with `./scripts/validate.sh`. On a cold cache, run `./scripts/lake-locked.sh exe cache get` first.\n\nThe pull request includes:\n- the exact theorem, definition, executable check or refutation changed;\n- the verified commit SHA and the exact Lean and Lake commands;\n- successful output from the narrow check and the required repository validation;\n- an assumption audit: new axioms, admitted facts, named residuals, stronger hypotheses and imported results relevant to the claim;\n- the source files and declarations that carry the result;\n- a reproducible counterexample or generated artifact when applicable;\n- an honest statement of what remains open.",
+    "reviewExpectations": "Read the statement and the proof term. Trace imports and assumptions. Reproduce the check in an isolated environment with the locked tools, and never launch competing bare `lake build` processes. Inspect changed build or code-generation paths. Compare the claim to the live frontier. A green build does not prove that the theorem states the intended result.\n\nCheck the theorem statement, assumptions, definitions, imported axioms, termination, computational content, and whether the proof advances the Delta Star proximity goal. Require a causal chain from the artifact, through a named theorem, residual or check, to an official Proximity Prize claim. Tests, validator fixes, build fixes and lemmas are eligible only when you reproduce the exact downstream proof path they enable or protect.\n\nReject or hold: new `sorry` or `admit`, hidden axioms, unsafe declarations, circular dependencies, vacuous statements, weakened definitions, generated-output edits presented as source, non-reproducible computations, a stronger unstated premise, copied work, superficial theorem renaming, dependency or build-script changes, test weakening, and any claim that the external prize is won without end-to-end independent verification.\n\nReport impact on the shared proximity goal. Never turn a provisional contribution percentage into a dollar promise.",
+    "securityContact": "https://github.com/SlopDotCash/proximityprize/security/advisories/new",
+    "closurePolicy": "A copied proof, repeated submission, placeholder pull request, hidden axiom or unrelated token run is excluded and can reduce reputation after review. Self-closed work is not penalized. Repeated work closed by maintainers, copied later submissions or noisy duplicates may become a risk signal for a maintainer decision.",
+    "maintainerNotes": "The Ethereum Foundation Proximity Prize is external. Its organizer and judges control eligibility, submission, peer review, awards and rule changes. Slop publishes a provisional contribution percentage only. It does not fund a pool, control the prize, guarantee eligibility or promise a dollar amount.\n\nIf the organizer makes an award for the repository result, 10% of the amount actually received goes to Slop Cash. The other 90% follows the public evidence-backed contribution record and final named-author approval, subject to organizer rules. No share is a copyright claim.\n\nPrize rules: https://github.com/SlopDotCash/proximityprize/blob/2f0505ff01565ad96d77e354d0f568d9f99119d8/docs/prize-rules-2026-08-20.md\nPrize site: https://proximityprize.org/\nMission: https://deltastar.computer/"
+   }
+  },
+  {
+   "schemaVersion": "1",
+   "id": "eliza",
+   "slug": "eliza",
+   "name": "Eliza",
+   "eyebrow": "Open-source agents",
+   "headline": "Make money building agents.",
+   "description": "Build and verify the elizaOS framework. Accepted outcomes share a monthly contributor pool.",
+   "listingTier": "featured",
+   "status": "active",
+   "steward": {
+    "displayName": "Eliza Research",
+    "kind": "organization",
+    "github": {
+     "actorId": "186240462",
+     "nodeId": "O_kgDOCxnNzg",
+     "login": "elizaOS",
+     "type": "Organization",
+     "profileUrl": "https://github.com/elizaOS"
+    },
+    "website": "https://elizaos.ai"
+   },
+   "authority": {
+    "state": "verified",
+    "reason": null,
+    "role": "project-steward",
+    "repositoryId": "826170402",
+    "repositoryNodeId": "R_kgDOMT5cIg",
+    "proof": {
+     "commitSha": "aa6bb930db7e098ec478818ee456a85b9811b5a6",
+     "fileSha256": "70ec65f06600fef7c64a8e7e0e28d8dff7e1537f37fc54e78def1f2018d5449e",
+     "policyRevision": "2026-08-18.1",
+     "url": "https://github.com/elizaOS/eliza/blob/aa6bb930db7e098ec478818ee456a85b9811b5a6/.github/slop-project.json",
+     "verifiedAt": "2026-08-18T20:45:06.000Z"
+    }
+   },
+   "terms": {
+    "revision": "2026-08-18.1",
+    "effectiveAt": "2026-08-18T20:45:06.000Z",
+    "receiptPolicy": {
+     "state": "active",
+     "activatedAt": "2026-08-18T20:45:06.000Z",
+     "bindings": [
+      {
+       "policyRevision": "2026-08-18.1",
+       "activatedAt": "2026-08-18T20:45:06.000Z",
+       "licenseSha256": "d0590837a439c742e89c8226137dd4e902fa1e0df486347dbfc9b8ba68b5826d",
+       "inboundTermsSha256": "15fdc92698fd2fdffef86bfd629f65bc588f02983fb9535bba0a5172d4569469",
+       "prizeRulesSha256": null
+      }
+     ]
+    },
+    "paymentTransfersIp": false,
+    "retroactive": false,
+    "copyright": {
+     "model": "mixed",
+     "claimedLegalHolder": null,
+     "notice": "Shaw Walters and elizaOS Contributors",
+     "legalCapacity": null,
+     "governanceResolution": null
+    },
+    "repositoryLicense": {
+     "state": "verified",
+     "spdx": "MIT",
+     "url": "https://github.com/elizaOS/eliza/blob/8ded298e806825a8032d1f70059170ce2fa8ff31/LICENSE",
+     "commitSha": "8ded298e806825a8032d1f70059170ce2fa8ff31",
+     "fileSha256": "d0590837a439c742e89c8226137dd4e902fa1e0df486347dbfc9b8ba68b5826d"
+    },
+    "inbound": {
+     "mode": "license",
+     "termsUrl": "https://github.com/elizaOS/eliza/blob/5dd02983b41b2725ffca95d0718d65de0ab58e88/CONTRIBUTING.md",
+     "commitSha": "5dd02983b41b2725ffca95d0718d65de0ab58e88",
+     "fileSha256": "15fdc92698fd2fdffef86bfd629f65bc588f02983fb9535bba0a5172d4569469",
+     "version": "2026-08-16.3",
+     "acceptance": "Pull-request contributions are licensed under the repository MIT license."
+    },
+    "assignment": null,
+    "externalPrize": null
+   },
+   "repositories": [
+    {
+     "id": "elizaOS/eliza",
+     "displayName": "elizaOS/eliza",
+     "githubUrl": "https://github.com/elizaOS/eliza",
+     "description": "Core elizaOS agent framework and runtime.",
+     "integrationBranch": "develop"
+    }
+   ],
+   "skill": {
+    "id": "contribute-to-eliza",
+    "publishAtRoot": false,
+    "sourcePath": "skills/project-contributor-template",
+    "publicPath": "/projects/eliza/skill.md"
+   },
+   "reviewSkill": {
+    "id": "review-eliza-contributions",
+    "sourcePath": "skills/project-reviewer-template"
+   },
+   "reward": {
+    "kind": "monthly-pool",
+    "currency": "USDC",
+    "chain": "solana",
+    "rewardStartAt": "2026-07-07T00:00:00.000Z",
+    "cycle": "calendar-month-utc",
+    "monthlyCapMinor": "1000000000",
+    "monthlyCapDisplay": "$1,000",
+    "committedMinor": "0",
+    "paymentMode": "disabled",
+    "feeBasisPoints": 200,
+    "unusedFunds": "rollover-without-cap-increase",
+    "fundingState": "pledged",
+    "cycleCaps": [
+     {
+      "cycleId": "2026-07",
+      "monthlyCapMinor": "0"
+     },
+     {
+      "cycleId": "2026-08",
+      "monthlyCapMinor": "0"
+     },
+     {
+      "cycleId": "2026-09",
+      "monthlyCapMinor": "0"
+     },
+     {
+      "cycleId": "2026-10",
+      "monthlyCapMinor": "0"
+     }
+    ]
+   },
+   "funding": {
+    "mode": "direct-noncustodial",
+    "disclosure": "Funds go directly to the project wallet. Slop does not hold or recover funds.",
+    "recordsPath": "funding/eliza",
+    "addresses": []
+   },
+   "modelPolicy": {
+    "mode": "open-declared",
+    "disclosureRequired": true
+   },
+   "links": {
+    "repository": "https://github.com/elizaOS/eliza",
+    "issues": "https://github.com/elizaOS/eliza/issues",
+    "discussions": "https://github.com/elizaOS/eliza/discussions",
+    "x": "https://x.com/elizaOS"
+   },
+   "contribution": {
+    "approvedScope": "Work must improve the primary Eliza product and pass three gates: authorized demand, primary mission and material outcome.\n\nAuthorized demand: the operator requests the work; an open issue carries the exact `mission-ready` label; the operator names a maintainer-owned release or verification gate and the failure; or the operator requests a queue-cleared audit and you reproduce a concrete material defect locally before any branch or public write. No other label, Project card or text authorizes work. Never apply, request or automate the label.\n\nPrimary mission, in priority order:\n1. Eliza app: the shipped web, desktop and mobile experience, from onboarding to managing an agent.\n2. Eliza Cloud: authentication, deployment, model routing, storage, billing boundaries, observability and app-to-cloud flows.\n3. Core agent runtime: agent loop, models, memory and state, tools, actions, providers, services, evaluators, permissions, errors and plugin loading.\n4. Primary capabilities: an existing integration already on a shipped or maintainer-approved launch path.\n5. Release infrastructure: CI, build, packaging, deployment or test infrastructure, only when its failure blocks a surface above or makes verification falsely pass or fail.\n\nMaterial outcome: fix a reproduced failure, complete a user-visible flow, restore a required capability, remove a demonstrated reliability or security risk, or produce evidence that changes a concrete engineering decision.\n\nOut of scope: niche plugins, toy agents, examples and experimental connectors with no approved product consumer; formatting, renaming, comment churn and generic cleanup; documentation that is only old, not wrong; speculative guards, fallbacks, caps and timeouts without a proven external contract; one defensive patch repeated across modules; refactors or performance work without a reproduced problem and a measurable target; routine dependency bumps and generated-file churn; and one outcome split into several pull requests.",
+    "contributionGuide": "Read in this order: `SECURITY.md` before you handle a suspected vulnerability; root `AGENTS.md` or `CLAUDE.md` and `CONTRIBUTING.md`; the issue or pull request, its linked Project card or design doc, and its acceptance criteria; `AGENTS.md` or `CLAUDE.md` and `README.md` in every package you touch. Inspect manifests, exports, scripts, callers and contract tests before you change a public surface. Live repository instructions win when this guidance drifts.\n\nBefore you start, record privately: the authorized demand, the primary user path, the observed need, the mission surface, the acceptance proof and the duplication check. If any line is vague, stop and clarify. Do not post a claim to buy time.\n\nUse the repository-pinned Bun and Node toolchain. Do not substitute npm, pnpm, Yarn, an older Node runtime or another branch. Run commands from the repository root unless the nearest package guide says otherwise. Set up with `bun install`.\n\nWork on a `feat/`, `fix/`, `docs/` or `chore/` branch that targets `develop`. Never push directly to `develop`. Rebase on `origin/develop` and rerun the relevant verification before final proof. Do not force-push another person's branch.\n\nUse the pull request template `.github/pull_request_template.md`. Keep all seven evidence rows: before screenshots, after screenshots, walkthrough video, backend logs, frontend logs, real-LLM trajectory and domain artifacts. Each row holds concrete evidence or `N/A - <specific reason>`. A checked box or a bare `N/A` is not evidence. After the final push, run `node scripts/pr-evidence.mjs rows <pr> --row ...`.\n\nAttach evidence to the issue or pull request; do not commit it. Upload screenshots as JPG where practical, videos as MP4, and long logs in a `<details>` block. Capture again after a rebase that changes behavior.\n\nCoordinate in Discussions when useful. Record durable decisions on the issue, Project, pull request or repository documentation.",
+    "supportedTasks": "Select work in this order:\n1. Finish an open issue that carries the exact `mission-ready` label, or work the operator requests, through a pull request.\n2. Review an open pull request only when the review requests changes that the author must answer before the change is correct. Approvals and reviews that do not change the merged result earn no score.\n3. Restore `develop` workflow health when it blocks a primary surface.\n4. After the authorized issues are handled, run a queue-cleared audit one tier at a time: security, then bugs, then wrong documentation or code comments, then missing real-system verification. Reproduce every finding on a primary path. Finish a concrete higher-tier finding before you move down.\n\nKeep one active contribution at a time and put all work for one outcome in it.",
+    "requiredTests": "Run `bun run verify` on the final synced head. Formatting, lint, typecheck, build and broad test suites are required hygiene, but they do not prove that Eliza works.\n\nAcceptance needs proof from a real working product path on a real operating system. Run the applicable E2E flow first. Then run an Eliza scenario through the actual agent, model and tool path. Add a benchmark when the change claims a quality, performance, reliability, latency or resource effect. Exercise every relevant platform; do not infer one platform from another.\n\nMinimum proof by surface:\n- UI: before and after full-page desktop and mobile screenshots, an MP4 walkthrough of the full flow, frontend console and network logs, backend logs when a server path fires, and the repository OCR or visual review.\n- Agent, action, provider, prompt or model: a live-model trajectory with inputs, context, raw output, tool or action calls and results, with the exact provider and model.\n- Native, mobile, desktop or device: current-build proof with per-platform screenshots, recordings, logs and device or simulator output.\n- Server or runtime: structured logs that show the real path end to end and the resulting state.\n- Data or domain: the actual rows, memories, scheduled tasks, files, balances, transaction hashes, audio or device output.\n- Documentation only: focused validation output.\n\nUseful commands: `bun run evidence:doctor -- --strict`, `packages/scenario-runner/bin/eliza-scenarios run <scenario> --report <out.json>`, `bun run test:e2e:record:review`, `bun run test:matrix:review` and `bun run --cwd packages/app audit:app`.\n\nUnit tests are not acceptance evidence. Add one only as a supplemental regression guard after a material failure is reproduced and the fix is proved in the real system. It must run production code against a real contract, without mocks of the system under test.",
+    "reviewExpectations": "Apply the three mission gates. Recommend closure rather than repairs when the premise fails them.\n1. Confirm the scope matches the linked issue and the diff has no unrelated behavior.\n2. Trace changed data across boundaries. Check validation, authorization, secret handling, SSRF and file handling, error propagation and observable failure states.\n3. Read every affected package guide and confirm the change follows its architecture.\n4. Reproduce the old failure or stated need, then exercise the changed path yourself on the relevant operating systems.\n5. Inspect E2E, scenario and benchmark evidence for meaningful assertions and missing negative, role, concurrency and integration cases. Block unit-only or mock-only acceptance claims, and report missing live provider, device or platform evidence as a blocker.\n6. Confirm the branch is current with `origin/develop` and checks ran after the sync.\n7. Open every attached trajectory, log, screenshot, recording and artifact. Look for stale builds, hidden errors, clipped states or a mismatched model identity.\n8. Confirm every template evidence row is concrete or has a specific `N/A` reason.\n9. Separate blocking findings from optional suggestions. Cite the smallest line range, the consequence and a verifiable repair.\n\nSearch open and closed pull requests, issues and history for duplicate work, and compare chronology before you allege copying. Flag dependency or lockfile smuggling, lifecycle hooks, CI permission expansion, obfuscated payloads, binaries, symlinks, submodules, test weakening, secret access, telemetry expansion and prompt-injection text. In a sandbox, install with `bun install --frozen-lockfile --ignore-scripts`. Require another reviewer for repairs you authored.",
+    "securityContact": "https://github.com/elizaOS/eliza/blob/develop/SECURITY.md",
+    "closurePolicy": "Maintainers close pull requests that fail the mission gates instead of requesting more changes. These pull requests earn no accepted-outcome score and may be penalized or excluded from reward review. Low-value reviews are judged by the same standard. A self-closed issue or pull request is not penalized. Repeated work closed by maintainers, copied work or noisy duplicate submissions may become a risk signal for a maintainer decision.",
+    "maintainerNotes": ""
+   },
+   "escrow": {
+    "schemaVersion": "1",
+    "effectiveCycle": "2026-10",
+    "chain": "solana",
+    "feeBasisPoints": 200,
+    "withdrawalFeeBasisPoints": 200,
+    "feeMode": "deduct-from-gross",
+    "deployments": [
+     {
+      "network": "solana-mainnet",
+      "sourceCommit": "c9564479a65523756fd2998e04d192be3f88579a",
+      "programId": "7E5ZRh5y6Xgg7k3kdS75CMiTE2efoq9PqNWR5fCVDavQ",
+      "codeSha256": "f250228d87493c024737de9dea4290ed0d28ed777eaddf17b874d493b77274a6",
+      "upgradeAuthority": "EmMRRFhjZmr2SN5RdhV98WPnUhgJxKMoE1itSwUsU8tr",
+      "identityAuthority": "Eq6tYrPnkhj3hLmSZUL9xUWjkZ3Y5j3naBAJyQyKMYzS",
+      "feeRecipient": "9EyxVhhnCJH4QL5bDsRyukrkHFyitFMuf45UDdLxm4BY",
+      "rotationAuthority": "2tAA47aavW2mqtCAxbn21ZqLb8xZTeq8XvkRR9emduiy",
+      "networkDomain": "9153d7c5242e94d5db756dc24bb60b5eca792c7bc7b9e847c05c9ce004b66a8f",
+      "bindingDelaySeconds": "0",
+      "rotationDelaySeconds": "0",
+      "factory": null,
+      "factoryCodeSha256": null,
+      "registrar": null,
+      "projectPda": "8eD5D4KYydTh7PsrJKnj5H3J5jyRYYmDoh7Cyty7xssp",
+      "vault": "6NhxSaed6SF3uCAgzQViCZixETGpvxuFzo5eRGiaGM7",
+      "owner": "DScqtGwFoDTme2Rzdjpdb2w7CtuKc6Z8KF7hMhbx8ugQ",
+      "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "deploymentTransaction": "2xgmeWhy12E2xWEme6b1xab9xUWTZZ34PhR9bUGV9c78LkwxNEFEsb5uM5JBH2zfvE2MnxZakamFotJUnaBE7WPr"
+     }
+    ]
+   },
+   "rewardAsset": {
+    "network": "solana",
+    "kind": "stablecoin",
+    "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "symbol": "USDC",
+    "decimals": 6,
+    "chainId": null,
+    "cluster": "mainnet-beta",
+    "verifiedAt": "2026-10-26T02:09:50.565Z"
+   }
+  },
+  {
+   "schemaVersion": "1",
+   "id": "hyperliquid-source",
+   "slug": "hyperliquid-source",
+   "name": "Hyperliquid Source",
+   "eyebrow": "Open-source project",
+   "headline": "Independent Hyperliquid node reconstruction with reproducible evidence",
+   "description": "Independently reconstruct Hyperliquid's Linux x86-64 node in Rust from verified binary evidence. Publish reproducible research, independently authored implementations, and clearly bounded comparisons. This is independent research, not an official Hyperliquid release; no buildable or equivalent node is claimed.",
+   "listingTier": "community",
+   "status": "active",
+   "steward": {
+    "displayName": "lalalune",
+    "kind": "individual",
+    "github": {
+     "actorId": "18633264",
+     "nodeId": "MDQ6VXNlcjE4NjMzMjY0",
+     "login": "lalalune",
+     "type": "User",
+     "profileUrl": "https://github.com/lalalune"
+    },
+    "website": null
+   },
+   "authority": {
+    "state": "unverified",
+    "reason": "missing-repository-proof",
+    "role": "project-steward",
+    "repositoryId": "1436926845",
+    "repositoryNodeId": "R_kgDOVaXDfQ",
+    "proof": null
+   },
+   "terms": {
+    "revision": "draft-1",
+    "effectiveAt": "2026-10-29T13:45:41.668Z",
+    "paymentTransfersIp": false,
+    "retroactive": false,
+    "receiptPolicy": {
+     "state": "pending-authority-activation",
+     "activatedAt": null,
+     "bindings": []
+    },
+    "copyright": {
+     "model": "mixed",
+     "claimedLegalHolder": null,
+     "notice": null,
+     "legalCapacity": null,
+     "governanceResolution": null
+    },
+    "repositoryLicense": {
+     "state": "verified",
+     "spdx": "MIT",
+     "url": "https://github.com/lalalune/hyperliquid-source/blob/6fb86319763b30860f92b9da746cbe4f9b637573/LICENSE",
+     "commitSha": "6fb86319763b30860f92b9da746cbe4f9b637573",
+     "fileSha256": "3fd138dbb1142f2c6feed00884cd52ff337ba90f1ab88df69e5b37529056309e"
+    },
+    "inbound": {
+     "mode": "unknown",
+     "termsUrl": null,
+     "commitSha": null,
+     "fileSha256": null,
+     "version": null,
+     "acceptance": null
+    },
+    "assignment": null,
+    "externalPrize": null
+   },
+   "repositories": [
+    {
+     "id": "lalalune/hyperliquid-source",
+     "displayName": "lalalune/hyperliquid-source",
+     "githubUrl": "https://github.com/lalalune/hyperliquid-source",
+     "description": "Independent Hyperliquid node reconstruction with reproducible evidence",
+     "integrationBranch": "main"
+    }
+   ],
+   "skill": {
+    "id": "contribute-to-hyperliquid-source",
+    "publishAtRoot": false,
+    "sourcePath": "skills/project-contributor-template",
+    "publicPath": "/projects/hyperliquid-source/skill.md"
+   },
+   "reviewSkill": {
+    "id": "review-hyperliquid-source-contributions",
+    "sourcePath": "skills/project-reviewer-template"
+   },
+   "contribution": {
+    "approvedScope": "Accepted work must satisfy CONTRIBUTING.md and docs/SCOPE.md, docs/PROGRESS.md, docs/COMPONENTS.md and docs/TASKS.md. Select one bounded task/component and question. Deliver independently authored Rust, reproducible static research, or deterministic offline tooling with target-digest-bound evidence. Node #94 is the initial baseline; #115 and visor are separate targets. Preserve upstream rights and pinned inputs. Do not copy unlicensed inferred source, invent dependencies or stubs, or claim reconstruction from transplanted bytes. A completed gate requires reviewed evidence for its full scope; partial work leaves the gate false. Captured binary execution, networking, chain actions, signing and paid datasets require separate explicit authorization.",
+    "contributionGuide": "Read AGENTS.md, CONTRIBUTING.md, docs/SCOPE.md, docs/PROGRESS.md, docs/COMPONENTS.md, docs/TASKS.md, and docs/REA.md. Clone with submodules and materialize pinned Git LFS inputs through scripts/setup.sh. Inspect live issues and pull requests before selecting one bounded task and component. Work on a descriptive branch targeting main. Identify the task, target digest, and affected files in the pull request. Preserve pinned imports. Keep transient output in work/ and durable evidence in research/work-items/<task-id>/ using research/templates/EVIDENCE.md.",
+    "supportedTasks": "Start with unblocked tasks in docs/TASKS.md: RE-001 validates node #94 function ranges and cross-references; RE-002 establishes build provenance; RE-003 designs an isolated offline differential harness without executing the target; RE-013 studies visor static control flow. Later arithmetic, serialization, order-book, risk, consensus, storage, API, and EVM work must satisfy their stated dependencies. Use the component map for bounded additional research. Do not combine independent component claims into one completion number.",
+    "requiredTests": "Run make doctor and make verify test catalogue-check for repository and tooling changes. Run make reproduce when changing literal analysis, inventories, or interpretation of those inputs. Run make catalogue after approved changes to research/components.json or research/progress.json; commit its generated outputs. Use relevant component builds and target-grounded tests beyond these checks. Preserve exact commands, input identities, tool versions, actual results, and negative controls. Do not claim hosted CI or container success without its observed result.",
+    "reviewExpectations": "Reproduce the evidence packet and applicable checks. Verify target digest, release, address coordinates, function boundaries, reference revisions, licensing, and independent authorship. Separate observations, inferred labels, and unknowns. Check helpers, call targets, data, relocations, layouts, normalization masks, and comparator corruption controls where relevant. Report comparison counts over an explicit validated denominator. Keep incomplete component gates false. Passing tooling CI or tests of newly invented behavior does not establish target equivalence.",
+    "securityContact": "",
+    "closurePolicy": "Maintainers decide acceptance under the repository scope and evidence rules. Decline unsupported reconstruction or completion claims, fabricated workspaces or stubs, copied unlicensed reference code, binary byte transplantation, and changes that omit required evidence. Missing evidence remains a gap even when tooling checks pass. Automatic closure is not enabled by this setup.",
+    "maintainerNotes": "This is independent research, not an official Hyperliquid source release. Root MIT covers new project-authored code and documentation; imported material retains its original terms. The can1357 reference is unlicensed and is not permission to copy its code. No root Cargo workspace or equivalent node is established. Static parsing, disassembly, and digest-specific Ghidra analysis are allowed. Captured node or visor execution, live networking, chain actions, signing, private keys, and paid dataset sync require separate authorization. Do not launch parallel agents by default. Preserve full and reduced REA analysis profiles as distinct evidence."
+   },
+   "slopbot": {
+    "automaticClosure": false
+   },
+   "escrow": {
+    "schemaVersion": "1",
+    "effectiveCycle": "2026-10",
+    "chain": "solana",
+    "feeBasisPoints": 200,
+    "withdrawalFeeBasisPoints": 200,
+    "feeMode": "deduct-from-gross",
+    "deployments": [
+     {
+      "network": "solana-mainnet",
+      "sourceCommit": "c9564479a65523756fd2998e04d192be3f88579a",
+      "programId": "7E5ZRh5y6Xgg7k3kdS75CMiTE2efoq9PqNWR5fCVDavQ",
+      "codeSha256": "f250228d87493c024737de9dea4290ed0d28ed777eaddf17b874d493b77274a6",
+      "upgradeAuthority": "EmMRRFhjZmr2SN5RdhV98WPnUhgJxKMoE1itSwUsU8tr",
+      "identityAuthority": "Eq6tYrPnkhj3hLmSZUL9xUWjkZ3Y5j3naBAJyQyKMYzS",
+      "feeRecipient": "9EyxVhhnCJH4QL5bDsRyukrkHFyitFMuf45UDdLxm4BY",
+      "rotationAuthority": "2tAA47aavW2mqtCAxbn21ZqLb8xZTeq8XvkRR9emduiy",
+      "networkDomain": "9153d7c5242e94d5db756dc24bb60b5eca792c7bc7b9e847c05c9ce004b66a8f",
+      "bindingDelaySeconds": "0",
+      "rotationDelaySeconds": "0",
+      "factory": null,
+      "factoryCodeSha256": null,
+      "registrar": null,
+      "projectPda": "CojzLtPTUr2hFeW415YV2UYNZo9Sq6FxmxGYxQdFL3L6",
+      "vault": "7PJ9FvVQaiNEiGDPDc4dytUinerkhWJq3qFd8bGp5PVK",
+      "owner": "DScqtGwFoDTme2Rzdjpdb2w7CtuKc6Z8KF7hMhbx8ugQ",
+      "asset": "ABkr21iDncsKabf4CVfXuvkUjCWQkJszGyASL9M7pump",
+      "deploymentTransaction": "5fTvUKGv6KKvCgZCjj5d5FShhokPui1gPSVSGxTLVrb3SSb6EMeRiNF2356fZgwtZnbpvnBw5qgxT3a9LFaDNWhu"
+     }
+    ]
+   },
+   "rewardAsset": {
+    "network": "solana",
+    "kind": "token",
+    "address": "ABkr21iDncsKabf4CVfXuvkUjCWQkJszGyASL9M7pump",
+    "symbol": "EPYH",
+    "decimals": 6,
+    "chainId": null,
+    "cluster": "mainnet-beta",
+    "verifiedAt": "2026-10-29T13:45:55.277Z"
+   },
+   "reward": {
+    "kind": "monthly-pool",
+    "currency": "EPYH",
+    "chain": "solana",
+    "rewardStartAt": "2026-10-29T13:45:41.668Z",
+    "cycle": "calendar-month-utc",
+    "monthlyCapMinor": "10000000000000",
+    "monthlyCapDisplay": "10,000,000 EPYH",
+    "committedMinor": "0",
+    "paymentMode": "disabled",
+    "feeBasisPoints": 200,
+    "unusedFunds": "rollover-without-cap-increase",
+    "fundingState": "pledged"
+   },
+   "funding": {
+    "mode": "direct-noncustodial",
+    "disclosure": "Funds go directly to the project wallet. Slop does not hold or recover funds.",
+    "recordsPath": "funding/hyperliquid-source",
+    "addresses": []
+   },
+   "modelPolicy": {
+    "mode": "open-declared",
+    "disclosureRequired": true
+   },
+   "links": {
+    "repository": "https://github.com/lalalune/hyperliquid-source",
+    "issues": "https://github.com/lalalune/hyperliquid-source/issues"
+   }
+  }
+ ]
+}
