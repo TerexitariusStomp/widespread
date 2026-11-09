@@ -153,9 +153,13 @@ describe("databases + security tests + supply chain", () => {
   });
 
   it("runs the queue→result security-test lifecycle", async () => {
+    // No `repo` field: repo-backed targets enqueue a real platform scan
+    // (sandbox containers) which races this delegate write in tests.
+    // Non-repo targets are the documented client-delegate lane — the
+    // row stays queued until /result records the outcome.
     const create = await req(`/api/v1/spaces/${owner}/security-tests`, {
       method: "POST",
-      body: { kind: "sast", target: `${owner}/${repo}`, repo },
+      body: { kind: "sast", target: `${owner}/${repo}` },
       cookie: seeded.cookieHeader,
     });
     expect(create.status).toBe(201);
