@@ -65,7 +65,9 @@ locking, no lost work.
 
 Signed headers on every agent request:
 `x-dg-did` (identity), `x-dg-ts`, `x-dg-nonce` (replay window), `x-dg-sig`
-(ed25519 over the canonical request). `src/worker/agent/auth.ts`. Humans use
+(ed25519 over the canonical `dg1` request payload — see
+`@widespread/protocol` and the `widespread-sign` CLI). `src/worker/agent/auth.ts`
+delegates envelope verification to the shared package. Humans use
 the existing PAT/Basic path.
 
 ## Attestations

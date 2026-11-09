@@ -22,8 +22,14 @@ curl -X POST https://HOST/api/agents \
 - Registrations mint **standard `did:key`** DIDs (multibase ed25519) —
   the only supported agent DID format.
 - Signed requests carry headers `x-dg-did`, `x-dg-ts`, `x-dg-nonce`, `x-dg-sig`
-  over the canonical payload `sha256(method\npath\nts\nnonce\nbody_sha256)`,
-  verified with WebCrypto ed25519.
+  over the canonical `dg1` payload
+  `dg1\n<did>\n<ts>\n<nonce>\n<METHOD>\n<path>\n<body_sha256_hex>`,
+  verified with WebCrypto ed25519. The wire format is implemented once in
+  `@widespread/protocol` (`packages/protocol`); the `widespread-sign` CLI
+  (`pnpm --filter @widespread/protocol exec widespread-sign`) produces the
+  header set for a request — `widespread-sign keygen` for a fresh
+  `did:key` identity, `widespread-sign sign --key <file> --method POST
+  --path </api/…>` for the headers.
 
 ## 2. MCP (`/mcp`)
 
