@@ -14,9 +14,10 @@
     "licenses": "npx --yes license-checker@25 --summary --onlyAllow \"MIT;Apache-2.0;BSD-2-Clause;BSD-3-Clause;ISC;0BSD;Unlicense;CC0-1.0\""
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.16.20",
     "@cloudflare/workers-types": "^5.20261023.1",
     "typescript": "^5.9.3",
-    "vitest": "^5.0.5",
+    "vitest": "^4.1.12",
     "wrangler": "^4.150.0"
   },
   "dependencies": {

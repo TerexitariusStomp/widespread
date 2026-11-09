@@ -1,11 +1,11 @@
-import { describe, expect, it, vi, beforeAll } from "vitest";
-import { queryFeed, feedRss, handleMcp } from "../src/feed";
-import type { FeedDoc, FeedRecord, Env } from "../src/types";
+// feed.test.ts — queryFeed/feedRss are pure functions over a FeedDoc;
+// handleMcp runs against the worker's REAL KV binding with a doc seeded
+// through the real feedstore. No stubs anywhere.
 
-// All upstream fetches fail fast in tests — sources degrade independently.
-beforeAll(() => {
-  vi.stubGlobal("fetch", vi.fn(async () => new Response("err", { status: 500 })));
-});
+import { describe, expect, it } from "vitest";
+import { queryFeed, feedRss, handleMcp } from "../src/feed";
+import { seedFeedDoc, feedRecord, realEnv } from "./helpers";
+import type { FeedDoc, FeedRecord } from "../src/types";
 
 const rec = (over: Partial<FeedRecord>): FeedRecord => ({
   id: "t:1", source: "github", forge: "github", kind: "bounty",
@@ -74,14 +74,10 @@ describe("feedRss", () => {
   });
 });
 
-describe("handleMcp", () => {
-  const kvStub = {
-    get: async () => null, put: async () => {}, delete: async () => {},
-    list: async () => ({ keys: [] }),
-  };
-  const env = { CLAIMS: kvStub } as unknown as Env;
+describe("handleMcp (real KV feed doc)", () => {
+  const env = () => realEnv();
   const call = (method: string, params?: unknown, id: unknown = 1) =>
-    handleMcp(env, { jsonrpc: "2.0", id, method, ...(params ? { params } : {}) });
+    handleMcp(env(), { jsonrpc: "2.0", id, method, ...(params ? { params } : {}) });
 
   it("initialize returns protocol + serverInfo", async () => {
     const res = await call("initialize");
@@ -102,9 +98,29 @@ describe("handleMcp", () => {
     const body = await res!.json() as { error: { code: number } };
     expect(body.error.code).toBe(-32601);
   });
-  it("feed_stats works on empty doc (KV-less env falls back)", async () => {
-    // env.CLAIMS is a stub — getFeedDoc will throw; feedDoc catches? verify behavior
+
+  it("feed_get returns a record seeded through the real KV doc", async () => {
+    const id = `mcp-test:${Date.now().toString(36)}`;
+    await seedFeedDoc(env(), [feedRecord({
+      id, title: `mcp seeded bounty ${id}`, url: "https://github.com/TerexitariusStomp/widespread-sandbox/issues/1",
+    })]);
+    const res = await call("tools/call", { name: "feed_get", arguments: { id } });
+    const body = await res!.json() as {
+      result: { structuredContent: { id?: string; title?: string } | { error?: string } };
+    };
+    const sc = body.result.structuredContent;
+    expect(sc.id).toBe(id);
+    expect(sc.title).toContain("mcp seeded bounty");
+  });
+
+  it("feed_stats reflects the seeded doc", async () => {
+    const id = `mcp-stats:${Date.now().toString(36)}`;
+    await seedFeedDoc(env(), [feedRecord({ id, title: `stats ${id}` })]);
     const res = await call("tools/call", { name: "feed_stats", arguments: {} });
-    expect(res).not.toBeNull();
+    const body = await res!.json() as {
+      result: { structuredContent: { total: number; generated_at: number } };
+    };
+    expect(body.result.structuredContent.total).toBe(1);
+    expect(body.result.structuredContent.generated_at).toBeGreaterThan(0);
   });
 });

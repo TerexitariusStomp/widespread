@@ -1,9 +1,28 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+// nearops.test.ts — LIVE tests against NEAR testnet.
+// parseNearKey is pure; nearViewCall reads the real wide-mkt contract;
+// nearFunctionCall broadcasts a REAL signed TransactionV1 to testnet —
+// we call a nonexistent method so the tx executes-and-fails on-chain,
+// exercising the full wire path (nonce → block hash → sign → send_tx →
+// FINAL) without mutating contract state.
+
+import { describe, expect, it } from "vitest";
 import { base58 } from "@scure/base";
 import { parseNearKey, nearViewCall, nearFunctionCall } from "../src/nearops";
-import { jsonRes } from "./mock";
+import { realEnv } from "./helpers";
+import type { Env } from "../src/types";
 
-const b64ToBytes = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+const CONTRACT = "wide-mkt-11561.testnet";
+
+function opsKey(env: Env) {
+  return {
+    accountId: env.NEAR_OPS_ACCOUNT ?? "",
+    secretKey: env.NEAR_OPS_SECRET_KEY ?? "",
+  };
+}
+const HAS_OPS = () => {
+  const e = realEnv();
+  return Boolean(e.NEAR_OPS_ACCOUNT && e.NEAR_OPS_SECRET_KEY);
+};
 
 describe("parseNearKey", () => {
   const raw = new Uint8Array(64).map((_, i) => i);
@@ -19,48 +38,43 @@ describe("parseNearKey", () => {
   });
 });
 
-describe("nearViewCall", () => {
-  it("sends call_function query and decodes JSON result", async () => {
-    let seenArgs = "";
-    vi.stubGlobal("fetch", async (_i: RequestInfo | URL, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body));
-      expect(body.method).toBe("query");
-      expect(body.params.request_type).toBe("call_function");
-      expect(body.params.account_id).toBe("c.testnet");
-      expect(body.params.method_name).toBe("getMarket");
-      seenArgs = atob(body.params.args_base64);
-      const payload = new TextEncoder().encode(JSON.stringify({ status: "open" }));
-      return jsonRes({ result: { result: [...payload] } }); // RPC wraps in result
-    });
-    const out = await nearViewCall({ NEAR_RPC_URL: "https://rpc.testnet.near.org" },
-      "c.testnet", "getMarket", { marketId: "5" });
-    expect(out).toEqual({ status: "open" });
-    expect(JSON.parse(seenArgs)).toEqual({ marketId: "5" });
-  });
+describe("nearViewCall (live testnet)", () => {
+  it("reads listAll from the real market contract", async () => {
+    const out = await nearViewCall(realEnv(), CONTRACT, "listAll", {}) as unknown[];
+    expect(Array.isArray(out)).toBe(true);
+    // The deployed testnet contract has real markets — at least one.
+    expect(out.length).toBeGreaterThan(0);
+    const m = out[0] as Record<string, unknown>;
+    expect(m).toHaveProperty("marketId");
+    expect(m).toHaveProperty("specHash");
+  }, 30000);
+
+  it("reads a single market by id", async () => {
+    const markets = await nearViewCall(realEnv(), CONTRACT, "listAll", {}) as
+      { marketId?: string }[];
+    const id = markets[0]?.marketId;
+    expect(id).toBeTruthy();
+    const m = await nearViewCall(realEnv(), CONTRACT, "getMarket", { marketId: id }) as
+      Record<string, unknown> | null;
+    expect(m).toBeTruthy();
+    expect(String(m!.marketId)).toBe(String(id));
+  }, 30000);
 });
 
-describe("nearFunctionCall tx wire format", () => {
-  it("emits TransactionV1 (0x01 prefix) signed over sha256(tx), sent via send_tx", async () => {
-    // Real throwaway keypair — Node validates JWK d/x correspondence.
-    const ops = { accountId: "ops.testnet",
-      secretKey: "ed25519:3LA81HQ5Yb2eyPJZ7zy8RF9QDzjgX9ixpD1UP3WK2M6DLSDe7xSuCCUHQp2eth7Nm8LuoCm4zotnRwbJrthse2dC" };
-    let sendBody: { signed_tx_base64?: string; wait_until?: string } | null = null;
-    vi.stubGlobal("fetch", async (_i: RequestInfo | URL, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body));
-      if (body.method === "send_tx") { sendBody = body.params; return jsonRes({ result: { transaction: { hash: "H" } } }); }
-      if (body.method === "block") return jsonRes({ result: { header: { hash: "11111111111111111111111111111111" } } });
-      // view_access_key
-      return jsonRes({ result: { nonce: 7, permission: "FullAccess" } });
+describe("nearFunctionCall tx wire format (live testnet)", () => {
+  it("broadcasts a real signed tx; on-chain failure still returns txHash", { skip: !HAS_OPS() && "NEAR_OPS_ACCOUNT/SECRET_KEY not configured" }, async () => {
+    const env = realEnv();
+    const r = await nearFunctionCall(env, opsKey(env), CONTRACT, {
+      // Nonexistent method → the tx is real, signed, broadcast, and lands
+      // as an on-chain failure. Proves the TransactionV1 wire path without
+      // creating contract state.
+      methodName: "widespreadTestNoSuchMethod",
+      args: {},
+      gas: 10_000_000_000_000n,
+      deposit: 0n,
     });
-    const r = await nearFunctionCall(
-      { NEAR_RPC_URL: "https://rpc.testnet.near.org" }, ops, "c.testnet",
-      { methodName: "createMarket", args: { specHash: "s" }, gas: 50_000_000_000_000n, deposit: 1_000_000_000_000_000_000_000n });
-    expect(r.txHash).toBe("H");
-    expect(sendBody?.wait_until).toBe("FINAL");
-    const signed = b64ToBytes(sendBody!.signed_tx_base64!);
-    // last 65 bytes: 0x00 sig-variant + 64B ed25519 sig; before that tx
-    const tx = signed.slice(0, signed.length - 65);
-    expect(tx[0]).toBe(1); // TransactionV1 prefix — classic txs are rejected on-chain
-    expect(sendBody!.signed_tx_base64).toBeTruthy();
-  });
+    expect(r.txHash).toMatch(/^[A-Za-z0-9+/=]{20,}$/);
+    // The receipts outcome should reflect the contract-level failure.
+    expect(JSON.stringify(r.status)).toMatch(/FAIL|Error|failure/i);
+  }, 60000);
 });

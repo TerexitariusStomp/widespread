@@ -70,7 +70,14 @@ export function feedRoutes() {
     if (!rec?.id || !rec.source || !rec.forge || !rec.title || !rec.url) {
       return bad("need {id, source, forge, title, url}", 400);
     }
-    const record: FeedRecord = { ...(rec as FeedRecord), updated_at: Date.now() };
+    // Clients may omit escrow/kind — normalize so downstream readers
+    // (isMirrorable, queryFeed sort, RSS) never dereference undefined.
+    const record: FeedRecord = {
+      ...(rec as FeedRecord),
+      kind: rec.kind ?? "bounty",
+      escrow: rec.escrow ?? { state: "none" },
+      updated_at: Date.now(),
+    };
     const doc = await feedDoc(c.env, execCtx(c));
     const idx = doc.records.findIndex((r) => r.id === record.id);
     if (idx >= 0) doc.records[idx] = record; else doc.records.unshift(record);

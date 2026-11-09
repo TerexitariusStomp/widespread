@@ -116,11 +116,15 @@ export async function validateForgeSubmission(
       failures.push(`forgeUserId mismatch: artifact author is ${authorId} (${issue.user?.login})`);
     }
     if (ref.kind === "pr") {
-      const pr = issue as GhPull;
+      // The issues endpoint does NOT carry head.sha for PRs — fetch the
+      // pulls endpoint for the real head commit.
+      const prRes = await gh<GhPull>(env, `/repos/${ref.owner}/${ref.repo}/pulls/${ref.number}`);
+      const pr = prRes.data;
       const filesRes = await gh<GhFile[]>(env,
         `/repos/${ref.owner}/${ref.repo}/pulls/${ref.number}/files?per_page=100`);
       const files = filesRes.data;
       const fp = files?.length ? await patchFingerprint(files) : null;
+      if (prRes.error) failures.push(prRes.error);
       if (filesRes.error) failures.push(filesRes.error);
       if (!fp) failures.push("PR has no computable patch (empty or >100-file diff)");
       else {
@@ -129,9 +133,9 @@ export async function validateForgeSubmission(
         evidence.forgeRef = `https://github.com/${ref.owner}/${ref.repo}/pull/${ref.number}`;
         evidence.forgeUserId = authorId;
         evidence.forgeLogin = issue.user?.login;
-        evidence.head_sha = pr.head?.sha;
+        if (pr?.head?.sha) evidence.head_sha = pr.head.sha;
       }
-      if (!body.commits?.length && pr.head?.sha) body.commits = [pr.head.sha];
+      if (!body.commits?.length && pr?.head?.sha) body.commits = [pr.head.sha];
     } else {
       evidence.forge = "github";
       evidence.forgeRef = `https://github.com/${ref.owner}/${ref.repo}/issues/${ref.number}`;

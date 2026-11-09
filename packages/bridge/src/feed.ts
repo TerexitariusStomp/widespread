@@ -608,7 +608,7 @@ function mirrorSpec(rec: FeedRecord, override?: string): string {
 }
 
 function isMirrorable(rec: FeedRecord): boolean {
-  return rec.escrow.state === "external"
+  return rec.escrow?.state === "external"
     || rec.source.startsWith("github-thirdparty")
     || rec.source.startsWith("external:");
 }
