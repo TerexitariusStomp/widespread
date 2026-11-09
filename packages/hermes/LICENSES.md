@@ -12,12 +12,12 @@ GPL/AGPL/SSPL is present. Source: 129 packages scanned.
 | @x402/near | Apache-2.0 | x402-foundation NEAR scheme |
 | @fastnear/intents | MIT (see note) | 1Click quotes, NEP-413 intent signing |
 | @a2a-js/sdk | Apache-2.0 | Agent2Agent client (Agent Market hiring) |
-| @noble/ed25519 | MIT | Ed25519 fallback signing + seed->pubkey derive (vendored `src/vendor/`) |
+| @noble/curves | MIT | Ed25519 fallback signing + seed->pubkey derive (esbuild-bundled into `dist/`) |
 | pyodide | MPL-2.0 | In-browser Python runtime (weak copyleft — accepted) |
 | @wllama/wllama | MIT | Local in-page model endpoint |
 | coincident | MIT | Sync worker<->page transport |
 | penpal | Apache-2.0 | Embed iframe RPC |
-| idb | ISC | IndexedDB wrapper |
+| idb | ISC | IndexedDB wrapper (esbuild-bundled into `dist/`) |
 | partysocket | MIT | Reconnecting WebSocket (relay) |
 | playwright / esbuild / fake-indexeddb | Apache-2.0 / MIT / Apache-2.0 | Dev/test only |
 

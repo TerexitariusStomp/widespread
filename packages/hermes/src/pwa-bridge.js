@@ -5,7 +5,7 @@
 // rest. Grant state is auditable via `status` and persisted handles live in
 // IndexedDB so a granted folder survives reloads.
 
-import { openDB } from './vendor/idb.mjs'
+import { openDB } from 'idb'
 
 const DB_NAME = 'hermes-pwa'
 const STORE = 'handles'

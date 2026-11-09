@@ -19,8 +19,8 @@
  *   - absent grant:   local broker authority (the owner's ambient calls)
  *     resolves anything
  */
-import { openDB } from './vendor/idb.mjs'
-import * as ed25519 from './vendor/noble-ed25519.mjs'
+import { openDB } from 'idb'
+import { ed25519 } from '@noble/curves/ed25519.js'
 
 const DB_NAME = 'hermes-vault'
 const SECRETS_STORE = 'secrets'
@@ -130,7 +130,7 @@ async function resolveHeader(db, value, grantId) {
 //     even inside this worker. Requires WebCrypto Ed25519 (Chrome 137+,
 //     Firefox 129+, Safari 17+).
 //   'seed' — fallback for older engines: the 32-byte seed AES-GCM-encrypted
-//     under the device key; noble-ed25519 signs inside this worker.
+//     under the device key; @noble/curves ed25519 signs inside this worker.
 // Either way, raw key material never crosses to page JS or the Python heap —
 // callers see `vault:<handle>` and sign through `nearSign` under a grant.
 const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
@@ -190,7 +190,7 @@ async function parseNearSecret(secret) {
   if (bytes.length !== 64 && bytes.length !== 32)
     throw new Error('NEAR secret must be 64-byte secret_key or 32-byte seed (base58)')
   const seed = bytes.slice(0, 32)
-  const pub = new Uint8Array(await ed25519.getPublicKeyAsync(seed))
+  const pub = new Uint8Array(ed25519.getPublicKey(seed))
   if (bytes.length === 64 && b58encode(bytes.slice(32)) !== b58encode(pub))
     throw new Error('NEAR secret pubkey suffix does not match the seed')
   return { seed, pubkey: 'ed25519:' + b58encode(pub), pubBytes: pub }
@@ -254,7 +254,7 @@ async function nearSign(db, m) {
     const key = await deviceKey(db)
     const seed = new Uint8Array(await crypto.subtle.decrypt(
       { name: 'AES-GCM', iv: unb64(row.iv) }, key, unb64(row.ct)))
-    sig = new Uint8Array(await ed25519.signAsync(msg, seed))
+    sig = new Uint8Array(ed25519.sign(msg, seed))
     seed.fill(0)
   }
   return { signatureB64: b64(sig), pubkey: row.pubkey }

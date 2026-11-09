@@ -41,7 +41,10 @@ if (injected === html) {
 }
 writeFileSync(join(out, 'index.html'), injected)
 
-for (const f of ['bootstrap.js', 'backend-worker.mjs', 'vault-worker.mjs', 'vault-ops.mjs', 'local-llm.js', 'pwa-bridge.js', 'host-bridge.js', 'near-bridge.js', 'sw.js', 'embed.js', 'embed-peer.js']) {
+// vault-ops.mjs + pwa-bridge.js are esbuild-bundled below (npm `idb` +
+// `@noble/curves` inlined) — not copied raw, since browsers can't resolve
+// bare specifiers. Plain-node unit tests still import src/ directly.
+for (const f of ['bootstrap.js', 'backend-worker.mjs', 'vault-worker.mjs', 'local-llm.js', 'host-bridge.js', 'near-bridge.js', 'sw.js', 'embed.js', 'embed-peer.js']) {
   cpSync(join(root, 'src', f), join(out, f))
 }
 
@@ -56,17 +59,9 @@ cpSync(join(coincidentDist, 'worker.js'), join(out, 'vendor', 'coincident-worker
 cpSync(resolve(root, 'node_modules/penpal/dist/penpal.mjs'),
   join(out, 'vendor', 'penpal.mjs'))
 
-// idb (ISC) — IndexedDB promise wrapper used by pwa-bridge + vault worker.
-// Vendored into src/vendor/ so vault-ops.mjs resolves it under plain node too.
-cpSync(resolve(root, 'src/vendor/idb.mjs'), join(out, 'vendor', 'idb.mjs'))
-
 // partysocket (ISC) — reconnecting WebSocket for the relay agent dial.
 cpSync(resolve(root, 'node_modules/partysocket/dist/ws.js'),
   join(out, 'vendor', 'partysocket-ws.js'))
-
-// noble-ed25519 (MIT) — vendored into src/vendor/ so vault-ops.mjs resolves
-// it under plain node too (unit tests); fallback signer + import derive.
-cpSync(resolve(root, 'src/vendor/noble-ed25519.mjs'), join(out, 'vendor', 'noble-ed25519.mjs'))
 
 // NEAR SDK bundle (MIT/Apache) — near-api-js + @fastnear/x402 +
 // @fastnear/intents + @a2a-js/sdk client, esbuild-bundled at assemble time
@@ -80,13 +75,42 @@ try {
     platform: 'browser',
     target: 'es2022',
     outfile: join(out, 'vendor', 'near-sdk.mjs'),
-    // node builtin used once (util.format) via is-my-json-valid -> near-api-js
-    alias: { util: resolve(root, 'scripts/shims/node-util.mjs') },
+    // node builtin `util` (util.format via is-my-json-valid -> near-api-js)
+    // resolved to the npm `util` package's browser build.
+    alias: { util: resolve(root, 'node_modules/util/util.js') },
     logLevel: 'warning',
   })
   console.log('near-sdk bundle written')
 } catch (e) {
   console.warn(`near-sdk bundle skipped: ${e.message || e}`)
+}
+
+// Vault + PWA glue bundles — npm `idb` (IndexedDB) and `@noble/curves`
+// ed25519 inlined so dist/ has no bare specifiers. vault-worker.mjs keeps
+// importing './vault-ops.mjs' — the bundled file lands at the same path.
+try {
+  const { buildSync } = await import('esbuild')
+  const { createRequire } = await import('node:module')
+  const require = createRequire(import.meta.url)
+  const utilPath = dirname(require.resolve('util/package.json')) + '/util.js'
+  for (const [entry, outfile] of [
+    ['vault-ops.mjs', 'vault-ops.mjs'],
+    ['pwa-bridge.js', 'pwa-bridge.js'],
+  ]) {
+    buildSync({
+      entryPoints: [resolve(root, 'src', entry)],
+      bundle: true,
+      format: 'esm',
+      platform: 'browser',
+      target: 'es2022',
+      outfile: join(out, outfile),
+      alias: { util: resolve(root, utilPath) },
+      logLevel: 'warning',
+    })
+  }
+  console.log('vault/pwa bundles written')
+} catch (e) {
+  console.warn(`vault/pwa bundles skipped: ${e.message || e}`)
 }
 
 // Companion host agent (P6/T3 opt-in substrate) — downloadable from the site.

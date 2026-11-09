@@ -86,6 +86,36 @@ class SignedHeaders(unittest.TestCase):
         self.assertNotEqual(a["x-dg-nonce"], b["x-dg-nonce"])
 
 
+class ProtocolVectors(unittest.TestCase):
+    """Cross-language contract: the dg1 payload + Ed25519 signature bytes
+    the Python plugin produces must match @widespread/protocol's fixed
+    vectors (packages/protocol/test-vectors.json)."""
+
+    VECTORS = (Path(__file__).resolve().parent.parent.parent
+               / "protocol" / "test-vectors.json")
+
+    def test_dg1_payload_and_signature_match_protocol_vectors(self):
+        v = json.loads(self.VECTORS.read_text())
+        dg = v["dg1"]
+        seed = bytes.fromhex(v["ed25519"]["seedHex"])
+
+        # Rebuild the canonical payload from the vector's components.
+        payload_str = (
+            f"dg1\n{dg['headers']['x-dg-did']}\n{dg['ts']}\n{dg['nonce']}\n"
+            f"{dg['method']}\n{dg['path']}\n{dg['bodySha256Hex']}"
+        )
+        self.assertEqual(payload_str, dg["payload"])
+
+        # The signer hashes the payload string, then signs the hex digest
+        # string's utf-8 bytes — same as dg1.ts's dg1SigningBytes.
+        digest_hex = w._sha256_hex(payload_str.encode())
+        self.assertEqual(digest_hex, dg["signingDigestHex"])
+        sig = w._sign(digest_hex.encode(), seed)
+        self.assertEqual(sig.hex(), dg["signatureHex"])
+        self.assertEqual(
+            w._pubkey(seed).hex(), v["ed25519"]["publicKeyHex"])
+
+
 class Helpers(unittest.TestCase):
     def test_sha256_hex(self):
         self.assertEqual(w._sha256_hex(b""),
