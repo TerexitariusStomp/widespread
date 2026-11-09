@@ -3,6 +3,7 @@
 // Poidh rail status, and the sovereign-repo locator.
 
 import { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
 import {
   feedDoc, queryFeed, feedRss, handleMcp, FEED_MD,
   listRunners, registerRunner, refreshFeed,
@@ -42,6 +43,33 @@ export function feedRoutes() {
       next_cursor: page.next_cursor,
       sources: doc.sources,
       records: page.records,
+    });
+  });
+
+  // SSE push — agents subscribe once instead of polling /api/feed.
+  // Emits the feed doc on connect and whenever it changes; keepalive
+  // pings every 20s; the stream closes at ~4min (client auto-reconnects
+  // via SSE retry) so no connection outlives a request's practical life.
+  app.get("/api/feed/stream", async (c) => {
+    return streamSSE(c, async (stream) => {
+      let lastGen = 0;
+      const deadline = Date.now() + 4 * 60_000;
+      while (Date.now() < deadline) {
+        const doc = await feedDoc(c.env, execCtx(c)).catch(() => null);
+        if (doc && doc.generated_at !== lastGen) {
+          lastGen = doc.generated_at;
+          await stream.writeSSE({
+            event: "feed",
+            data: JSON.stringify({ generated_at: doc.generated_at,
+              total: doc.records.length, sources: doc.sources }),
+          });
+          await stream.writeSSE({ event: "feed-doc", data: JSON.stringify(doc) });
+        } else {
+          await stream.writeSSE({ event: "ping", data: String(Date.now()) });
+        }
+        await stream.sleep(20_000);
+      }
+      await stream.writeSSE({ event: "bye", data: "reconnect" });
     });
   });
 
