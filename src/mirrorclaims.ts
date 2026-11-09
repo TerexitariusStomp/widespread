@@ -126,9 +126,13 @@ export async function handleMirrorVerdict(req: Request, env: Env, ctx?: Executio
   const mirror = await getMirror(env, ctx, mirrorId);
   if (!mirror) return Response.json({ ok: false, error: "mirror not found" }, { status: 404 });
 
+  // Verdict is one-shot: any recorded settlement (won or rejected) is
+  // final. The old check looked for status==="settled" which is never
+  // written — a second verdict could overwrite the winner and re-open
+  // the payout path for a double-spend.
   const prior = await env.CLAIMS.get(settleKey(mirrorId)).then((v) => v ? JSON.parse(v) : null);
-  if (prior?.status === "settled") {
-    return Response.json({ ok: true, status: "already_settled", settlement: prior });
+  if (prior) {
+    return Response.json({ ok: true, status: "already_decided", settlement: prior });
   }
 
   const claim = await env.CLAIMS.get(claimKey(mirrorId, claimHash)).then((v) => v ? JSON.parse(v) : null);
@@ -183,60 +187,77 @@ export async function handleMirrorPayout(req: Request, env: Env, ctx?: Execution
   if (!settlement || settlement.status !== "won") {
     return Response.json({ ok: false, error: "no winning settlement for this mirror" }, { status: 409 });
   }
-  if (settlement.payout?.batch_id) {
+  // Terminal markers differ per rail: PayPal batch_id, Paxos transfer_id.
+  if (settlement.payout?.batch_id || settlement.payout?.transfer_id) {
     return Response.json({ ok: true, status: "already_paid", settlement });
   }
+  // In-flight guard: mark "sending" before touching the rail so a
+  // concurrent retry can't double-pay during the KV propagation window.
+  if (settlement.payout?.status === "sending"
+      && Date.now() - Number(settlement.payout.attempted_at ?? 0) < 10 * 60 * 1000) {
+    return Response.json({ ok: true, status: "payout_in_progress", settlement });
+  }
+  settlement.payout = { status: "sending", attempted_at: Date.now() };
+  await env.CLAIMS.put(settleKey(mirrorId), JSON.stringify(settlement));
 
-  // Payout rail priority: PYUSD on Solana via Paxos (licensed transmitter
-  // of record — sanctions screening + Travel Rule enforced by them) when
-  // the winner gave a Solana address; USD via PayPal Payouts otherwise.
-  const paxosReady = !!(env.PAXOS_CLIENT_ID && env.PAXOS_CLIENT_SECRET && env.PAXOS_PROFILE_ID);
-  if (settlement.pyusd) {
-    const payoutSpec = ((settlement.payout_input ?? {}) as {
-      beneficiary?: { first_name?: string; last_name?: string; physical_address?: { country?: string } };
-    });
-    if (paxosReady) {
-      const refId = `wide-mirror-${mirrorId}`.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 100);
-      const result = await paxosPyusdWithdraw(env, {
-        refId,
-        amount: settlement.pyusd.amount,
-        destinationAddress: settlement.pyusd.to,
-        beneficiary: payoutSpec.beneficiary,
+  try {
+    // Payout rail priority: PYUSD on Solana via Paxos (licensed transmitter
+    // of record — sanctions screening + Travel Rule enforced by them) when
+    // the winner gave a Solana address; USD via PayPal Payouts otherwise.
+    const paxosReady = !!(env.PAXOS_CLIENT_ID && env.PAXOS_CLIENT_SECRET && env.PAXOS_PROFILE_ID);
+    if (settlement.pyusd) {
+      const payoutSpec = ((settlement.payout_input ?? {}) as {
+        beneficiary?: { first_name?: string; last_name?: string; physical_address?: { country?: string } };
       });
-      settlement.payout = result.ok
-        ? { rail: "pyusd-solana", provider: "paxos", status: result.status,
-            transfer_id: result.transfer_id, ref_id: refId,
-            ...(result.error ? { note: result.error } : {}) }
-        : { rail: "pyusd-solana", provider: "paxos", status: "failed",
-            error: result.error, travel_rule_required: !!result.travel_rule_required,
-            ...(result.travel_rule_required
-              ? { next: "Resubmit claim payout with beneficiary {first_name,last_name,physical_address.country} or save Travel Rule metadata on the Paxos destination address." }
-              : {}) };
-    } else {
-      // No Paxos creds — queue the exact send for ops (PayPal app / Paxos
-      // dashboard) rather than lose the settlement.
-      settlement.payout = {
-        rail: "pyusd-solana", status: "pending_ops",
-        note: `Send ${settlement.pyusd.amount} PYUSD on Solana to ${settlement.pyusd.to} ` +
-              `(mint ${settlement.pyusd.mint}).`,
-      };
+      if (paxosReady) {
+        const refId = `wide-mirror-${mirrorId}`.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 100);
+        const result = await paxosPyusdWithdraw(env, {
+          refId,
+          amount: settlement.pyusd.amount,
+          destinationAddress: settlement.pyusd.to,
+          beneficiary: payoutSpec.beneficiary,
+        });
+        settlement.payout = result.ok
+          ? { rail: "pyusd-solana", provider: "paxos", status: result.status,
+              transfer_id: result.transfer_id, ref_id: refId,
+              ...(result.error ? { note: result.error } : {}) }
+          : { rail: "pyusd-solana", provider: "paxos", status: "failed",
+              error: result.error, travel_rule_required: !!result.travel_rule_required,
+              ...(result.travel_rule_required
+                ? { next: "Resubmit claim payout with beneficiary {first_name,last_name,physical_address.country} or save Travel Rule metadata on the Paxos destination address." }
+                : {}) };
+      } else {
+        // No Paxos creds — queue the exact send for ops (PayPal app / Paxos
+        // dashboard) rather than lose the settlement.
+        settlement.payout = {
+          rail: "pyusd-solana", status: "pending_ops",
+          note: `Send ${settlement.pyusd.amount} PYUSD on Solana to ${settlement.pyusd.to} ` +
+                `(mint ${settlement.pyusd.mint}).`,
+        };
+      }
+      await env.CLAIMS.put(settleKey(mirrorId), JSON.stringify(settlement));
+      return Response.json({ ok: settlement.payout.status !== "failed", settlement });
     }
-    await env.CLAIMS.put(settleKey(mirrorId), JSON.stringify(settlement));
-    return Response.json({ ok: settlement.payout.status !== "failed", settlement });
-  }
 
-  // USD fallback: PayPal Payouts to the winner's PayPal email — live today,
-  // PayPal is the licensed transmitter on this rail.
-  if (settlement.paypal_usd) {
-    const receipt = await sendPayout(env, {
-      repo: mirrorId, seq: 0, claimHash: settlement.winning_claim_hash,
-      receiver: settlement.paypal_usd.to, amount: settlement.paypal_usd.amount,
-      currency: "USD", note: `Widespread mirror bounty ${mirrorId} — verified winning claim`,
-    });
-    settlement.payout = { rail: "paypal-payouts", ...receipt };
-    await env.CLAIMS.put(settleKey(mirrorId), JSON.stringify(settlement));
-    return Response.json({ ok: true, settlement });
-  }
+    // USD fallback: PayPal Payouts to the winner's PayPal email — live today,
+    // PayPal is the licensed transmitter on this rail.
+    if (settlement.paypal_usd) {
+      const receipt = await sendPayout(env, {
+        repo: mirrorId, seq: 0, claimHash: settlement.winning_claim_hash,
+        receiver: settlement.paypal_usd.to, amount: settlement.paypal_usd.amount,
+        currency: "USD", note: `Widespread mirror bounty ${mirrorId} — verified winning claim`,
+      });
+      settlement.payout = { rail: "paypal-payouts", ...receipt };
+      await env.CLAIMS.put(settleKey(mirrorId), JSON.stringify(settlement));
+      return Response.json({ ok: true, settlement });
+    }
 
-  return Response.json({ ok: false, error: "winner provided no payout address (pyusd_solana_address or paypal_email)" }, { status: 409 });
+    return Response.json({ ok: false, error: "winner provided no payout address (pyusd_solana_address or paypal_email)" }, { status: 409 });
+  } catch (e) {
+    // A thrown rail call must not leave the settlement stuck in "sending".
+    settlement.payout = { status: "failed",
+      error: e instanceof Error ? e.message : String(e) };
+    await env.CLAIMS.put(settleKey(mirrorId), JSON.stringify(settlement));
+    return Response.json({ ok: false, error: settlement.payout.error, settlement }, { status: 500 });
+  }
 }
