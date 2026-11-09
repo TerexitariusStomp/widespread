@@ -11,6 +11,7 @@
 //   scheduled(*/5m)           scan WATCH_REPOS op-logs, review new ship claims
 
 import { DASHBOARD_HTML } from "./dash";
+import { homePage, bountiesPage, bountyPage, fundPage, receiptPage, docsPage } from "./web/pages";
 import { handlePremiumExport } from "./premium";
 import { reviewOutstanding, runReview } from "./review";
 import { handleBotVerdict, type BotVerdictBody } from "./botverdict";
@@ -42,6 +43,34 @@ const json = (body: unknown, status = 200) =>
   });
 
 const bad = (msg: string, status = 400) => json({ error: msg }, status);
+
+/** Anonymous HTML GET memoization — feed pages render from the KV feed
+ * doc and cost real CPU; free-tier isolates get ~10ms. Authenticated or
+ * cookie-bearing requests always bypass. */
+const pageCache = new Map<string, { body: string; expires: number }>();
+const PAGE_TTL_MS = 45_000;
+
+function cacheable(req: Request): boolean {
+  return req.method === "GET"
+    && !req.headers.get("authorization")
+    && !req.headers.get("cookie");
+}
+
+async function cachedPage(url: URL, req: Request, render: () => Promise<Response>): Promise<Response> {
+  if (!cacheable(req)) return render();
+  const key = url.pathname + url.search;
+  const hit = pageCache.get(key);
+  if (hit && hit.expires > Date.now()) {
+    return new Response(hit.body, { headers: { "content-type": "text/html; charset=utf-8" } });
+  }
+  const res = await render();
+  if (res.headers.get("content-type")?.includes("text/html")) {
+    const body = await res.clone().text();
+    if (pageCache.size > 200) pageCache.clear();
+    pageCache.set(key, { body, expires: Date.now() + PAGE_TTL_MS });
+  }
+  return res;
+}
 
 /** Where-the-money-goes trace for a claim: escrow → paid | refunded |
  * open | expired | slashed — the public answer to "where did it go". */
@@ -171,6 +200,35 @@ export default {
     const { pathname } = url;
 
     if (pathname === "/" || pathname === "/index.html") {
+      return cachedPage(url, req, () => homePage(env, ctx));
+    }
+    // Human surfaces — SSR pages over the feed/mirror/claim APIs.
+    if (pathname === "/bounties") {
+      return cachedPage(url, req, () => bountiesPage(env, ctx));
+    }
+    if (pathname === "/bounty") {
+      const id = url.searchParams.get("id") ?? "";
+      if (!id) return bad("id required", 400);
+      return cachedPage(url, req, () => bountyPage(env, ctx, id));
+    }
+    if (pathname === "/fund") {
+      const id = url.searchParams.get("id") ?? "";
+      if (!id) return bad("id required", 400);
+      return cachedPage(url, req, () => fundPage(env, ctx, id));
+    }
+    if (pathname === "/receipt") {
+      const mirrorId = url.searchParams.get("mirror");
+      const claimHash = url.searchParams.get("claim");
+      const repo = url.searchParams.get("repo");
+      const seqRaw = url.searchParams.get("seq");
+      const seq = seqRaw == null ? null : Number(seqRaw);
+      return cachedPage(url, req, () =>
+        receiptPage(env, mirrorId, claimHash, repo, Number.isFinite(seq) ? seq : null));
+    }
+    if (pathname === "/docs") return docsPage();
+    // Ops dashboard — the claim→evidence→verdict→payout console. Moved off
+    // "/" when the market home shipped; same auth posture as before.
+    if (pathname === "/ops" || pathname === "/dashboard") {
       return new Response(DASHBOARD_HTML, {
         headers: { "content-type": "text/html; charset=utf-8" },
       });
