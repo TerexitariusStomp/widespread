@@ -64,9 +64,28 @@ export default (app) => {
     if (v) await emitVerdict(ctx, { pr, market, verdict: v });
   });
 
-  // PR conversation comment by a bot (Greptile summary, CodeRabbit notes)
+  // PR conversation comments: bot-verdicts AND @widespread tip/claim grammar.
   app.on("issue_comment.created", async (ctx) => {
     if (!ctx.payload.issue?.pull_request) return; // PR comments only
+    const body = ctx.payload.comment.body || "";
+    // @widespread claim — contributor asks how to get paid for a merged PR.
+    if (/@widespread\s+claim\b/i.test(body)) {
+      await ctx.octokit.issues.createComment({ ...ctx.issue(), issue_number: ctx.payload.issue.number,
+        body: `@widespread claim — two payout rails, pick one:\n` +
+              `• **PayPal**: put \`paypal:you@email.com\` in a comment on this PR\n` +
+              `• **Crypto**: sign a payout binding → ${BRIDGE}/api/payouts/nonce?forgeUserId=${ctx.payload.comment.user?.id ?? "<your-github-id>"} then POST /api/payouts/bind\n` +
+              `Your rep accrues on merge; when a funder escrows the work pays out to your bound rail.` }).catch(() => {});
+      return;
+    }
+    // @widespread tip $N — funder intents a retro-payment for this PR.
+    const tip = body.match(/@widespread\s+tip\s+\$?([\d.]+)/i);
+    if (tip) {
+      await ctx.octokit.issues.createComment({ ...ctx.issue(), issue_number: ctx.payload.issue.number,
+        body: `@widespread tip — **$${tip[1]}** for merged work\n` +
+              `fund it → ${BRIDGE}/fund/retro:${ctx.payload.repository.owner.login}/${ctx.payload.repository.name}#${ctx.payload.issue.number}\n` +
+              `escrow locks at face value; the author's claim wins on merge attestation.` }).catch(() => {});
+      return;
+    }
     const pr = await ctx.octokit.pulls.get({ ...ctx.issue(), pull_number: ctx.payload.issue.number }).catch(() => null);
     if (!pr) return;
     const market = await fundedIssue(ctx, `${pr.data.body || ""} ${pr.data.title || ""}`);
@@ -154,7 +173,20 @@ export default (app) => {
     const issueNum = ref[1];
     const issue = await ctx.octokit.issues.get({ ...ctx.issue(), issue_number: Number(issueNum) });
     const funded = (issue.data.labels || []).some((l) => /wide:funded/i.test(l.name || l));
-    if (!funded) return;
+    if (!funded) {
+      // Unfunded merge → retro-funding nudge. Gated to repos with any
+      // wide:* presence so we never spam arbitrary repos.
+      const labels = await ctx.octokit.issues.listLabelsForRepo({ ...ctx.issue(), per_page: 100 })
+        .catch(() => ({ data: [] }));
+      const widePresent = (labels.data ?? []).some((l) => /wide:/i.test(l.name || ""));
+      if (!widePresent) return;
+      await ctx.octokit.issues.createComment({ ...ctx.issue(), issue_number: pr.number,
+        body: `✅ **Accepted** — \`retro:${repo}#${pr.number}\` now lists on the Widespread feed.\n` +
+              `Fund this work retroactively → ${BRIDGE}/fund/retro:${repo}#${pr.number} (PayPal or NEAR — anyone can escrow).\n` +
+              `@${pr.user?.login ?? "author"} — claim your payout: \`@widespread claim\`.` }).catch(() => {});
+      app.log.info({ repo, pr: pr.number }, "retro nudge posted");
+      return;
+    }
     // merge=accept: trigger bridge adjudication on the merge commit
     const res = await fetch(`${BRIDGE}/review`, {
       method: "POST", headers: { "content-type": "application/json" },

@@ -12,7 +12,8 @@
 
 import { nearView } from "./near";
 import { scanMirrorSubmissions } from "./ingest";
-import { attachQuality, fillQuality, embedRecords, embedText, recordVector, vectorIdMap } from "./quality";
+import { attachQuality, fillQuality, embedRecords, embedText, recordVector, vectorIdMap, repoQualityEntry } from "./quality";
+import { creditMerges } from "./rep";
 import { listBounties, listRecords } from "./store";
 import {
   acquireFeedLock, getFeedDoc, getSourceStamp, putFeedDoc,
@@ -540,6 +541,51 @@ async function pollSlop(env: Env): Promise<FeedRecord[]> {
     .filter((r): r is FeedRecord => r !== null);
 }
 
+/** Merged PRs on watched repos → retro-fundable records. The merge IS the
+ * acceptance attestation (RetroPGF without the electorate); anyone can
+ * fund the listing — maintainer, sponsor, or patron. Anti-gaming lives in
+ * the rep layer (self-merge/wash-funding excluded), not the listing. */
+async function pollRetroMerged(env: Env): Promise<FeedRecord[]> {
+  const out: FeedRecord[] = [];
+  const repo = (env.WATCH_REPOS ?? "").split(",")[0]?.trim() ?? "";
+  if (!repo || repo === "none") return out;
+  const gh = await fetchJson(
+    `https://api.github.com/search/issues?q=repo:${encodeURIComponent(repo)}+is:pr+is:merged&sort=updated&order=desc&per_page=8`,
+    ghHeaders(env), 12000,
+  ).catch(() => null) as { items?: Record<string, unknown>[] } | null;
+  const authors = new Set<string>();
+  for (const pr of gh?.items ?? []) {
+    const num = Number(pr.number ?? 0);
+    const title = String(pr.title ?? "merged work");
+    const author = (pr.user as Record<string, unknown> | undefined)?.id;
+    if (author) authors.add(String(author));
+    const closedIssue = String(pr.body ?? "").match(/(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/i)?.[1];
+    out.push({
+      id: `retro:${repo}#${num}`,
+      source: "github-retro", forge: "github", kind: "task",
+      repo,
+      locator: `https://github.com/${repo}/pull/${num}`,
+      title: `Accepted: ${title.slice(0, 100)}`,
+      spec: `PR #${num} merged${closedIssue ? ` — closed #${closedIssue}` : ""}. Fund this accepted work retroactively; any funder escrows at face value and the author's claim wins.`,
+      escrow: { state: "none", note: "seeking funder — merged work awaiting retro sponsorship" },
+      url: String(pr.html_url ?? ""),
+      claim: { how: "author claims via @widespread claim or POST /api/mirrors/claims; payout via bound rail", grammar: "@widespread claim" },
+      updated_at: Date.parse(String(pr.updated_at ?? "")) || Date.now(),
+      created_at: Date.parse(String(pr.created_at ?? "")) || Date.now(),
+      widespread_offer: mirrorOffer(env),
+    } as FeedRecord);
+  }
+  // Contributor rep credit — gated: merges only count on repos with real
+  // external signal (quality ≥ 0.3). Self-merge/wash detection happens at
+  // payout, where payer identity is known.
+  const q = await repoQualityEntry(env, repo).catch(() => undefined);
+  const reputable = (q?.score ?? 0) >= 0.3;
+  if (reputable && authors.size) {
+    await creditMerges(env, [...authors].map((id) => ({ forgeUserId: id, reputable: true }))).catch(() => 0);
+  }
+  return out;
+}
+
 // ----------------------------------------------------------------- merge
 
 const SOURCE_INTERVALS: Record<string, number> = {
@@ -547,7 +593,7 @@ const SOURCE_INTERVALS: Record<string, number> = {
   github: 15 * 60 * 1000, tangled: FEED_TTL_MS,
   forgejo: 60 * 60 * 1000, codeberg: 60 * 60 * 1000, gitlab: 60 * 60 * 1000,
   radicle: 60 * 60 * 1000, "external:immunefi": 6 * 60 * 60 * 1000,
-  "external:slop": 60 * 60 * 1000,
+  "external:slop": 60 * 60 * 1000, "github-retro": 60 * 60 * 1000,
 };
 
 async function runSource(env: Env, name: string, fn: () => Promise<FeedRecord[]>): Promise<{ stamp: SourceStamp; records: FeedRecord[] }> {
@@ -613,7 +659,7 @@ export async function refreshFeed(env: Env, ctx?: ExecutionContext): Promise<Fee
     if (existing) return existing;
   }
   try {
-    const [nearR, kvR, ghR, tgR, fwR, imR, slR, trust] = await Promise.all([
+    const [nearR, kvR, ghR, tgR, fwR, imR, slR, rtR, trust] = await Promise.all([
       runSource(env, "near-chain", () => pollNearChain(env)),
       runSource(env, "kv-registry", () => pollKvRegistry(env)),
       runSource(env, "github", () => pollGithub(env)),
@@ -621,12 +667,14 @@ export async function refreshFeed(env: Env, ctx?: ExecutionContext): Promise<Fee
       runSource(env, "forgejo", () => pollForgeWatch(env)),
       runSource(env, "external:immunefi", () => pollImmunefi(env)),
       runSource(env, "external:slop", () => pollSlop(env)),
+      runSource(env, "github-retro", () => pollRetroMerged(env)),
       trustIndex(env),
     ]);
     const sources: FeedDoc["sources"] = {};
     for (const [name, r] of Object.entries({
       "near-chain": nearR, "kv-registry": kvR, github: ghR, tangled: tgR,
       forgejo: fwR, "external:immunefi": imR, "external:slop": slR,
+      "github-retro": rtR,
     })) sources[name] = r.stamp;
 
     // Merge: fresh records replace stale ones by id; records from
@@ -634,7 +682,7 @@ export async function refreshFeed(env: Env, ctx?: ExecutionContext): Promise<Fee
     const prior = await getFeedDoc(env);
     const byId = new Map<string, FeedRecord>();
     for (const r of prior?.records ?? []) byId.set(r.id, r);
-    for (const r of [...nearR.records, ...kvR.records, ...ghR.records, ...tgR.records, ...fwR.records, ...imR.records, ...slR.records]) {
+    for (const r of [...nearR.records, ...kvR.records, ...ghR.records, ...tgR.records, ...fwR.records, ...imR.records, ...slR.records, ...rtR.records]) {
       const t = r.repo ? trust.get(r.repo) : undefined;
       byId.set(r.id, { ...r, ...(t ? { trust: t } : {}) });
     }

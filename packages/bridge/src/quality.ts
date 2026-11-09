@@ -139,6 +139,11 @@ export async function attachQuality(env: Env, records: FeedRecord[]): Promise<vo
   }
 }
 
+/** Single-repo lookup for rep gating. */
+export async function repoQualityEntry(env: Env, repo: string): Promise<QualityEntry | undefined> {
+  return (await readIndex(env)).get(repo);
+}
+
 // ------------------------------------------------------- forge adapters
 
 interface RepoMeta {

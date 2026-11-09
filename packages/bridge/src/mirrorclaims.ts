@@ -18,6 +18,8 @@ import { validateForgeSubmission, attestationForMirror } from "./claims";
 import { sha256Hex } from "./forge";
 import { feedDoc } from "./feed";
 import { sendPayout } from "./payouts";
+import { resolvePayout } from "./routes/payouts";
+import { bumpFunderRep } from "./rep";
 
 const claimKey = (mirrorId: string, hash: string) => `mclaim:${mirrorId}:${hash}`;
 const claimsPrefix = (mirrorId: string) => `mclaim:${mirrorId}:`;
@@ -142,11 +144,14 @@ export async function handleMirrorVerdict(req: Request, env: Env, ctx?: Executio
   const usd = mirror.original?.est_usd ?? 0;
   const cutBps = mirror.cut_bps ?? 1000;
   const netUsd = +(usd * (1 - cutBps / 10000)).toFixed(2);
-  // Auto-ingested claims carry payout:null — the verdict caller (payer or
-  // ops) supplies the winner's payout address here.
+  // Resolution order: body.payout → claim.payout → contributor's bound
+  // wallet. Destination only — the amount is always post-cut net_usd.
   const payoutIn = (body.payout ?? claim.payout ?? {}) as {
-    paypal_email?: string;
+    paypal_email?: string; near_account?: string;
   };
+  const resolved = await resolvePayout(env, claim.forgeUserId, payoutIn);
+  if (resolved.rail === "paypal" && !payoutIn.paypal_email) payoutIn.paypal_email = resolved.paypal_email;
+  if (resolved.rail === "near") payoutIn.near_account = resolved.near_account;
   const settlement = {
     mirror_id: mirrorId,
     winning_claim_hash: claimHash,
@@ -156,6 +161,9 @@ export async function handleMirrorVerdict(req: Request, env: Env, ctx?: Executio
     net_usd: netUsd,
     paypal_usd: payoutIn.paypal_email
       ? { asset: "USD", rail: "paypal-payouts", amount: netUsd.toFixed(2), to: payoutIn.paypal_email }
+      : null,
+    near: payoutIn.near_account
+      ? { asset: "NEAR", rail: "near-transfer", usd: netUsd.toFixed(2), to: payoutIn.near_account, source: resolved.source }
       : null,
     verdict: accept ? "accept" : "reject",
     reasoning: String(body?.reasoning ?? ""),
@@ -204,6 +212,13 @@ export async function handleMirrorPayout(req: Request, env: Env, ctx?: Execution
       });
       settlement.payout = { rail: "paypal-payouts", ...receipt };
       await env.CLAIMS.put(settleKey(mirrorId), JSON.stringify(settlement));
+      // Funder rep — pays out. Wash guard: don't credit a funder who paid
+      // their own claim (payer email == winner's payout email).
+      const funding = await env.CLAIMS.get(`fiatfund:${mirrorId}`).then((v) => v ? JSON.parse(v) : null).catch(() => null);
+      const payer = funding?.payer_email;
+      if (payer && payer.toLowerCase() !== settlement.paypal_usd.to?.toLowerCase()) {
+        await bumpFunderRep(env, payer, "paid").catch(() => undefined);
+      }
       return Response.json({ ok: true, settlement });
     }
 

@@ -16,6 +16,7 @@ import { mirrorRoutes } from "./routes/mirrors";
 import { claimRoutes } from "./routes/claims";
 import { hatRoutes } from "./routes/hats";
 import { miscRoutes } from "./routes/misc";
+import { payoutRoutes } from "./routes/payouts";
 import { scanMirrorSubmissions } from "./ingest";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -30,6 +31,7 @@ app.route("/", mirrorRoutes());
 app.route("/", claimRoutes());
 app.route("/", hatRoutes());
 app.route("/", miscRoutes());
+app.route("/", payoutRoutes());
 
 app.notFound((c) =>
   new Response(JSON.stringify({ error: "not found" }, null, 2), {

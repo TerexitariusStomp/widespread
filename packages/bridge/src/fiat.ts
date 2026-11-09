@@ -14,6 +14,7 @@
 import type { Env, MirrorListing } from "./types";
 import { nearFunctionCall, nearPriceUsd, nearViewCall } from "./nearops";
 import { paypalAccessToken, paypalApi } from "./paypal";
+import { bumpFunderRep } from "./rep";
 
 
 async function pp(env: Env, method: string, path: string, body?: unknown): Promise<Record<string, unknown>> {
@@ -111,6 +112,8 @@ export async function captureFiatOrder(env: Env, mirrorId: string, orderId: stri
     funding.capture_id = captureId || undefined;
     funding.captured_at = Date.now();
     await env.CLAIMS.put(fiatKey(mirrorId), JSON.stringify(funding));
+    // Funder rep: they put real money in.
+    await bumpFunderRep(env, payer, "funded").catch(() => undefined);
     // Auto-escrow: convert the captured USD to NEAR at the Intents price
     // and create the market from the ops account — the fiat→NEAR on-ramp.
     const escrow = mirror
