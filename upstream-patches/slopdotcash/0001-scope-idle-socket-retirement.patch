@@ -1,0 +1,56 @@
+From 88b5085c1e11df540510a911b440ee7e4b73b66e Mon Sep 17 00:00:00 2001
+From: Devin <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 20:30:48 -0700
+Subject: [PATCH] fix(test): scope idle-socket retirement to sockets that
+ served a request
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+closeIdleConnections() on Node ≥22 also destroys freshly-accepted
+sockets whose first request is still in flight, so the fixture-idle
+regression client died on its very first PUT (ECONNRESET). Track
+connections and only destroy sockets that completed a request and are
+now idle — the actual scenario under test.
+
+Generated with [Devin](https://devin.ai)
+
+Co-Authored-By: Devin <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ scripts/e2e-runner.test.ts | 20 +++++++++++++++++++-
+ 1 file changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/scripts/e2e-runner.test.ts b/scripts/e2e-runner.test.ts
+index 46128891..e73802fa 100644
+--- a/scripts/e2e-runner.test.ts
++++ b/scripts/e2e-runner.test.ts
+@@ -269,7 +269,25 @@ test("registry fixture writes survive idle-socket closure without replay", async
+     const server = await startGitHubApiFixture(0);
+     // Reproduce a server retiring idle sockets while the independent test
+     // client starts its next request. Never interrupt an active request.
+-    const closeIdle = setInterval(() => server.closeIdleConnections(), 1);
++    // Only sockets that have already served a request are eligible:
++    // closeIdleConnections() also destroys freshly-accepted sockets whose
++    // first request is still in flight (Node ≥22), which is not the
++    // scenario under test.
++    const sockets = new Set();
++    server.on("connection", (socket) => {
++      sockets.add(socket);
++      socket.on("close", () => sockets.delete(socket));
++    });
++    server.on("request", (request) => {
++      request.socket.__served = true;
++    });
++    const closeIdle = setInterval(() => {
++      for (const socket of sockets) {
++        if (socket.__served && !socket._httpMessage && !socket.destroyed) {
++          socket.destroy();
++        }
++      }
++    }, 1);
+     try {
+       const child = spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(client)}, "http://127.0.0.1:" + server.address().port], { stdio: "inherit" });
+       const status = await new Promise((resolve, reject) => {
+-- 
+2.56.0
+

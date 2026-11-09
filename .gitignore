@@ -5,3 +5,9 @@ dist/
 *.log
 .DS_Store
 coverage/
+
+# Build output — contracts compile to wasm at build time, never committed
+*.wasm
+contracts/*/build/
+contract.js.map
+packages/delta-git/frontend/canary/

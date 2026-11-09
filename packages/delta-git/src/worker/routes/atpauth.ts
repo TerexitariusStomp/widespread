@@ -3,7 +3,7 @@ import type { AppContext, AppRouter } from "./hono";
 import { newPrefixedId, requestOrigin } from "@/worker/common";
 import { consumeChallenge, issueChallenge } from "@/worker/agent/atpauth/challenge";
 import { resolveDid, resolveHandle } from "@/worker/agent/atpauth/pds";
-import { signDidSession, signHs256Jwt, verifyDidSession } from "@/worker/agent/atpauth/jwt";
+import { signDidSession, verifyDidSession } from "@/worker/agent/atpauth/jwt";
 import { canonicalJson, utf8, verifyKeySignature } from "@/worker/agent/atpauth/verify";
 import { completeOAuth, startOAuth } from "@/worker/agent/atpauth/oauth";
 import { decodeKeyMultibase } from "@/worker/agent/atpauth/didkey";
@@ -310,25 +310,6 @@ export function registerAtpAuthRoutes(router: AppRouter): void {
     });
   });
 
-  // Cross-app SSO handoffs: `return_to` must land on an allowlisted host
-  // (ALLOWED_RETURN_HOSTS). Only its hostname is trusted — the callback
-  // appends `?dg_token=` after the session is established.
-  function allowedReturnTo(env: Env, raw: string | undefined): string | undefined {
-    if (!raw) return undefined;
-    try {
-      const u = new URL(raw);
-      const loopback = ["localhost", "127.0.0.1"].includes(u.hostname);
-      if (u.protocol !== "https:" && !loopback) return undefined;
-      const hosts = (env.ALLOWED_RETURN_HOSTS ?? "")
-        .split(",")
-        .map((h) => h.trim())
-        .filter(Boolean);
-      return hosts.includes(u.hostname) ? u.toString() : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
   router.get("/auth/oauth/start", async (c) => {
     const limited = await rateGate(c, LIMITS.authChallenge, callerKey(c));
     if (limited) return limited;
@@ -339,17 +320,11 @@ export function registerAtpAuthRoutes(router: AppRouter): void {
         ? rawHandle
         : `${rawHandle}.bsky.social`
       : undefined;
-    const returnTo = allowedReturnTo(c.env, c.req.query("return_to"));
-    if (c.req.query("return_to") && !returnTo) {
-      metric(c.env, "auth.did", { scope: "oauth-return-to-rejected", index: "none" });
-      return c.redirect(`/auth?error=bad_return_to`);
-    }
     const result = await startOAuth({
       env: c.env,
       kv: c.env.ROUTES,
       origin: requestOrigin(c.env, c.req.url, c.req.raw.headers),
       handle,
-      returnTo,
     });
     if (!result.ok) {
       metric(c.env, "auth.did", { scope: "oauth-start-failed", index: result.error });
@@ -381,25 +356,6 @@ export function registerAtpAuthRoutes(router: AppRouter): void {
     }
     metric(c.env, "auth.did", { scope: "oauth-verified", index: result.did });
 
-    // SSO handoff: the start request carried an allowlisted return_to — issue
-    // a short-lived dg_token (aud="wpcloud", signed with the shared
-    // DG_SESSION_SECRET) and bounce the browser to the app's callback.
-    if (result.returnTo) {
-      if (!c.env.DG_SESSION_SECRET) {
-        return c.redirect(`/auth?error=sso_unconfigured`);
-      }
-      const iat = Math.floor(Date.now() / 1000);
-      const dgToken = await signHs256Jwt(c.env.DG_SESSION_SECRET, {
-        iss: origin,
-        aud: "wpcloud",
-        sub: result.did,
-        iat,
-        exp: iat + 300,
-      });
-      const sep = result.returnTo.includes("?") ? "&" : "?";
-      metric(c.env, "auth.did", { scope: "oauth-sso-handoff", index: result.did });
-      return c.redirect(`${result.returnTo}${sep}dg_token=${dgToken}`);
-    }
     return c.redirect("/");
   });
 

@@ -27,9 +27,6 @@ export function Footer() {
           >
             Source
           </a>
-          <a href="https://wpcloud.delta-git.workers.dev" className="no-underline hover:underline">
-            Apps
-          </a>
           <a
             href="https://limic.dev"
             target="_blank"

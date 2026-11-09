@@ -10,7 +10,6 @@
     "typecheck": "tsc --noEmit",
     "cf-typegen": "wrangler types",
     "seed:claim": "node scripts/ship-claim.mjs",
-    "seed:bounty": "node scripts/seed-bounty.mjs",
     "test": "vitest run",
     "licenses": "npx --yes license-checker@25 --summary --onlyAllow \"MIT;Apache-2.0;BSD-2-Clause;BSD-3-Clause;ISC;0BSD;Unlicense;CC0-1.0\""
   },

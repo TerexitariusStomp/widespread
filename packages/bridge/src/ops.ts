@@ -70,7 +70,7 @@ export const OPS_HTML = `<!doctype html>
 </head>
 <body>
 <header>
-  <div id="oplog-warn" style="display:none;padding:8px 12px;margin-bottom:12px;border:1px solid #d29922;border-radius:8px;color:#d29922;font-size:13px">⚠ forge op-log is empty — entries wipe periodically; run <code>node scripts/reseed-demo.mjs</code></div>
+  <div id="oplog-warn" style="display:none;padding:8px 12px;margin-bottom:12px;border:1px solid #d29922;border-radius:8px;color:#d29922;font-size:13px">⚠ forge op-log is empty — entries wipe periodically; run <code>node scripts/ship-claim.mjs</code></div>
   <h1>Widespread <span class="mut">verified-work payouts</span></h1>
   <span class="paypal">PayPal Payouts</span>
   <span class="ai">AI adjudicator</span>

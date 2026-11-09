@@ -237,8 +237,6 @@
     "ATP_PDS_URL": "https://bsky.social",
     // Hermes browser-agent deployment origin (embed.js source for /embed/hermes).
     "HERMES_ORIGIN": "https://hermes.widespread.fyi",
-    // Hosts allowed as OAuth return_to targets — wpcloud SSO handoff.
-    "ALLOWED_RETURN_HOSTS": "wpcloud.delta-git.workers.dev",
     // Comma-separated DID/userId allowlist for global reputation admin
     // (epoch create/close). Empty = no admins.
     "DG_ADMIN_ACTORS": "",
