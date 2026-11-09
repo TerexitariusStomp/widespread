@@ -3,8 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Widespread on Solana \u2014 NEAR Intents quote/status reads",
+  "description": "Widespread on Solana — PYUSD Token-2022 payouts with memo-bound audit hashes + NEAR Intents quote reads (devnet)",
   "scripts": {
     "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@solana/spl-token": "^0.4.0",
+    "@solana/web3.js": "^1.95.0"
   }
 }
