@@ -86,7 +86,26 @@ export function miscRoutes() {
       rep: { ...r, spam_likely: spamLikely(r), rank: claimRank(r) },
       export: `/api/rep/${actor}/export`,
     })).sort((a, b) => b.rep.rank - a.rep.rank);
-    return json({ contributors, runners, total: contributors.length });
+    // Funder side — rep:funder:* KV keys carry {funded, paid}; listing is
+    // bounded (funders are few). release_rate is the settlement-integrity
+    // signal payers screen on.
+    const funders: { payer: string; funded: number; paid: number; release_rate: number }[] = [];
+    try {
+      let cursor: string | undefined;
+      do {
+        const page = await c.env.CLAIMS.list({ prefix: "rep:funder:", cursor, limit: 200 });
+        for (const k of page.keys) {
+          const raw = await c.env.CLAIMS.get(k.name).catch(() => null);
+          if (!raw) continue;
+          const r = JSON.parse(raw) as { funded: number; paid: number };
+          funders.push({ payer: k.name.slice(10), funded: r.funded ?? 0, paid: r.paid ?? 0,
+            release_rate: r.funded ? Math.round((r.paid / r.funded) * 100) / 100 : 0 });
+        }
+        cursor = page.list_complete ? undefined : page.cursor;
+      } while (cursor);
+    } catch { /* funder index optional */ }
+    funders.sort((a, b) => b.release_rate - a.release_rate);
+    return json({ contributors, funders, runners, total: contributors.length });
   });
 
   // Foreguild futarchy — live governance proposals on the NEAR contract.
