@@ -10,7 +10,7 @@ import {
   getAssociatedTokenAddressSync, createAssociatedTokenAccountInstruction,
   createTransferCheckedInstruction, TOKEN_2022_PROGRAM_ID,
 } from '@solana/spl-token';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 
 export const RPC = process.env.SOLANA_RPC || 'https://api.devnet.solana.com';
@@ -32,7 +32,6 @@ export function loadKeypair(path) {
 }
 
 export function saveKeypair(path, kp) {
-  const { writeFileSync } = require('node:fs');
   writeFileSync(path, JSON.stringify([...kp.secretKey]));
   return kp.publicKey.toBase58();
 }

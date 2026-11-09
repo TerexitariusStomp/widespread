@@ -7,7 +7,8 @@
   "scripts": {
     "demo": "node src/demo.js",
     "payout": "node src/payout.js",
-    "anchor": "node src/anchor.js"
+    "anchor": "node src/anchor.js",
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "@solana/spl-token": "^0.4.0",
