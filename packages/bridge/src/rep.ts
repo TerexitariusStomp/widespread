@@ -5,15 +5,24 @@
 // Funder rep: funded → paid counters per payer identity (wash funding —
 // paying your own claim — settles money but earns no rep).
 //
-// Contributor merges go to an R2 map (write-amortized like quality);
-// funder counters are rare enough for KV.
+// Storage is EVENT-SOURCED, not counter-blobbed:
+//   rep:event:<actor>:<ts>:<rand> — append-only signed RepEvent objects
+//   rep:ctr:<actor>               — per-actor counters (materialized view)
+//
+// Why: the previous single-blob rep.json was a read-modify-write on shared
+// state — concurrent verdicts/merges lost updates, and every write scaled
+// O(all-actors). Per-actor keys narrow contention to same-actor concurrent
+// writes (rare); the append-only event log is the source of truth and the
+// counters are rebuildable from it. Export is the events themselves —
+// signed, portable, verifiable offline against ORACLE_PUBKEY_HEX.
 
 import type { Env } from "./types";
 
-const REP_KEY = "quality/rep.json";
-export interface RepIndex {
-  contrib: Record<string, { merges: number; wins: number; rejects: number }>;
-}
+const EVENT_PREFIX = "rep:event:";
+const CTR_PREFIX = "rep:ctr:";
+
+export interface RepCounters { merges: number; wins: number; rejects: number }
+export interface RepIndex { contrib: Record<string, RepCounters> }
 
 /** Signed, portable rep event — the contributor owns this record; anyone
  * can verify the oracle signature offline. ATProto-shaped for PDS export. */
@@ -25,22 +34,76 @@ export interface RepEvent {
   at: number; sig?: string;
 }
 
+const ctrKey = (actor: string) => `${CTR_PREFIX}${actor.toLowerCase().slice(0, 80)}`;
+
+// ---------- signing (same scheme as oracle.ts verdict signing) ----------
+
+async function ed25519Sign(msg: string, seedHex: string): Promise<string> {
+  const seed = new Uint8Array((seedHex.match(/../g) ?? []).map((b) => parseInt(b, 16)));
+  const key = await crypto.subtle.importKey(
+    "raw", seed, { name: "Ed25519" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("Ed25519", key, new TextEncoder().encode(msg));
+  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Canonical signing payload — verify offline with ORACLE_PUBKEY_HEX:
+ * ed25519(JSON.stringify({actor,kind,repo,ref,at})). */
+function eventPayload(e: Omit<RepEvent, "sig">): string {
+  return JSON.stringify({ actor: e.actor, kind: e.kind, repo: e.repo, ref: e.ref, at: e.at });
+}
+
+// ---------- event log (source of truth) ----------
+
+async function appendEvent(env: Env, ev: Omit<RepEvent, "sig">): Promise<void> {
+  const sig = env.ORACLE_SEED_HEX
+    ? await ed25519Sign(eventPayload(ev), env.ORACLE_SEED_HEX).catch(() => undefined)
+    : undefined;
+  const key = `${EVENT_PREFIX}${ev.actor}:${ev.at}:${crypto.randomUUID().slice(0, 8)}`;
+  await env.QUALITY.put(key, JSON.stringify({ ...ev, ...(sig ? { sig } : {}) }));
+}
+
+async function bumpCounter(env: Env, actor: string, field: keyof RepCounters): Promise<void> {
+  const key = ctrKey(actor);
+  const raw = await env.QUALITY.get(key).then((o) => (o ? o.text() : null)).catch(() => null);
+  const c = (raw ? JSON.parse(raw) : { merges: 0, wins: 0, rejects: 0 }) as RepCounters;
+  c[field] = (c[field] ?? 0) + 1;
+  await env.QUALITY.put(key, JSON.stringify(c));
+}
+
+/** Both in one write: the event is the record, the counter is the index. */
+async function record(env: Env, ev: Omit<RepEvent, "sig">, field?: keyof RepCounters): Promise<void> {
+  await appendEvent(env, ev);
+  if (field) await bumpCounter(env, ev.actor.replace(/^github:/, ""), field);
+}
+
+// ---------- aggregate views ----------
+
+/** Aggregate contributor counters — materialized view over rep:ctr:*.
+ * Called on claim-list paths; the per-actor keys keep reads proportional
+ * to actor count, not total history. */
 export async function repIndex(env: Env): Promise<RepIndex> {
-  const obj = await env.QUALITY.get(REP_KEY).catch(() => null);
-  const raw = obj ? await obj.json() : {};
-  const contrib = (raw as { contrib?: RepIndex["contrib"] }).contrib ?? {};
-  for (const k of Object.keys(contrib)) contrib[k].rejects ??= 0;
+  const contrib: RepIndex["contrib"] = {};
+  let cursor: string | undefined;
+  do {
+    const page = await env.QUALITY.list({ prefix: CTR_PREFIX, cursor, limit: 500 });
+    for (const o of page.objects) {
+      const actor = o.key.slice(CTR_PREFIX.length);
+      const c = (await env.QUALITY.get(o.key).then((b) => (b ? b.text() : null)).then((t) => (t ? JSON.parse(t) : null)).catch(() => null)) as RepCounters | null;
+      if (c) contrib[actor] = { merges: c.merges ?? 0, wins: c.wins ?? 0, rejects: c.rejects ?? 0 };
+    }
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
   return { contrib };
 }
 
 /** Verdict rep — accept→wins, reject→rejects. Reject-heavy identities flag
  * spam-likely: the skin-in-the-game maintainers report missing. */
-export async function writeVerdictRep(env: Env, forgeUserId: string, kind: "win" | "reject"): Promise<void> {
-  const idx = await repIndex(env);
-  const c = idx.contrib[forgeUserId] ?? { merges: 0, wins: 0, rejects: 0 };
-  c[kind === "win" ? "wins" : "rejects"]++;
-  idx.contrib[forgeUserId] = c;
-  await env.QUALITY.put(REP_KEY, JSON.stringify(idx));
+export async function writeVerdictRep(env: Env, forgeUserId: string, kind: "win" | "reject",
+  opts: { repo?: string; ref?: string } = {}): Promise<void> {
+  await record(env, {
+    lexicon: "fyi.widespread.rep.event", actor: `github:${forgeUserId}`,
+    kind, repo: opts.repo ?? "", ref: opts.ref ?? "", at: Date.now(),
+  }, kind === "win" ? "wins" : "rejects");
 }
 
 /** spam-likely: reject-heavy with no wins — visible to payers pre-review. */
@@ -53,31 +116,36 @@ export function claimRank(c: { merges: number; wins: number; rejects: number }, 
   return c.wins * (1 + quality) - c.rejects;
 }
 
-/** Export rep as signed events — portable, verifiable without us. */
+/** Export the actor's real signed events — portable, verifiable offline
+ * against ORACLE_PUBKEY_HEX. Previously this synthesized fake events from
+ * counters; now the event log IS the record. */
 export async function exportRep(env: Env, forgeUserId: string): Promise<RepEvent[]> {
-  const idx = await repIndex(env);
-  const c = idx.contrib[forgeUserId];
-  if (!c) return [];
+  const prefix = `${EVENT_PREFIX}github:${forgeUserId}:`;
   const events: RepEvent[] = [];
-  const mk = (kind: RepEvent["kind"], n: number) => {
-    for (let i = 0; i < n; i++) events.push({ lexicon: "fyi.widespread.rep.event", actor: `github:${forgeUserId}`, kind, repo: "", ref: "", at: Date.now() });
-  };
-  mk("merge", c.merges); mk("win", c.wins); mk("reject", c.rejects);
-  return events;
+  let cursor: string | undefined;
+  do {
+    const page = await env.QUALITY.list({ prefix, cursor, limit: 500 });
+    for (const o of page.objects) {
+      const e = (await env.QUALITY.get(o.key).then((b) => (b ? b.text() : null)).then((t) => (t ? JSON.parse(t) : null)).catch(() => null)) as RepEvent | null;
+      if (e) events.push(e);
+    }
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+  return events.sort((a, b) => a.at - b.at);
 }
 
-/** Merge credit — caller gates on repo quality before calling. */
-export async function creditMerges(env: Env, entries: { forgeUserId: string; reputable: boolean }[]): Promise<number> {
-  const idx = await repIndex(env);
+/** Merge credit — caller gates on repo quality before calling. Each entry
+ * appends a signed merge event and bumps the per-actor counter. */
+export async function creditMerges(env: Env, entries: { forgeUserId: string; reputable: boolean; repo?: string; ref?: string }[]): Promise<number> {
   let n = 0;
   for (const e of entries) {
     if (!e.forgeUserId || !e.reputable) continue;
-    const c = idx.contrib[e.forgeUserId] ?? { merges: 0, wins: 0 };
-    c.merges++;
-    idx.contrib[e.forgeUserId] = c;
+    await record(env, {
+      lexicon: "fyi.widespread.rep.event", actor: `github:${e.forgeUserId}`,
+      kind: "merge", repo: e.repo ?? "", ref: e.ref ?? "", at: Date.now(),
+    }, "merges");
     n++;
   }
-  if (n) await env.QUALITY.put(REP_KEY, JSON.stringify(idx));
   return n;
 }
 
