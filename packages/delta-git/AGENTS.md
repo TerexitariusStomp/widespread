@@ -147,31 +147,32 @@ Dirty worktrees are normal here. Do not overwrite or revert unrelated user chang
 ### Install and run
 
 ```bash
-npm install
-npm run dev
+# from the monorepo root — this package is @widespread/delta-git
+pnpm install
+pnpm --filter @widespread/delta-git dev
 ```
 
 ### Build and static validation
 
 ```bash
-npm run build
-npm run typecheck
-npm run format:check
+pnpm run build
+pnpm run typecheck
+pnpm run format:check
 ```
 
 ### Formatting
 
 ```bash
-npm run format
+pnpm run format
 ```
 
 ### Tests
 
-`npm run test` runs Node Vitest tests for non-worker units in `test/**/*.test.ts` excluding `*.worker.test.ts`.
+`pnpm run test` runs Node Vitest tests for non-worker units in `test/**/*.test.ts` excluding `*.worker.test.ts`.
 
-`npm run test:workers` runs Vitest against Cloudflare worker integration tests.
+`pnpm run test:workers` runs Vitest against Cloudflare worker integration tests.
 
-`npm run test:auth` runs only `test/auth.worker.test.ts`.
+`pnpm run test:auth` runs only `test/auth.worker.test.ts`.
 
 The 42 MiB pack-indexer fixture test is opt-in. Use `PACK_INDEXER_FIXTURE=1 npx vitest run --config vitest.config.ts test/pack-indexer-fixture.worker.test.ts` when you intentionally want to run it.
 
@@ -186,26 +187,26 @@ npx vitest run --config vitest.config.ts test/auth.worker.test.ts
 ### Cloudflare and schema maintenance
 
 ```bash
-npm run cf-typegen
-npm run db:generate
+pnpm run cf-typegen
+pnpm run db:generate
 ```
 
-Do not edit generated migrations under `drizzle/repo-do/` manually. Treat `src/worker/do/repo/db/schema.ts` as the source of truth: make the schema change there first, then run `npm run db:generate` to generate the migration.
+Do not edit generated migrations under `drizzle/repo-do/` manually. Treat `src/worker/do/repo/db/schema.ts` as the source of truth: make the schema change there first, then run `pnpm run db:generate` to generate the migration.
 
 ## Validation By Change Type
 
 - Git protocol, DO, pack, compaction, caching, or routing changes:
-  run `npm run typecheck` and the relevant worker tests in `test/*.worker.test.ts`
+  run `pnpm run typecheck` and the relevant worker tests in `test/*.worker.test.ts`
 - Auth changes:
-  run `npm run test:auth`
+  run `pnpm run test:auth`
 - Pure parsing or helper changes:
-  run the targeted Node Vitest test plus `npm run typecheck`
+  run the targeted Node Vitest test plus `pnpm run typecheck`
 - UI-only SSR/component changes:
-  run `npm run typecheck`; if route behavior changed, add relevant worker coverage
+  run `pnpm run typecheck`; if route behavior changed, add relevant worker coverage
 - SPA changes (`frontend/canary/`):
-  run `npm run build:spa` and the worker tests that cover `/api/v1` or SPA routing
+  run `pnpm run build:spa` and the worker tests that cover `/api/v1` or SPA routing
 - SQLite schema or DAL changes:
-  run `npm run db:generate`, `npm run typecheck`, and the worker tests that cover the affected flow
+  run `pnpm run db:generate`, `pnpm run typecheck`, and the worker tests that cover the affected flow
 
 ## UI Notes
 

@@ -1,0 +1,168 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Full lanes (including the heavy delta-git worker suite) can be run
+  # manually via the Actions tab → "Run workflow".
+  workflow_dispatch:
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      bot: ${{ steps.filter.outputs.bot }}
+      bridge: ${{ steps.filter.outputs.bridge }}
+      delta-git: ${{ steps.filter.outputs.delta-git }}
+      hermes: ${{ steps.filter.outputs.hermes }}
+      near: ${{ steps.filter.outputs.near }}
+      runner: ${{ steps.filter.outputs.runner }}
+      solana: ${{ steps.filter.outputs.solana }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            bot:
+              - 'packages/bot/**'
+              - 'packages/protocol/**'
+            bridge:
+              - 'packages/bridge/**'
+              - 'packages/protocol/**'
+            delta-git:
+              - 'packages/delta-git/**'
+              - 'packages/protocol/**'
+            hermes:
+              - 'packages/hermes/**'
+              - 'packages/protocol/**'
+            near:
+              - 'packages/near/**'
+              - 'packages/protocol/**'
+            runner:
+              - 'packages/runner/**'
+              - 'packages/protocol/**'
+            solana:
+              - 'packages/solana/**'
+              - 'packages/protocol/**'
+
+  bot:
+    needs: changes
+    if: needs.changes.outputs.bot == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @widespread/bot test
+
+  bridge:
+    needs: changes
+    if: needs.changes.outputs.bridge == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @widespread/bridge typecheck
+      - run: pnpm --filter @widespread/bridge test
+
+  delta-git:
+    needs: changes
+    if: needs.changes.outputs.delta-git == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @widespread/delta-git typecheck
+      - run: pnpm --filter @widespread/delta-git test
+
+  # The worker integration suite needs the vendored SPA built first
+  # (build:spa installs frontend/canary — an upstream pnpm workspace kept
+  # outside the root workspace — then builds the Harness design-system
+  # packages and the gitness app). It is heavy, so it only runs on manual
+  # workflow_dispatch; push/PR lanes stay on the fast unit suite above.
+  delta-git-workers:
+    needs: changes
+    if: needs.changes.outputs.delta-git == 'true' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @widespread/delta-git build:spa
+      - run: pnpm --filter @widespread/delta-git test:workers
+
+  hermes:
+    needs: changes
+    if: needs.changes.outputs.hermes == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @widespread/hermes-browser test
+
+  near:
+    needs: changes
+    if: needs.changes.outputs.near == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @widespread/near test
+
+  runner:
+    needs: changes
+    if: needs.changes.outputs.runner == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @widespread/runner test
+
+  solana:
+    needs: changes
+    if: needs.changes.outputs.solana == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @widespread/solana test
