@@ -1,0 +1,1469 @@
+import type { ActorRef } from "./leaderboard-types";
+import type { SlopDatabaseWalletProof, WalletProof } from "./wallet-proof";
+
+export type { ProfileReadmeWalletProof, WalletProof } from "./wallet-proof";
+
+import {
+  boundedText,
+  CANONICAL_UINT,
+  EXACT_UTC,
+  exactKeys,
+  isCanonicalUint,
+  isExactUtc,
+  readRecord as record,
+  nonNegativeInteger as safeInteger,
+} from "./record-validation.mjs";
+/**
+ * Validates public reward-allocation and external-share manifests.
+ * All monetary values remain canonical integer minor units and every approved
+ * amount is tied to one immutable payout intent.
+ */
+
+import {
+  type AllocationFundingBasis,
+  allocationFundingMinor,
+  assertAllocationFundingBasis,
+  LAST_LEGACY_CAP_CYCLE,
+} from "./allocation-funding";
+import { chainFamily } from "./escrow-policy.mjs";
+import { fundingAssetForNetwork } from "./funding-address.mjs";
+import { findHistoricalProject } from "./projects.mjs";
+import {
+  isWalletAddress,
+  isWalletChain,
+  WALLET_CHAINS,
+  WALLET_CLAIM_REPOSITORY,
+  type WalletChain,
+} from "./wallets";
+
+export const REWARD_PROTOCOL_VERSION = "1" as const;
+export const REVIEW_WINDOW_DAYS = 14;
+const SHARE_PARTS_TOTAL = 1_000_000;
+export const MINIMUM_TRANSFER_MINOR = "2000000" as const;
+
+/** Parse the exact UTC form used at reward lifecycle boundaries. */
+export function exactUtcMilliseconds(value: string, field: string): number {
+  if (!isExactUtc(value)) {
+    throw new TypeError(`${field} must be an exact UTC timestamp`);
+  }
+  return Date.parse(value);
+}
+
+/**
+ * The one network a cycle settles on. A proposal freezes the project's
+ * `reward.chain`; every wallet, plan, and settlement record of that cycle uses
+ * the same network, even if the project later changes its network.
+ */
+export type SettlementNetwork = WalletChain;
+
+export const ALLOCATION_STATES = [
+  "approved",
+  "excluded",
+  "held",
+  "held-below-minimum",
+  "proposed",
+  "unclaimed",
+] as const;
+export type AllocationState = (typeof ALLOCATION_STATES)[number];
+const isAllocationState = (value: unknown): value is AllocationState =>
+  ALLOCATION_STATES.includes(value as AllocationState);
+
+/**
+ * Why a row is held. `unsafe-destination` is a reviewed wallet-safety hold.
+ * `review-lapsed` records that the public review window closed with no creator
+ * decision on the row, so the row was never decided rather than declined.
+ */
+
+export type AllocationHold =
+  | { kind: "review-lapsed"; lapsedAt: string }
+  | { kind: "unsafe-destination"; sourceCommit: string };
+
+/** Public evidence from a contributor-signed GitHub commit, never hold authority. */
+export interface UnsafeDestinationReport {
+  kind: "unsafe-destination";
+  projectId: string;
+  cycleId: string;
+  intentId: string;
+  suggestedMinor: string;
+  carryMinor: string;
+  reportedAt: string;
+  verifiedAt: string;
+  wallet: SlopDatabaseWalletProof;
+  sourceRepository: string;
+  sourceCommit: string;
+}
+
+export interface RewardAllocation {
+  intentId: string;
+  actor: ActorRef;
+  score: number;
+  suggestedMinor: string;
+  accruedMinor?: string;
+  approvedMinor: string;
+  state: AllocationState;
+  wallet: WalletProof | null;
+  unsafeDestinationReports?: UnsafeDestinationReport[];
+  hold?: AllocationHold;
+  evidenceEventIds: string[];
+  adjustmentReason: string | null;
+  relatedParty: boolean;
+  platformApproval: {
+    reviewer: string;
+    approvedAt: string;
+  } | null;
+  lines?: {
+    sharedPool: { suggestedMinor: string; approvedMinor: string };
+    reviewBudget: {
+      suggestedMinor: string;
+      approvedMinor: string;
+      evidenceEventIds: string[];
+    };
+  };
+}
+
+export interface RewardAllocationManifest {
+  fundingBasis?: AllocationFundingBasis;
+  schemaVersion: typeof REWARD_PROTOCOL_VERSION;
+  kind: "reward-allocation";
+  projectId: string;
+  cycleId: string;
+  status: "approved" | "proposed";
+  generatedAt: string;
+  approvedAt: string | null;
+  contributionWindow: { from: string; to: string };
+  review: {
+    days: typeof REVIEW_WINDOW_DAYS;
+    lastMaterialChangeAt: string;
+    endsAt: string;
+    lapsedAt?: string;
+  };
+  currency: "USDC";
+  chain: SettlementNetwork;
+  capMinor: string;
+  carriedMinor?: string;
+  minimumTransferMinor?: typeof MINIMUM_TRANSFER_MINOR;
+  feeBasisPoints: 100 | 200 | 1000;
+  scoringRuleVersion: string;
+  sourceSnapshotSha256: string;
+  allocations: RewardAllocation[];
+  rewardLines?: {
+    sharedPool: {
+      capMinor: string;
+      suggestedMinor: string;
+      approvedMinor: string;
+    };
+    reviewBudget: {
+      capMinor: string;
+      committedMinor: string;
+      suggestedMinor: string;
+      approvedMinor: string;
+    };
+  };
+  totals: {
+    suggestedMinor: string;
+    approvedMinor: string;
+    feeMinor: string;
+  };
+}
+
+export interface ExternalContributionShareManifest {
+  schemaVersion: typeof REWARD_PROTOCOL_VERSION;
+  kind: "external-contribution-share";
+  projectId: string;
+  cycleId: string;
+  status: "provisional";
+  generatedAt: string;
+  contributionWindow: { from: string; to: string };
+  scoringRuleVersion: string;
+  sourceSnapshotSha256: string;
+  platformSharePartsPerMillion: number;
+  entries: Array<{
+    actor: ActorRef;
+    score: number;
+    sharePartsPerMillion: number;
+    evidenceEventIds: string[];
+  }>;
+}
+
+const text = (
+  value: unknown,
+  path: string,
+  options: { max?: number; min?: number; pattern?: RegExp } = {},
+): string => boundedText(value, path, { max: 512, ...options });
+
+function iso(value: unknown, path: string): string {
+  const result = text(value, path, { pattern: EXACT_UTC });
+  if (!isExactUtc(result)) {
+    throw new TypeError(`${path} is not a timestamp`);
+  }
+  return result;
+}
+
+function minor(value: unknown, path: string): string {
+  const result = text(value, path, { pattern: CANONICAL_UINT });
+  BigInt(result);
+  return result;
+}
+
+function sha256(value: unknown, path: string): string {
+  return text(value, path, { pattern: /^[0-9a-f]{64}$/u });
+}
+
+function array(value: unknown, path: string): unknown[] {
+  if (!Array.isArray(value)) throw new TypeError(`${path} must be an array`);
+  return value;
+}
+
+function unique(values: readonly string[], path: string): void {
+  if (new Set(values).size !== values.length) {
+    throw new TypeError(`${path} contains duplicates`);
+  }
+}
+
+function sumMinor(values: readonly string[]): string {
+  return values.reduce((total, value) => total + BigInt(value), 0n).toString();
+}
+
+export function feeForPrincipal(
+  principalMinor: string,
+  basisPoints: number,
+): string {
+  if (!isCanonicalUint(principalMinor)) {
+    throw new TypeError("principal must be canonical integer minor units");
+  }
+  if (
+    !Number.isSafeInteger(basisPoints) ||
+    basisPoints < 0 ||
+    basisPoints > 10_000
+  ) {
+    throw new TypeError(
+      "basis points must be an integer from 0 through 10,000",
+    );
+  }
+  return ((BigInt(principalMinor) * BigInt(basisPoints)) / 10_000n).toString();
+}
+
+function assertActor(value: unknown, path: string): ActorRef {
+  const actor = record(value, path);
+  exactKeys(actor, ["id", "login"], path);
+  return {
+    id: text(actor.id, `${path}.id`, { max: 128 }),
+    login: text(actor.login, `${path}.login`, {
+      max: 39,
+      pattern: /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/u,
+    }),
+  };
+}
+
+function assertEvidenceIds(value: unknown, path: string): string[] {
+  const result = array(value, path).map((entry, index) =>
+    text(entry, `${path}[${index}]`, { max: 256 }),
+  );
+  unique(result, path);
+  return result;
+}
+
+/**
+ * Validates one wallet observation. `expectedChain` is the cycle network; a
+ * report wallet passes `null` because it keeps the network it was signed with.
+ */
+function assertWallet(
+  value: unknown,
+  path: string,
+  actor: ActorRef,
+  expectedChain: SettlementNetwork | null,
+): WalletProof | null {
+  if (value === null) return null;
+  const wallet = record(value, path);
+  if (
+    !isWalletChain(wallet.chain) ||
+    (expectedChain !== null && wallet.chain !== expectedChain)
+  ) {
+    throw new TypeError(
+      `${path}.chain must be ${expectedChain ?? WALLET_CHAINS.join(", ")}`,
+    );
+  }
+  const chain = wallet.chain;
+  if (!isWalletAddress(chain, wallet.address)) {
+    throw new TypeError(
+      chainFamily(chain) === "evm"
+        ? `${path}.address is not a canonical EVM address`
+        : `${path}.address is not a Solana public key`,
+    );
+  }
+  const sourceUrl = text(wallet.sourceUrl, `${path}.sourceUrl`, { max: 512 });
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(sourceUrl);
+  } catch (error) {
+    throw new TypeError(`${path}.sourceUrl is not a URL`, { cause: error });
+  }
+  const commonUrlInvalid =
+    parsedUrl.protocol !== "https:" ||
+    parsedUrl.hostname !== "github.com" ||
+    parsedUrl.search ||
+    parsedUrl.hash ||
+    parsedUrl.username ||
+    parsedUrl.password ||
+    parsedUrl.port;
+  if ("sourceCommit" in wallet) {
+    exactKeys(
+      wallet,
+      ["address", "chain", "observedAt", "sourceCommit", "sourceUrl"],
+      path,
+    );
+    const sourceCommit = text(wallet.sourceCommit, `${path}.sourceCommit`, {
+      pattern: /^[0-9a-f]{40}$/u,
+    });
+    const expectedPath = `/${actor.login}/${actor.login}/blob/${sourceCommit}/README.md`;
+    if (
+      commonUrlInvalid ||
+      parsedUrl.pathname.toLowerCase() !== expectedPath.toLowerCase()
+    ) {
+      throw new TypeError(
+        `${path}.sourceUrl must be the actor's immutable GitHub profile README`,
+      );
+    }
+    return {
+      address: wallet.address as string,
+      chain,
+      observedAt: iso(wallet.observedAt, `${path}.observedAt`),
+      sourceCommit,
+      sourceUrl,
+    };
+  }
+  if ("sourceClaimId" in wallet) {
+    exactKeys(
+      wallet,
+      [
+        "address",
+        "chain",
+        "observedAt",
+        "sourceActorId",
+        "sourceClaimId",
+        "sourceRecordSha256",
+        "sourceUrl",
+      ],
+      path,
+    );
+    const sourceActorId = text(wallet.sourceActorId, `${path}.sourceActorId`, {
+      max: 128,
+    });
+    if (sourceActorId !== actor.id) {
+      throw new TypeError(
+        `${path}.sourceActorId does not match the contributor`,
+      );
+    }
+    const sourceClaimId = text(wallet.sourceClaimId, `${path}.sourceClaimId`, {
+      max: 128,
+      pattern: /^[A-Za-z0-9_-]+$/u,
+    });
+    const sourceRecordSha256 = text(
+      wallet.sourceRecordSha256,
+      `${path}.sourceRecordSha256`,
+      { pattern: /^[0-9a-f]{64}$/u },
+    );
+    if (
+      parsedUrl.protocol !== "https:" ||
+      parsedUrl.hostname !== "api.slop.cash" ||
+      parsedUrl.pathname !== `/api/v1/wallet-claims/${sourceClaimId}` ||
+      parsedUrl.search ||
+      parsedUrl.hash ||
+      parsedUrl.username ||
+      parsedUrl.password ||
+      parsedUrl.port
+    ) {
+      throw new TypeError(
+        `${path}.sourceUrl is not a canonical Slop wallet claim`,
+      );
+    }
+    return {
+      address: wallet.address as string,
+      chain,
+      observedAt: iso(wallet.observedAt, `${path}.observedAt`),
+      sourceActorId,
+      sourceClaimId,
+      sourceRecordSha256,
+      sourceUrl,
+    };
+  }
+  exactKeys(
+    wallet,
+    [
+      "address",
+      "chain",
+      "observedAt",
+      "sourceActorId",
+      "sourceBodySha256",
+      "sourceIssueId",
+      "sourceIssueNumber",
+      "sourceUpdatedAt",
+      "sourceUrl",
+    ],
+    path,
+  );
+  const sourceActorId = text(wallet.sourceActorId, `${path}.sourceActorId`, {
+    max: 128,
+  });
+  if (sourceActorId !== actor.id) {
+    throw new TypeError(`${path}.sourceActorId does not match the contributor`);
+  }
+  const sourceBodySha256 = text(
+    wallet.sourceBodySha256,
+    `${path}.sourceBodySha256`,
+    { pattern: /^[0-9a-f]{64}$/u },
+  );
+  const sourceIssueId = text(wallet.sourceIssueId, `${path}.sourceIssueId`, {
+    max: 128,
+    pattern: /^[A-Za-z0-9_=-]+$/u,
+  });
+  if (
+    !Number.isSafeInteger(wallet.sourceIssueNumber) ||
+    (wallet.sourceIssueNumber as number) < 1
+  ) {
+    throw new TypeError(`${path}.sourceIssueNumber is invalid`);
+  }
+  const sourceIssueNumber = wallet.sourceIssueNumber as number;
+  const expectedIssuePath = `/${WALLET_CLAIM_REPOSITORY}/issues/${sourceIssueNumber}`;
+  if (
+    commonUrlInvalid ||
+    parsedUrl.pathname.toLowerCase() !== expectedIssuePath.toLowerCase()
+  ) {
+    throw new TypeError(
+      `${path}.sourceUrl is not the canonical wallet claim issue`,
+    );
+  }
+  return {
+    address: wallet.address as string,
+    chain,
+    observedAt: iso(wallet.observedAt, `${path}.observedAt`),
+    sourceActorId,
+    sourceBodySha256,
+    sourceIssueId,
+    sourceIssueNumber,
+    sourceUpdatedAt: iso(wallet.sourceUpdatedAt, `${path}.sourceUpdatedAt`),
+    sourceUrl,
+  };
+}
+
+export function sameWalletObservation(
+  left: WalletProof,
+  right: SlopDatabaseWalletProof,
+): boolean {
+  return (
+    "sourceClaimId" in left &&
+    left.sourceClaimId === right.sourceClaimId &&
+    left.sourceActorId === right.sourceActorId &&
+    left.sourceRecordSha256 === right.sourceRecordSha256 &&
+    left.address === right.address &&
+    left.observedAt === right.observedAt &&
+    left.sourceUrl === right.sourceUrl
+  );
+}
+
+export function isSafeSuccessorWallet(
+  wallet: WalletProof,
+  report: UnsafeDestinationReport,
+): boolean {
+  return (
+    "sourceClaimId" in wallet &&
+    wallet.sourceActorId === report.wallet.sourceActorId &&
+    wallet.sourceClaimId !== report.wallet.sourceClaimId &&
+    wallet.address !== report.wallet.address &&
+    Date.parse(wallet.observedAt) > Date.parse(report.verifiedAt)
+  );
+}
+
+export function assertUnsafeDestinationReport(
+  value: unknown,
+  actor: ActorRef,
+  path = "unsafe destination report",
+): UnsafeDestinationReport {
+  const report = record(value, path);
+  exactKeys(
+    report,
+    [
+      "kind",
+      "projectId",
+      "cycleId",
+      "intentId",
+      "suggestedMinor",
+      "carryMinor",
+      "reportedAt",
+      "verifiedAt",
+      "wallet",
+      "sourceRepository",
+      "sourceCommit",
+    ],
+    path,
+  );
+  if (report.kind !== "unsafe-destination")
+    throw new TypeError(`${path}.kind is invalid`);
+  const wallet = assertWallet(report.wallet, `${path}.wallet`, actor, null);
+  if (!wallet || !("sourceClaimId" in wallet))
+    throw new TypeError(`${path} requires an actor-bound Slop wallet claim`);
+  const reportedAt = iso(report.reportedAt, `${path}.reportedAt`);
+  const verifiedAt = iso(report.verifiedAt, `${path}.verifiedAt`);
+  if (
+    Date.parse(reportedAt) < Date.parse(wallet.observedAt) ||
+    Date.parse(verifiedAt) < Date.parse(reportedAt)
+  ) {
+    throw new TypeError(`${path} has impossible report timestamps`);
+  }
+  const suggestedMinor = minor(report.suggestedMinor, `${path}.suggestedMinor`);
+  const carryMinor = minor(report.carryMinor, `${path}.carryMinor`);
+  if (BigInt(carryMinor) > BigInt(suggestedMinor)) {
+    throw new TypeError(`${path} carry exceeds the signed suggested amount`);
+  }
+  return {
+    kind: "unsafe-destination",
+    projectId: text(report.projectId, `${path}.projectId`, {
+      max: 128,
+      pattern: /^[a-z0-9][a-z0-9-]*$/u,
+    }),
+    cycleId: text(report.cycleId, `${path}.cycleId`, {
+      pattern: /^\d{4}-(?:0[1-9]|1[0-2])$/u,
+    }),
+    intentId: text(report.intentId, `${path}.intentId`, {
+      max: 160,
+      pattern: /^pay_[a-z0-9][a-z0-9_-]+$/u,
+    }),
+    suggestedMinor,
+    carryMinor,
+    reportedAt,
+    verifiedAt,
+    wallet,
+    sourceRepository: text(
+      report.sourceRepository,
+      `${path}.sourceRepository`,
+      { max: 200, pattern: /^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9_.-]+$/u },
+    ),
+    sourceCommit: text(report.sourceCommit, `${path}.sourceCommit`, {
+      pattern: /^[0-9a-f]{40}$/u,
+    }),
+  };
+}
+
+/** Exact signed commit message. It discloses only the report's public wallet evidence. */
+export function unsafeDestinationReportMessage(
+  report: Pick<
+    UnsafeDestinationReport,
+    | "projectId"
+    | "cycleId"
+    | "intentId"
+    | "suggestedMinor"
+    | "carryMinor"
+    | "reportedAt"
+    | "wallet"
+  >,
+): string {
+  return `slop-unsafe-destination:v1\n${JSON.stringify({
+    projectId: report.projectId,
+    cycleId: report.cycleId,
+    intentId: report.intentId,
+    suggestedMinor: report.suggestedMinor,
+    carryMinor: report.carryMinor,
+    reportedAt: report.reportedAt,
+    wallet: report.wallet,
+  })}`;
+}
+
+function assertAllocation(
+  value: unknown,
+  index: number,
+  chain: SettlementNetwork,
+): RewardAllocation {
+  const path = `allocations[${index}]`;
+  const allocation = record(value, path);
+  const hasAccrual = "accruedMinor" in allocation;
+  const hasLines = "lines" in allocation;
+  exactKeys(
+    allocation,
+    [
+      "actor",
+      "adjustmentReason",
+      "approvedMinor",
+      "evidenceEventIds",
+      "intentId",
+      "platformApproval",
+      "relatedParty",
+      "score",
+      "state",
+      "suggestedMinor",
+      "wallet",
+      ...(hasAccrual ? ["accruedMinor"] : []),
+      ...(hasLines ? ["lines"] : []),
+      ...("unsafeDestinationReports" in allocation
+        ? ["unsafeDestinationReports"]
+        : []),
+      ...("hold" in allocation ? ["hold"] : []),
+    ],
+    path,
+  );
+  const state = allocation.state;
+  if (!isAllocationState(state)) {
+    throw new TypeError(`${path}.state is invalid`);
+  }
+  const suggestedMinor = minor(
+    allocation.suggestedMinor,
+    `${path}.suggestedMinor`,
+  );
+  const accruedMinor = hasAccrual
+    ? minor(allocation.accruedMinor, `${path}.accruedMinor`)
+    : undefined;
+  if (
+    state === "held-below-minimum" &&
+    (accruedMinor === undefined ||
+      BigInt(accruedMinor) >= BigInt(MINIMUM_TRANSFER_MINOR))
+  ) {
+    throw new TypeError(`${path} below-minimum hold must remain below $2`);
+  }
+  const approvedMinor = minor(
+    allocation.approvedMinor,
+    `${path}.approvedMinor`,
+  );
+  let lines: RewardAllocation["lines"];
+  if (hasLines) {
+    const rawLines = record(allocation.lines, `${path}.lines`);
+    exactKeys(rawLines, ["reviewBudget", "sharedPool"], `${path}.lines`);
+    const sharedPool = record(rawLines.sharedPool, `${path}.lines.sharedPool`);
+    exactKeys(
+      sharedPool,
+      ["approvedMinor", "suggestedMinor"],
+      `${path}.lines.sharedPool`,
+    );
+    const reviewBudget = record(
+      rawLines.reviewBudget,
+      `${path}.lines.reviewBudget`,
+    );
+    exactKeys(
+      reviewBudget,
+      ["approvedMinor", "evidenceEventIds", "suggestedMinor"],
+      `${path}.lines.reviewBudget`,
+    );
+    lines = {
+      sharedPool: {
+        suggestedMinor: minor(
+          sharedPool.suggestedMinor,
+          `${path}.lines.sharedPool.suggestedMinor`,
+        ),
+        approvedMinor: minor(
+          sharedPool.approvedMinor,
+          `${path}.lines.sharedPool.approvedMinor`,
+        ),
+      },
+      reviewBudget: {
+        suggestedMinor: minor(
+          reviewBudget.suggestedMinor,
+          `${path}.lines.reviewBudget.suggestedMinor`,
+        ),
+        approvedMinor: minor(
+          reviewBudget.approvedMinor,
+          `${path}.lines.reviewBudget.approvedMinor`,
+        ),
+        evidenceEventIds: assertEvidenceIds(
+          reviewBudget.evidenceEventIds,
+          `${path}.lines.reviewBudget.evidenceEventIds`,
+        ),
+      },
+    };
+    if (
+      BigInt(lines.sharedPool.suggestedMinor) +
+        BigInt(lines.reviewBudget.suggestedMinor) !==
+        BigInt(suggestedMinor) ||
+      BigInt(lines.sharedPool.approvedMinor) +
+        BigInt(lines.reviewBudget.approvedMinor) !==
+        BigInt(approvedMinor)
+    ) {
+      throw new TypeError(`${path} reward lines do not reconcile`);
+    }
+    if (
+      (BigInt(lines.reviewBudget.suggestedMinor) > 0n &&
+        lines.reviewBudget.evidenceEventIds.length === 0) ||
+      lines.reviewBudget.evidenceEventIds.some(
+        (eventId) =>
+          !(allocation.evidenceEventIds as unknown[]).includes(eventId),
+      )
+    ) {
+      throw new TypeError(`${path} review line lacks accepted review evidence`);
+    }
+  }
+  const adjustmentReason =
+    allocation.adjustmentReason === null
+      ? null
+      : text(allocation.adjustmentReason, `${path}.adjustmentReason`, {
+          max: 1000,
+          min: 12,
+        });
+  if (
+    state !== "proposed" &&
+    state !== "unclaimed" &&
+    state !== "held-below-minimum" &&
+    approvedMinor !== suggestedMinor &&
+    !adjustmentReason
+  ) {
+    throw new TypeError(`${path} adjustment requires an adjustment reason`);
+  }
+  if (typeof allocation.relatedParty !== "boolean") {
+    throw new TypeError(`${path}.relatedParty must be boolean`);
+  }
+  let platformApproval: RewardAllocation["platformApproval"] = null;
+  if (allocation.platformApproval !== null) {
+    const approval = record(
+      allocation.platformApproval,
+      `${path}.platformApproval`,
+    );
+    exactKeys(approval, ["approvedAt", "reviewer"], `${path}.platformApproval`);
+    platformApproval = {
+      reviewer: text(approval.reviewer, `${path}.platformApproval.reviewer`, {
+        max: 128,
+      }),
+      approvedAt: iso(
+        approval.approvedAt,
+        `${path}.platformApproval.approvedAt`,
+      ),
+    };
+  }
+  if (
+    allocation.relatedParty &&
+    BigInt(approvedMinor) > 0n &&
+    platformApproval === null
+  ) {
+    throw new TypeError(
+      `${path} related-party payment needs platform approval`,
+    );
+  }
+  const actor = assertActor(allocation.actor, `${path}.actor`);
+  const wallet = assertWallet(
+    allocation.wallet,
+    `${path}.wallet`,
+    actor,
+    chain,
+  );
+  const unsafeDestinationReports =
+    "unsafeDestinationReports" in allocation
+      ? array(
+          allocation.unsafeDestinationReports,
+          `${path}.unsafeDestinationReports`,
+        ).map((value, index) =>
+          assertUnsafeDestinationReport(
+            value,
+            actor,
+            `${path}.unsafeDestinationReports[${index}]`,
+          ),
+        )
+      : undefined;
+  if (
+    unsafeDestinationReports &&
+    (unsafeDestinationReports.length === 0 ||
+      unsafeDestinationReports.length > 32)
+  ) {
+    throw new TypeError(
+      `${path} unsafe destination history must contain 1 to 32 reports`,
+    );
+  }
+  unique(
+    unsafeDestinationReports?.map((report) => report.sourceCommit) ?? [],
+    `${path} unsafe destination report commits`,
+  );
+  if (
+    unsafeDestinationReports &&
+    accruedMinor !== undefined &&
+    accruedMinor !== suggestedMinor
+  ) {
+    throw new TypeError(
+      `${path} unsafe destination carry must equal its reviewed suggested amount`,
+    );
+  }
+  let hold: RewardAllocation["hold"];
+  if ("hold" in allocation) {
+    const rawHold = record(allocation.hold, `${path}.hold`);
+    if (rawHold.kind === "review-lapsed") {
+      exactKeys(rawHold, ["kind", "lapsedAt"], `${path}.hold`);
+      // A lapse records an absent decision, so the row keeps the wallet and the
+      // suggestion it was frozen with and stays eligible to carry forward.
+      if (state !== "held" || !wallet || !adjustmentReason) {
+        throw new TypeError(
+          `${path} review-lapsed hold requires its original wallet and a public reason`,
+        );
+      }
+      if (accruedMinor !== undefined && accruedMinor !== suggestedMinor) {
+        throw new TypeError(
+          `${path} review-lapsed carry must equal its frozen suggested amount`,
+        );
+      }
+      hold = {
+        kind: "review-lapsed",
+        lapsedAt: iso(rawHold.lapsedAt, `${path}.hold.lapsedAt`),
+      };
+    } else {
+      exactKeys(rawHold, ["kind", "sourceCommit"], `${path}.hold`);
+      const report = unsafeDestinationReports?.find(
+        (candidate) => candidate.sourceCommit === rawHold.sourceCommit,
+      );
+      if (
+        rawHold.kind !== "unsafe-destination" ||
+        state !== "held" ||
+        !report ||
+        !wallet ||
+        !sameWalletObservation(wallet, report.wallet) ||
+        report.suggestedMinor !== suggestedMinor ||
+        report.carryMinor !==
+          (lines?.sharedPool.suggestedMinor ??
+            accruedMinor ??
+            suggestedMinor) ||
+        !adjustmentReason
+      ) {
+        throw new TypeError(
+          `${path} unsafe-destination hold requires its original wallet, report, and maintainer reason`,
+        );
+      }
+      hold = { kind: "unsafe-destination", sourceCommit: report.sourceCommit };
+    }
+  }
+  if (
+    wallet &&
+    hold?.kind !== "unsafe-destination" &&
+    unsafeDestinationReports?.some(
+      (report) => !isSafeSuccessorWallet(wallet, report),
+    )
+  ) {
+    throw new TypeError(
+      `${path} wallet is not a safe successor to every reported destination`,
+    );
+  }
+  if (state === "proposed" && wallet === null) {
+    throw new TypeError(`${path} proposed payment needs a wallet observation`);
+  }
+  if (state === "unclaimed" && wallet !== null) {
+    throw new TypeError(`${path} unclaimed payment cannot retain a wallet`);
+  }
+  if (
+    state === "approved" &&
+    (BigInt(approvedMinor) === 0n || wallet === null)
+  ) {
+    throw new TypeError(`${path} approved payment needs money and a wallet`);
+  }
+  if (
+    hasAccrual &&
+    state === "approved" &&
+    BigInt(approvedMinor) < BigInt(MINIMUM_TRANSFER_MINOR)
+  ) {
+    throw new TypeError(`${path} approved payment is below the $2 minimum`);
+  }
+  if (
+    hasLines &&
+    state === "approved" &&
+    BigInt(approvedMinor) < BigInt(MINIMUM_TRANSFER_MINOR)
+  ) {
+    throw new TypeError(
+      `${path} combined approved payment is below the $2 minimum`,
+    );
+  }
+  if (state !== "approved" && BigInt(approvedMinor) !== 0n) {
+    throw new TypeError(
+      `${path} non-approved state must have zero approved amount`,
+    );
+  }
+  return {
+    intentId: text(allocation.intentId, `${path}.intentId`, {
+      max: 160,
+      pattern: /^pay_[a-z0-9][a-z0-9_-]+$/u,
+    }),
+    actor,
+    score: safeInteger(allocation.score, `${path}.score`),
+    suggestedMinor,
+    ...(accruedMinor === undefined ? {} : { accruedMinor }),
+    approvedMinor,
+    state,
+    wallet,
+    ...(unsafeDestinationReports ? { unsafeDestinationReports } : {}),
+    ...(hold ? { hold } : {}),
+    evidenceEventIds: assertEvidenceIds(
+      allocation.evidenceEventIds,
+      `${path}.evidenceEventIds`,
+    ),
+    adjustmentReason,
+    relatedParty: allocation.relatedParty,
+    platformApproval,
+    ...(lines ? { lines } : {}),
+  };
+}
+
+/** Validates a public Eliza cycle allocation and its financial invariants. */
+export function assertRewardAllocationManifest(
+  value: unknown,
+): RewardAllocationManifest {
+  const manifest = record(value, "allocation manifest");
+  const hasAccrual =
+    "carriedMinor" in manifest || "minimumTransferMinor" in manifest;
+  const hasRewardLines = "rewardLines" in manifest;
+  const hasFundingBasis = "fundingBasis" in manifest;
+  exactKeys(
+    manifest,
+    [
+      "allocations",
+      "approvedAt",
+      "capMinor",
+      "chain",
+      "contributionWindow",
+      "currency",
+      "cycleId",
+      "feeBasisPoints",
+      "generatedAt",
+      "kind",
+      "projectId",
+      "review",
+      "schemaVersion",
+      "scoringRuleVersion",
+      "sourceSnapshotSha256",
+      "status",
+      "totals",
+      ...(hasAccrual ? ["carriedMinor", "minimumTransferMinor"] : []),
+      ...(hasRewardLines ? ["rewardLines"] : []),
+      ...(hasFundingBasis ? ["fundingBasis"] : []),
+    ],
+    "allocation manifest",
+  );
+  if (
+    manifest.schemaVersion !== REWARD_PROTOCOL_VERSION ||
+    manifest.kind !== "reward-allocation" ||
+    typeof manifest.projectId !== "string" ||
+    (manifest.status !== "proposed" && manifest.status !== "approved") ||
+    !isWalletChain(manifest.chain) ||
+    // The monthly rail settles USDC on Base or Solana; Robinhood Chain pays
+    // only through escrow.
+    manifest.currency !== "USDC" ||
+    fundingAssetForNetwork(manifest.chain) !== "USDC"
+  ) {
+    throw new TypeError("allocation manifest protocol header is invalid");
+  }
+  const chain = manifest.chain;
+  const project = findHistoricalProject(manifest.projectId);
+  if (project?.reward.kind !== "monthly-pool") {
+    throw new TypeError("allocation manifest project has no monthly pool");
+  }
+  const cycleId = text(manifest.cycleId, "allocation manifest.cycleId", {
+    pattern: /^\d{4}-(?:0[1-9]|1[0-2])$/u,
+  });
+  const generatedAt = iso(
+    manifest.generatedAt,
+    "allocation manifest.generatedAt",
+  );
+  const approvedAt =
+    manifest.approvedAt === null
+      ? null
+      : iso(manifest.approvedAt, "allocation manifest.approvedAt");
+  if (manifest.status === "approved" && approvedAt === null) {
+    throw new TypeError("approved allocation manifest needs approvedAt");
+  }
+  if (manifest.status === "proposed" && approvedAt !== null) {
+    throw new TypeError("proposed allocation manifest cannot have approvedAt");
+  }
+  const contributionWindow = record(
+    manifest.contributionWindow,
+    "allocation manifest.contributionWindow",
+  );
+  exactKeys(
+    contributionWindow,
+    ["from", "to"],
+    "allocation manifest.contributionWindow",
+  );
+  const windowFrom = iso(
+    contributionWindow.from,
+    "allocation manifest.contributionWindow.from",
+  );
+  const windowTo = iso(
+    contributionWindow.to,
+    "allocation manifest.contributionWindow.to",
+  );
+  const [cycleYear, cycleMonth] = cycleId.split("-").map(Number);
+  const calendarFrom = Date.UTC(cycleYear, cycleMonth - 1, 1);
+  const expectedFrom = Math.max(
+    calendarFrom,
+    Date.parse(project.reward.rewardStartAt),
+  );
+  const expectedTo = Date.UTC(cycleYear, cycleMonth, 1);
+  if (
+    Date.parse(windowFrom) !== expectedFrom ||
+    Date.parse(windowTo) !== expectedTo ||
+    Date.parse(generatedAt) < expectedTo
+  ) {
+    throw new TypeError(
+      "allocation contribution window or generation time is outside the closed cycle",
+    );
+  }
+  const review = record(manifest.review, "allocation manifest.review");
+  const hasLapsedAt = "lapsedAt" in review;
+  exactKeys(
+    review,
+    hasLapsedAt
+      ? ["days", "endsAt", "lapsedAt", "lastMaterialChangeAt"]
+      : ["days", "endsAt", "lastMaterialChangeAt"],
+    "allocation manifest.review",
+  );
+  if (review.days !== REVIEW_WINDOW_DAYS) {
+    throw new TypeError("allocation review window must be 14 days");
+  }
+  const lastMaterialChangeAt = iso(
+    review.lastMaterialChangeAt,
+    "allocation manifest.review.lastMaterialChangeAt",
+  );
+  const endsAt = iso(review.endsAt, "allocation manifest.review.endsAt");
+  const lapsedAt = hasLapsedAt
+    ? iso(review.lapsedAt, "allocation manifest.review.lapsedAt")
+    : undefined;
+  if (lapsedAt && Date.parse(lapsedAt) < Date.parse(endsAt)) {
+    throw new TypeError("allocation lapsed before its review ended");
+  }
+  if (Date.parse(lastMaterialChangeAt) < Date.parse(generatedAt)) {
+    throw new TypeError("allocation material-change time predates generation");
+  }
+  if (
+    Date.parse(endsAt) !==
+    Date.parse(lastMaterialChangeAt) + REVIEW_WINDOW_DAYS * 86_400_000
+  ) {
+    throw new TypeError("allocation review end must be 14 days after change");
+  }
+  if (approvedAt && Date.parse(approvedAt) < Date.parse(endsAt)) {
+    throw new TypeError("allocation was approved before review ended");
+  }
+  if (manifest.feeBasisPoints !== project.reward.feeBasisPoints) {
+    throw new TypeError("allocation fee differs from project policy");
+  }
+  const capMinor = minor(manifest.capMinor, "allocation manifest.capMinor");
+  const fundingBasis = hasFundingBasis
+    ? assertAllocationFundingBasis(manifest.fundingBasis)
+    : undefined;
+  if (!fundingBasis && cycleId > LAST_LEGACY_CAP_CYCLE)
+    throw new TypeError("new allocation requires an exact-cycle funding basis");
+  if (fundingBasis && fundingBasis.cycleId !== cycleId)
+    throw new TypeError(
+      "allocation funding basis cycle differs from manifest cycle",
+    );
+  if (
+    capMinor !==
+    (fundingBasis
+      ? allocationFundingMinor(fundingBasis).toString()
+      : cycleId <= LAST_LEGACY_CAP_CYCLE
+        ? capMinor
+        : project.reward.monthlyCapMinor)
+  ) {
+    throw new TypeError("allocation cap differs from project policy");
+  }
+  const carriedMinor = hasAccrual
+    ? minor(manifest.carriedMinor, "allocation manifest.carriedMinor")
+    : "0";
+  if (hasAccrual && manifest.minimumTransferMinor !== MINIMUM_TRANSFER_MINOR) {
+    throw new TypeError("allocation minimum transfer must be 2 USDC");
+  }
+  const allocations = array(
+    manifest.allocations,
+    "allocation manifest.allocations",
+  ).map((entry, index) => assertAllocation(entry, index, chain));
+  unique(
+    allocations.map((allocation) => allocation.intentId),
+    "allocation intent ids",
+  );
+  unique(
+    allocations.map((allocation) => allocation.actor.id),
+    "allocation actor ids",
+  );
+  // A lapse resolves every undecided row at once, so a lapsed cycle can never
+  // keep a proposed row and a lapsed row must carry the cycle's own timestamp.
+  if (lapsedAt) {
+    if (allocations.some((allocation) => allocation.state === "proposed")) {
+      throw new TypeError("lapsed allocation retains a proposed payment");
+    }
+    if (
+      manifest.status !== "proposed" ||
+      allocations.some((allocation) => allocation.state === "approved") ||
+      !allocations.some(
+        (allocation) => allocation.hold?.kind === "review-lapsed",
+      )
+    ) {
+      throw new TypeError(
+        "lapsed allocation requires a proposed manifest with lapsed rows and no approved payments",
+      );
+    }
+  }
+  for (const allocation of allocations) {
+    if (allocation.hold?.kind !== "review-lapsed") continue;
+    if (allocation.hold.lapsedAt !== lapsedAt) {
+      throw new TypeError(
+        "review-lapsed hold does not match the cycle lapse time",
+      );
+    }
+  }
+  for (const allocation of allocations) {
+    for (const report of allocation.unsafeDestinationReports ?? []) {
+      if (
+        report.cycleId === cycleId &&
+        (allocation.state !== "held" ||
+          allocation.approvedMinor !== "0" ||
+          !allocation.wallet ||
+          !sameWalletObservation(allocation.wallet, report.wallet) ||
+          allocation.hold?.kind !== "unsafe-destination" ||
+          allocation.hold.sourceCommit !== report.sourceCommit)
+      ) {
+        throw new TypeError(
+          "current-cycle unsafe destination report must retain its original held row",
+        );
+      }
+      if (
+        report.projectId !== manifest.projectId ||
+        report.cycleId > cycleId ||
+        Date.parse(report.verifiedAt) > Date.parse(endsAt) ||
+        (report.cycleId === cycleId &&
+          (report.intentId !== allocation.intentId ||
+            report.suggestedMinor !== allocation.suggestedMinor ||
+            report.carryMinor !==
+              (allocation.lines?.sharedPool.suggestedMinor ??
+                allocation.accruedMinor ??
+                allocation.suggestedMinor) ||
+            Date.parse(report.reportedAt) < Date.parse(generatedAt))) ||
+        (report.cycleId < cycleId &&
+          Date.parse(report.verifiedAt) > Date.parse(generatedAt))
+      ) {
+        throw new TypeError(
+          "unsafe destination report is outside its contributor cycle review",
+        );
+      }
+    }
+    // Wallet cut-off: a wallet observed after this proposal was generated
+    // applies to the next cycle. It never modifies the current proposal or
+    // restarts its review; the row stays unclaimed and carries instead.
+    if (
+      allocation.wallet &&
+      Date.parse(allocation.wallet.observedAt) > Date.parse(generatedAt)
+    ) {
+      throw new TypeError(
+        "wallet observation is newer than the proposal generation time; it applies to the next cycle",
+      );
+    }
+    if (
+      allocation.platformApproval &&
+      Date.parse(allocation.platformApproval.approvedAt) < Date.parse(endsAt)
+    ) {
+      throw new TypeError(
+        "related-party approval predates the review deadline",
+      );
+    }
+  }
+  if (
+    manifest.status === "approved" &&
+    allocations.some((allocation) => allocation.state === "proposed")
+  ) {
+    throw new TypeError(
+      "approved allocation manifest has unresolved proposals",
+    );
+  }
+  const suggestedMinor = sumMinor(
+    allocations.map((allocation) => allocation.suggestedMinor),
+  );
+  const approvedMinor = sumMinor(
+    allocations.map((allocation) => allocation.approvedMinor),
+  );
+  let rewardLines: RewardAllocationManifest["rewardLines"];
+  if (hasRewardLines) {
+    const policy = project.reward.reviewBudget;
+    if (
+      policy?.fundingState !== "committed" ||
+      policy.paymentMode !== "enabled"
+    ) {
+      throw new TypeError("allocation review line is not funded and enabled");
+    }
+    const rawLines = record(manifest.rewardLines, "allocation rewardLines");
+    exactKeys(
+      rawLines,
+      ["reviewBudget", "sharedPool"],
+      "allocation rewardLines",
+    );
+    const sharedPool = record(
+      rawLines.sharedPool,
+      "allocation rewardLines.sharedPool",
+    );
+    exactKeys(
+      sharedPool,
+      ["approvedMinor", "capMinor", "suggestedMinor"],
+      "allocation rewardLines.sharedPool",
+    );
+    const reviewBudget = record(
+      rawLines.reviewBudget,
+      "allocation rewardLines.reviewBudget",
+    );
+    exactKeys(
+      reviewBudget,
+      ["approvedMinor", "capMinor", "committedMinor", "suggestedMinor"],
+      "allocation rewardLines.reviewBudget",
+    );
+    rewardLines = {
+      sharedPool: {
+        capMinor: minor(sharedPool.capMinor, "shared-pool line capMinor"),
+        suggestedMinor: minor(
+          sharedPool.suggestedMinor,
+          "shared-pool line suggestedMinor",
+        ),
+        approvedMinor: minor(
+          sharedPool.approvedMinor,
+          "shared-pool line approvedMinor",
+        ),
+      },
+      reviewBudget: {
+        capMinor: minor(reviewBudget.capMinor, "review line capMinor"),
+        committedMinor: minor(
+          reviewBudget.committedMinor,
+          "review line committedMinor",
+        ),
+        suggestedMinor: minor(
+          reviewBudget.suggestedMinor,
+          "review line suggestedMinor",
+        ),
+        approvedMinor: minor(
+          reviewBudget.approvedMinor,
+          "review line approvedMinor",
+        ),
+      },
+    };
+    const allocationSharedSuggested = sumMinor(
+      allocations.map((entry) => entry.lines?.sharedPool.suggestedMinor ?? "0"),
+    );
+    const allocationSharedApproved = sumMinor(
+      allocations.map((entry) => entry.lines?.sharedPool.approvedMinor ?? "0"),
+    );
+    const allocationReviewSuggested = sumMinor(
+      allocations.map(
+        (entry) => entry.lines?.reviewBudget.suggestedMinor ?? "0",
+      ),
+    );
+    const allocationReviewApproved = sumMinor(
+      allocations.map(
+        (entry) => entry.lines?.reviewBudget.approvedMinor ?? "0",
+      ),
+    );
+    if (
+      allocations.some((entry) => !entry.lines) ||
+      rewardLines.sharedPool.capMinor !== capMinor ||
+      rewardLines.reviewBudget.capMinor !== policy.monthlyCapMinor ||
+      rewardLines.reviewBudget.committedMinor !== policy.committedMinor ||
+      rewardLines.sharedPool.suggestedMinor !== allocationSharedSuggested ||
+      rewardLines.sharedPool.approvedMinor !== allocationSharedApproved ||
+      rewardLines.reviewBudget.suggestedMinor !== allocationReviewSuggested ||
+      rewardLines.reviewBudget.approvedMinor !== allocationReviewApproved ||
+      BigInt(allocationSharedApproved) >
+        BigInt(capMinor) + BigInt(carriedMinor) ||
+      BigInt(allocationReviewApproved) > BigInt(policy.committedMinor) ||
+      BigInt(allocationReviewApproved) > BigInt(policy.monthlyCapMinor) ||
+      BigInt(allocationReviewSuggested) > BigInt(policy.committedMinor) ||
+      BigInt(allocationReviewSuggested) > BigInt(policy.monthlyCapMinor)
+    ) {
+      throw new TypeError(
+        "allocation reward lines do not reconcile with policy",
+      );
+    }
+  } else if (allocations.some((entry) => entry.lines)) {
+    throw new TypeError(
+      "allocation rows have reward lines without line totals",
+    );
+  } else if (BigInt(approvedMinor) > BigInt(capMinor) + BigInt(carriedMinor)) {
+    throw new TypeError("allocation total exceeds the monthly cap");
+  }
+  const totals = record(manifest.totals, "allocation manifest.totals");
+  exactKeys(
+    totals,
+    ["approvedMinor", "feeMinor", "suggestedMinor"],
+    "allocation manifest.totals",
+  );
+  const feeMinor = feeForPrincipal(
+    approvedMinor,
+    project.reward.feeBasisPoints,
+  );
+  if (
+    minor(totals.suggestedMinor, "allocation totals.suggestedMinor") !==
+      suggestedMinor ||
+    minor(totals.approvedMinor, "allocation totals.approvedMinor") !==
+      approvedMinor ||
+    minor(totals.feeMinor, "allocation totals.feeMinor") !== feeMinor
+  ) {
+    throw new TypeError("allocation totals do not reconcile");
+  }
+
+  return {
+    schemaVersion: REWARD_PROTOCOL_VERSION,
+    kind: "reward-allocation",
+    projectId: project.id,
+    cycleId,
+    status: manifest.status,
+    generatedAt,
+    approvedAt,
+    contributionWindow: { from: windowFrom, to: windowTo },
+    review: {
+      days: REVIEW_WINDOW_DAYS,
+      lastMaterialChangeAt,
+      endsAt,
+      ...(lapsedAt === undefined ? {} : { lapsedAt }),
+    },
+    currency: "USDC",
+    chain,
+    capMinor,
+    ...(fundingBasis ? { fundingBasis } : {}),
+    ...(hasAccrual
+      ? {
+          carriedMinor,
+          minimumTransferMinor: MINIMUM_TRANSFER_MINOR,
+        }
+      : {}),
+    feeBasisPoints: project.reward.feeBasisPoints,
+    scoringRuleVersion: text(
+      manifest.scoringRuleVersion,
+      "allocation manifest.scoringRuleVersion",
+      { max: 128 },
+    ),
+    sourceSnapshotSha256: sha256(
+      manifest.sourceSnapshotSha256,
+      "allocation manifest.sourceSnapshotSha256",
+    ),
+    allocations,
+    ...(rewardLines ? { rewardLines } : {}),
+    totals: { suggestedMinor, approvedMinor, feeMinor },
+  };
+}
+
+/** Validates Delta Star percentages without representing them as owed dollars. */
+export function assertExternalContributionShareManifest(
+  value: unknown,
+): ExternalContributionShareManifest {
+  const manifest = record(value, "share manifest");
+  exactKeys(
+    manifest,
+    [
+      "cycleId",
+      "contributionWindow",
+      "entries",
+      "generatedAt",
+      "kind",
+      "platformSharePartsPerMillion",
+      "projectId",
+      "schemaVersion",
+      "scoringRuleVersion",
+      "sourceSnapshotSha256",
+      "status",
+    ],
+    "share manifest",
+  );
+  if (
+    manifest.schemaVersion !== REWARD_PROTOCOL_VERSION ||
+    manifest.kind !== "external-contribution-share" ||
+    typeof manifest.projectId !== "string" ||
+    manifest.status !== "provisional"
+  ) {
+    throw new TypeError("share manifest protocol header is invalid");
+  }
+  const project = findHistoricalProject(manifest.projectId);
+  if (project?.reward.kind !== "external-prize-share") {
+    throw new TypeError("share manifest project has no external opportunity");
+  }
+  const platformSharePartsPerMillion = safeInteger(
+    manifest.platformSharePartsPerMillion,
+    "share manifest.platformSharePartsPerMillion",
+  );
+  const expectedPlatformShare =
+    (SHARE_PARTS_TOTAL * project.reward.feeBasisPoints) / 10_000;
+  if (platformSharePartsPerMillion !== expectedPlatformShare) {
+    throw new TypeError(
+      "share manifest platform share differs from project policy",
+    );
+  }
+  const entries = array(manifest.entries, "share manifest.entries").map(
+    (value, index) => {
+      const path = `share manifest.entries[${index}]`;
+      const entry = record(value, path);
+      exactKeys(
+        entry,
+        ["actor", "evidenceEventIds", "score", "sharePartsPerMillion"],
+        path,
+      );
+      return {
+        actor: assertActor(entry.actor, `${path}.actor`),
+        score: safeInteger(entry.score, `${path}.score`),
+        sharePartsPerMillion: safeInteger(
+          entry.sharePartsPerMillion,
+          `${path}.sharePartsPerMillion`,
+        ),
+        evidenceEventIds: assertEvidenceIds(
+          entry.evidenceEventIds,
+          `${path}.evidenceEventIds`,
+        ),
+      };
+    },
+  );
+  unique(
+    entries.map((entry) => entry.actor.id),
+    "share actor ids",
+  );
+  if (
+    entries.reduce((total, entry) => total + entry.sharePartsPerMillion, 0) +
+      (entries.length === 0 ? 0 : platformSharePartsPerMillion) !==
+    (entries.length === 0 ? 0 : SHARE_PARTS_TOTAL)
+  ) {
+    throw new TypeError(
+      "share parts must total one million when a cycle has contributors",
+    );
+  }
+  const cycleId = text(manifest.cycleId, "share manifest.cycleId", {
+    pattern: /^\d{4}-(?:0[1-9]|1[0-2])$/u,
+  });
+  const contributionWindow = record(
+    manifest.contributionWindow,
+    "share manifest.contributionWindow",
+  );
+  exactKeys(
+    contributionWindow,
+    ["from", "to"],
+    "share manifest.contributionWindow",
+  );
+  const windowFrom = iso(
+    contributionWindow.from,
+    "share manifest.contributionWindow.from",
+  );
+  const windowTo = iso(
+    contributionWindow.to,
+    "share manifest.contributionWindow.to",
+  );
+  const generatedAt = iso(manifest.generatedAt, "share manifest.generatedAt");
+  const [cycleYear, cycleMonth] = cycleId.split("-").map(Number);
+  const expectedFrom = Math.max(
+    Date.UTC(cycleYear, cycleMonth - 1, 1),
+    Date.parse(project.reward.rewardStartAt),
+  );
+  const expectedTo = Date.UTC(cycleYear, cycleMonth, 1);
+  if (
+    Date.parse(windowFrom) !== expectedFrom ||
+    Date.parse(windowTo) !== expectedTo ||
+    Date.parse(generatedAt) < expectedTo
+  ) {
+    throw new TypeError(
+      "share contribution window or generation time is outside the closed cycle",
+    );
+  }
+  return {
+    schemaVersion: REWARD_PROTOCOL_VERSION,
+    kind: "external-contribution-share",
+    projectId: project.id,
+    cycleId,
+    status: "provisional",
+    generatedAt,
+    contributionWindow: { from: windowFrom, to: windowTo },
+    scoringRuleVersion: text(
+      manifest.scoringRuleVersion,
+      "share manifest.scoringRuleVersion",
+      { max: 128 },
+    ),
+    sourceSnapshotSha256: sha256(
+      manifest.sourceSnapshotSha256,
+      "share manifest.sourceSnapshotSha256",
+    ),
+    platformSharePartsPerMillion,
+    entries,
+  };
+}

@@ -1,0 +1,292 @@
+import { assertEscrowTransition } from "./escrow-policy.mjs";
+/**
+ * Enforces non-retroactive project policy transitions. This is deliberately
+ * independent from payment state: money events cannot rewrite IP policy.
+ */
+
+import {
+  assertHistoricalProjectDefinition,
+  assertProjectDefinition,
+} from "./project-schema.mjs";
+import { assertSecurityBountyTransition } from "./security-bounty.mjs";
+
+function assertFundingRouteTransition(previousRoutes, nextRoutes) {
+  if (
+    nextRoutes.length < previousRoutes.length ||
+    nextRoutes.length > previousRoutes.length + 1
+  ) {
+    throw new TypeError(
+      "funding history must remain an append-only prefix with at most one successor",
+    );
+  }
+  let closedIndex = null;
+  for (let index = 0; index < previousRoutes.length; index += 1) {
+    const previous = previousRoutes[index];
+    const next = nextRoutes[index];
+    if (
+      previous.network !== next.network ||
+      previous.asset !== next.asset ||
+      previous.address !== next.address ||
+      previous.effectiveAt !== next.effectiveAt
+    ) {
+      throw new TypeError(
+        "historical funding routes must remain an exact append-only prefix",
+      );
+    }
+    if (previous.replacedAt !== null) {
+      if (previous.replacedAt !== next.replacedAt) {
+        throw new TypeError("closed funding routes are immutable");
+      }
+    } else if (next.replacedAt !== null) {
+      if (closedIndex !== null) {
+        throw new TypeError("a transition may close at most one funding route");
+      }
+      closedIndex = index;
+    }
+  }
+  const successor = nextRoutes[previousRoutes.length];
+  if (successor === undefined) {
+    if (closedIndex !== null) {
+      throw new TypeError(
+        "an active funding route may close only with a successor",
+      );
+    }
+    return;
+  }
+  if (successor.replacedAt !== null) {
+    throw new TypeError("an appended funding successor must be active");
+  }
+  const activePredecessor = previousRoutes.findIndex(
+    (route) =>
+      route.network === successor.network &&
+      route.asset === successor.asset &&
+      route.replacedAt === null,
+  );
+  if (activePredecessor === -1) {
+    if (closedIndex !== null) {
+      throw new TypeError("a funding successor must rotate the closed route");
+    }
+    return;
+  }
+  if (
+    closedIndex !== activePredecessor ||
+    nextRoutes[activePredecessor].replacedAt !== successor.effectiveAt
+  ) {
+    throw new TypeError(
+      "a funding rotation must close its active predecessor exactly when its successor starts",
+    );
+  }
+}
+
+function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function assertCommitmentTransition(previous, next) {
+  if (next.length < previous.length || next.length > previous.length + 1) {
+    throw new TypeError(
+      "commitment history must remain an append-only prefix with at most one successor",
+    );
+  }
+  const successor = next[previous.length];
+  if (successor && successor.replacedAt !== null)
+    throw new TypeError("new commitment must be active");
+  for (let index = 0; index < previous.length; index += 1) {
+    const { replacedAt: before, ...priorIdentity } = previous[index];
+    const { replacedAt: after, ...nextIdentity } = next[index];
+    if (canonical(priorIdentity) !== canonical(nextIdentity)) {
+      throw new TypeError(
+        "historical commitment identity, monthly binding, and authority are immutable",
+      );
+    }
+    if (before === after) continue;
+    if (before !== null || !successor || after !== successor.effectiveAt) {
+      throw new TypeError(
+        "a commitment may close only at an appended successor's activation; closed history is immutable",
+      );
+    }
+  }
+}
+
+function assertRepositoryTransition(previousRepositories, nextRepositories) {
+  if (previousRepositories.length !== nextRepositories.length) {
+    throw new TypeError("repository inventory cannot change");
+  }
+  for (let index = 0; index < previousRepositories.length; index += 1) {
+    const previous = previousRepositories[index];
+    const next = nextRepositories[index];
+    const previousAliases = previous.aliases ?? [];
+    const nextAliases = next.aliases ?? [];
+    if (
+      previous.id !== next.id ||
+      previous.integrationBranch !== next.integrationBranch ||
+      previous.description !== next.description
+    ) {
+      throw new TypeError(
+        "repository transfer, rename, or integration-branch drift requires a new project review",
+      );
+    }
+    if (
+      nextAliases.length < previousAliases.length ||
+      nextAliases.length > previousAliases.length + 1 ||
+      previousAliases.some(
+        (alias, aliasIndex) =>
+          alias.toLowerCase() !== nextAliases[aliasIndex]?.toLowerCase(),
+      )
+    ) {
+      throw new TypeError(
+        "repository aliases must remain an append-only prefix with at most one transfer per review",
+      );
+    }
+    if (nextAliases.length === previousAliases.length) {
+      if (canonical(previous) !== canonical(next)) {
+        throw new TypeError(
+          "repository metadata may change only with an appended transfer alias",
+        );
+      }
+      continue;
+    }
+    const alias = nextAliases.at(-1);
+    const currentPath = new URL(next.githubUrl).pathname
+      .replace(/^\//u, "")
+      .replace(/\/$/u, "");
+    if (
+      alias.toLowerCase() !== currentPath.toLowerCase() ||
+      next.displayName.toLowerCase() !== alias.toLowerCase()
+    ) {
+      throw new TypeError(
+        "a repository transfer must publish its appended alias as the current repository identity",
+      );
+    }
+  }
+}
+
+/**
+ * Refuses identity drift and silent material-policy edits. Historical records
+ * remain valid because callers receive a new revision rather than mutating an
+ * old acknowledgement.
+ */
+export function assertProjectPolicyTransition(previousValue, nextValue) {
+  const previous = assertHistoricalProjectDefinition(previousValue);
+  const next = assertProjectDefinition(nextValue);
+  if (previous.id !== next.id) throw new TypeError("project id cannot change");
+  // An undeployed, unfunded monthly pledge can change networks. Published
+  // fees and all deployed vault records still keep their original terms.
+  const unfundedMonthly =
+    previous.reward.kind === "monthly-pool" &&
+    previous.reward.fundingState !== "committed" &&
+    BigInt(previous.reward.committedMinor) === 0n &&
+    previous.reward.paymentMode !== "enabled" &&
+    (previous.escrow?.deployments ?? []).length === 0 &&
+    previous.funding.addresses.length === 0 &&
+    (previous.funding.commitments ?? []).length === 0;
+  assertEscrowTransition(previous.escrow, next.escrow, unfundedMonthly);
+  assertSecurityBountyTransition(previous.securityBounty, next.securityBounty);
+  assertFundingRouteTransition(
+    previous.funding.addresses,
+    next.funding.addresses,
+  );
+  assertCommitmentTransition(
+    previous.funding.commitments ?? [],
+    next.funding.commitments ?? [],
+  );
+  if (
+    previous.authority.repositoryId !== next.authority.repositoryId ||
+    previous.authority.repositoryNodeId !== next.authority.repositoryNodeId
+  ) {
+    throw new TypeError(
+      "repository transfer, rename, or integration-branch drift requires a new project review",
+    );
+  }
+  assertRepositoryTransition(previous.repositories, next.repositories);
+  const previousReceiptPolicy = previous.terms.receiptPolicy;
+  const nextReceiptPolicy = next.terms.receiptPolicy;
+  const initialReceiptActivation =
+    previousReceiptPolicy.state === "pending-authority-activation" &&
+    nextReceiptPolicy.state === "active";
+  if (
+    initialReceiptActivation &&
+    (next.authority.state !== "verified" ||
+      nextReceiptPolicy.bindings.length !== 1 ||
+      nextReceiptPolicy.activatedAt !== next.authority.proof.verifiedAt)
+  ) {
+    throw new TypeError(
+      "receipt policy activation requires exactly one first binding at authority verification",
+    );
+  }
+  if (previousReceiptPolicy.state === "active") {
+    if (nextReceiptPolicy.state !== "active") {
+      throw new TypeError("active receipt policy cannot revert to pending");
+    }
+    if (previousReceiptPolicy.activatedAt !== nextReceiptPolicy.activatedAt) {
+      throw new TypeError("receipt policy cutover activation is immutable");
+    }
+    if (
+      nextReceiptPolicy.bindings.length <
+        previousReceiptPolicy.bindings.length ||
+      previousReceiptPolicy.bindings.some(
+        (binding, index) =>
+          canonical(binding) !== canonical(nextReceiptPolicy.bindings[index]),
+      )
+    ) {
+      throw new TypeError(
+        "historical receipt policy bindings must remain an exact append-only prefix",
+      );
+    }
+    const appended =
+      nextReceiptPolicy.bindings.length - previousReceiptPolicy.bindings.length;
+    if (appended > 1) {
+      throw new TypeError(
+        "receipt policy transition may append at most one binding",
+      );
+    }
+    const bindingTerms = (project) =>
+      canonical({
+        policyRevision: project.terms.revision,
+        licenseSha256: project.terms.repositoryLicense.fileSha256,
+        inboundTermsSha256: project.terms.inbound.fileSha256,
+        prizeRulesSha256: project.terms.externalPrize?.rulesSha256 ?? null,
+      });
+    const bindingChanged = bindingTerms(previous) !== bindingTerms(next);
+    if (bindingChanged !== (appended === 1)) {
+      throw new TypeError(
+        "receipt policy binding append must exactly match a binding-relevant terms change",
+      );
+    }
+  }
+  const { receiptPolicy: _previousReceiptPolicy, ...previousMaterialTerms } =
+    previous.terms;
+  const { receiptPolicy: _nextReceiptPolicy, ...nextMaterialTerms } =
+    next.terms;
+  const materialBefore = canonical({
+    steward: previous.steward,
+    terms: previousMaterialTerms,
+  });
+  const materialAfter = canonical({
+    steward: next.steward,
+    terms: nextMaterialTerms,
+  });
+  if (
+    materialBefore !== materialAfter &&
+    previous.terms.revision === next.terms.revision &&
+    !initialReceiptActivation
+  ) {
+    throw new TypeError("material terms drift requires a new revision");
+  }
+  if (
+    next.authority.state === "verified" &&
+    next.authority.proof.policyRevision !== next.terms.revision
+  ) {
+    throw new TypeError(
+      "repository proof does not bind the current policy revision",
+    );
+  }
+  return next;
+}

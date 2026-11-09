@@ -1,0 +1,3061 @@
+// The D1 project registry API on the real migrations: cached public reads,
+// purge on admin writes, server-verified reward assets, the GitHub ownership
+// check, submission limits, exact revision bytes, the generated-skill
+// activation gate, the security-vetting gate, same-origin GitHub lookups,
+// and ADM-06 enforcement.
+import type { Database } from "bun:sqlite";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { generateKeyPairSync } from "node:crypto";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
+import {
+  CloudflareProjectPersistence,
+  ENFORCEMENT_COLUMNS,
+} from "../backend/projects/cloudflare-persistence";
+import type { RepositoryControl } from "../backend/projects/contracts";
+import type { EdgeCache } from "../backend/projects/edge-cache";
+import {
+  planEnforcement,
+  projectRestriction,
+} from "../backend/projects/enforcement";
+import {
+  handleProjectApi,
+  type ProjectApiDependencies,
+} from "../backend/projects/handler";
+import { slopbotGithubFetch } from "../backend/projects/repository-access";
+import type { SkillTemplateIndex } from "../backend/projects/skill-publication";
+import { handleProjectArtifactRequest } from "../backend/projects/skill-publication";
+import {
+  rpcTokenMetadataReader,
+  TokenMetadataError,
+} from "../backend/projects/token-metadata";
+import { readSecurityProgramFunds } from "../backend/security/program-funds";
+import { vettingScanRequester } from "../backend/vetting/handler";
+import {
+  CloudflareVettingPersistence,
+  type VettingPin,
+  vettedContentSha256,
+} from "../backend/vetting/persistence";
+import { parseVettingResult } from "../backend/vetting/result";
+import { isScanResult } from "../backend/vetting/scan-result";
+import {
+  allocationFundingMinor,
+  deriveAllocationFundingBasis,
+} from "../src/lib/allocation-funding";
+import type { RepositoryAccess } from "../src/lib/project-contracts";
+import { rewardFields } from "../src/lib/project-proposal";
+import { PROJECT_SKILL_TEMPLATES } from "../src/lib/project-schema.mjs";
+import { sha256Hex } from "../src/lib/project-skill-publication.mjs";
+import type { ProjectDefinition } from "../src/lib/projects.mjs";
+import {
+  REWARD_ASSET_NETWORKS,
+  rewardAssetChoice,
+} from "../src/lib/reward-asset.mjs";
+import { resolveRewardCapMinor } from "../src/lib/reward-cap.mjs";
+import type { SecurityBountyTerms } from "../src/lib/security-bounty.mjs";
+import { seedParticipationBan } from "../tests/participation-ban.fixture";
+import {
+  applicationManifest,
+  CONTRIBUTION,
+} from "../tests/project-application-manifest";
+import { sqliteD1 } from "../tests/sqlite-d1";
+import { vettingResult } from "../tests/vetting-fixtures";
+import {
+  reversalOnlyRegistration,
+  reviewRegistration,
+} from "../workers/slopbot/registry";
+import { handleRepositoryRead } from "../workers/slopbot/repository-access";
+import { fetchProjectRegistry } from "./sync-project-registry.mjs";
+
+const ORIGIN = "https://slop.cash";
+const ADMIN = { githubId: "900000001", githubLogin: "e2e-admin" };
+const APPLICANT = { githubId: "900000002", githubLogin: "e2e-applicant" };
+const MODERATOR = { githubId: "900000003", githubLogin: "e2e-moderator" };
+const TOKEN = "0x1111111111111111111111111111111111111111";
+
+class MemoryCache implements EdgeCache {
+  readonly entries = new Map<string, Response>();
+  async match(request: Request) {
+    return this.entries.get(request.url)?.clone();
+  }
+  async put(request: Request, response: Response) {
+    this.entries.set(request.url, response.clone());
+  }
+  async delete(request: Request) {
+    return this.entries.delete(request.url);
+  }
+}
+
+let persistence: CloudflareProjectPersistence;
+let sqlite: Database;
+let db: ReturnType<typeof sqliteD1>["db"];
+
+import { localVettingEvidence } from "../tests/vetting-evidence-fixture";
+
+let retained: Awaited<ReturnType<typeof localVettingEvidence>>;
+afterEach(async () => {
+  await retained?.dispose();
+});
+let vetting: CloudflareVettingPersistence;
+let scans = 0;
+/** The live integration-branch head and template digest vetting compares. */
+let livePin: VettingPin;
+let cache: MemoryCache;
+let tokenReads: string[];
+let githubReads: string[];
+let deps: ProjectApiDependencies;
+/** GitHub's answer for the ownership check, by repository. */
+let control: (repository: string) => RepositoryControl;
+/** What the Slopbot installation reads for the repository and account. */
+let access: RepositoryAccess | "unavailable";
+/** Whether the scan service accepts queued scans. */
+let scanService: boolean;
+
+beforeEach(async () => {
+  const database = sqliteD1(
+    readdirSync(new URL("../migrations", import.meta.url))
+      .filter((name) => name.endsWith(".sql"))
+      .sort(),
+  );
+  sqlite = database.sqlite;
+  db = database.db;
+  persistence = new CloudflareProjectPersistence(database.db);
+  retained = await localVettingEvidence(
+    database.db,
+    () => new Date("2026-10-18T12:00:00.000Z"),
+  );
+  vetting = new CloudflareVettingPersistence(
+    database.db,
+    async (a) => a.result !== null && retained.evidence.retained(a.result),
+  );
+  livePin = { commitSha: "a".repeat(40), templateSha256: "d".repeat(64) };
+  cache = new MemoryCache();
+  tokenReads = [];
+  githubReads = [];
+  control = () => ({ state: "matched" });
+  access = { installation: "missing" };
+  scanService = false;
+  let id = 0;
+  const randomId = () =>
+    `00000000-0000-4000-8000-${String(++id).padStart(12, "0")}`;
+  deps = {
+    persistence,
+    securityProgramFunds: (projectId, program) =>
+      readSecurityProgramFunds(
+        { db: database.db, now: () => deps.now() },
+        projectId,
+        program,
+      ),
+    adminGithubIds: new Set([ADMIN.githubId, MODERATOR.githubId]),
+    moderatorGithubIds: new Set([ADMIN.githubId, MODERATOR.githubId]),
+    now: () => new Date("2026-10-18T12:00:00.000Z"),
+    randomId,
+    sessionActor: async (request) =>
+      request.headers.get("x-test-actor") === "admin"
+        ? ADMIN
+        : request.headers.get("x-test-actor") === "applicant"
+          ? APPLICANT
+          : request.headers.get("x-test-actor") === "moderator"
+            ? MODERATOR
+            : null,
+    repositoryControl: async (manifest) => control(manifest.repositories[0].id),
+    repositoryAccess: async () => {
+      if (access === "unavailable") throw new Error("Slopbot unavailable");
+      return access;
+    },
+    requestScan: vettingScanRequester({
+      vetting,
+      serviceAvailable: async () => scanService,
+      livePin: async () => livePin,
+      now: () => new Date("2026-10-18T12:00:00.000Z"),
+      randomId,
+    }),
+    vettingClearance: (
+      projectId,
+      manifest,
+      throughRevision,
+      forReinstatement,
+    ) =>
+      vetting.manifestClearance(
+        projectId,
+        manifest,
+        throughRevision,
+        async () => livePin,
+        forReinstatement,
+      ),
+    readTokenMetadata: async (network, address) => {
+      tokenReads.push(`${network}:${address}`);
+      if (address === TOKEN) return { decimals: 18, symbol: "OPEN" };
+      throw new TokenMetadataError("No contract exists at that token address");
+    },
+    github: {
+      fetch: async (url) => {
+        githubReads.push(url);
+        if (url === `https://api.github.com/user/${APPLICANT.githubId}`)
+          return Response.json({
+            id: Number(APPLICANT.githubId),
+            login: APPLICANT.githubLogin,
+            type: "User",
+          });
+        if (
+          url ===
+          "https://api.github.com/repos/example/open-registry/branches?per_page=100&page=1"
+        )
+          return Response.json([
+            { name: "main", commit: { sha: "a".repeat(40) } },
+            { name: "development", commit: { sha: "b".repeat(40) } },
+          ]);
+        if (url === "https://api.github.com/repos/example/open-registry")
+          return Response.json({
+            id: 123456789,
+            node_id: "R_example",
+            full_name: "example/open-registry",
+            description: "Reproducible research tooling for everyone.",
+            private: false,
+            default_branch: "main",
+            owner: {
+              login: "example",
+              id: 987654321,
+              node_id: "O_example",
+              type: "Organization",
+            },
+          });
+        return Response.json({ message: "Not Found" }, { status: 404 });
+      },
+    },
+    cache,
+  };
+});
+
+function call(
+  method: string,
+  path: string,
+  actor?: "admin" | "applicant" | "moderator",
+  body?: unknown,
+) {
+  return handleProjectApi(
+    new Request(`${ORIGIN}/api/v1/${path}`, {
+      method,
+      headers: {
+        ...(actor ? { "x-test-actor": actor } : {}),
+        ...(body === undefined
+          ? {}
+          : { "content-type": "application/json", origin: ORIGIN }),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    }),
+    deps,
+  ) as Promise<Response>;
+}
+
+/** Seeds a historical persistence result; this does not pass HTTP admission. */
+async function seedHistoricalResult(
+  projectId: string,
+  disposition: "clean" | "malicious" = "clean",
+) {
+  const project = await persistence.getProject(projectId);
+  if (project === null) throw new Error("project was not listed");
+  const id = `vet_${String(++scans).padStart(32, "0")}`;
+  const requestedAt = new Date(
+    Date.parse("2026-10-18T12:00:00.000Z") + scans * 2000,
+  ).toISOString();
+  await vetting.createAssessment({
+    id,
+    projectId,
+    revision: project.revision,
+    manifestSha256: project.manifestSha256,
+    contentSha256: await vettedContentSha256(project.manifest),
+    commitSha: livePin.commitSha,
+    templateSha256: livePin.templateSha256,
+    requestedBy: ADMIN,
+    requestedAt,
+    requestReason: "Fixture scan",
+  });
+  const result = parseVettingResult(
+    vettingResult(
+      {
+        assessmentId: id,
+        projectId,
+        revision: project.revision,
+        manifestSha256: project.manifestSha256,
+        repository: project.manifest.repositories[0].id,
+        commitSha: livePin.commitSha,
+        templateSha256: livePin.templateSha256,
+      },
+      disposition,
+    ),
+  );
+  await retained.retain(id, result.environment.runId);
+  expect(
+    await vetting.recordResult({
+      result,
+      resultText: JSON.stringify(result),
+      resultSha256: "0".repeat(64),
+      signingKeySha256: "1".repeat(64),
+      at: new Date(Date.parse(requestedAt) + 1000).toISOString(),
+    }),
+  ).toBe("recorded");
+  return id;
+}
+
+const ADMIN_ACCESS: RepositoryAccess = {
+  installation: "installed",
+  installationId: 7,
+  permission: "admin",
+  roleName: "admin",
+};
+
+/** Creates a project as an owner whose admin access Slopbot reads. */
+async function create(manifest: unknown, extra: Record<string, unknown> = {}) {
+  const previous = access;
+  access = ADMIN_ACCESS;
+  try {
+    return await call("POST", "projects", "applicant", { manifest, ...extra });
+  } finally {
+    access = previous;
+  }
+}
+
+async function listProject(
+  manifest = applicationManifest("open-registry", "example/open-registry"),
+) {
+  const created = await create(manifest);
+  expect(created.status).toBe(201);
+  return (await created.json()).project;
+}
+
+describe("project registry API", () => {
+  for (const network of ["base", "ethereum", "robinhood", "solana"] as const) {
+    test(`stores native ${network} rewards without reading a token contract`, async () => {
+      const definition = REWARD_ASSET_NETWORKS[network];
+      const response = await create(
+        applicationManifest(
+          "open-registry",
+          "example/open-registry",
+          rewardFields(
+            {
+              mode: "monthly",
+              network,
+              assetKind: "native",
+              tokenAddress: "",
+              tokenSymbol: "",
+              monthlyAmount: "1.25",
+            },
+            deps.now(),
+          ),
+        ),
+        { monthlyAmount: "1.25" },
+      );
+      expect(response.status).toBe(201);
+      const project = await persistence.getProject("open-registry");
+      expect(project?.manifest.rewardAsset).toMatchObject({
+        network,
+        kind: "native",
+        ...definition.native,
+        chainId: definition.chainId,
+        cluster: definition.cluster,
+      });
+      expect(project?.manifest.reward.monthlyCapMinor).toBe(
+        network === "solana" ? "1250000000" : "1250000000000000000",
+      );
+      expect(tokenReads).toEqual([]);
+      const updated = await call(
+        "PUT",
+        "admin/projects/open-registry/manifest",
+        "admin",
+        {
+          expectedRevision: 1,
+          manifest: {
+            ...project?.manifest,
+            headline: "Native rewards with verified repository authority.",
+          },
+          reason: "Update project summary",
+        },
+      );
+      expect(updated.status).toBe(200);
+      expect(tokenReads).toEqual([]);
+      expect(
+        (await persistence.getProject("open-registry"))?.manifest.rewardAsset,
+      ).toEqual(project?.manifest.rewardAsset);
+    });
+  }
+
+  test("only a current owner can revise the EVM execution cap without changing its verified vault", async () => {
+    access = ADMIN_ACCESS;
+    await listProject(
+      applicationManifest(
+        "open-registry",
+        "example/open-registry",
+        rewardFields(
+          {
+            mode: "monthly",
+            network: "base",
+            assetKind: "stablecoin",
+            tokenAddress: "",
+            tokenSymbol: "",
+            monthlyAmount: "1000",
+          },
+          deps.now(),
+        ),
+      ),
+    );
+    const initial = await persistence.getProject("open-registry");
+    if (!initial) throw new Error("Missing project");
+    const deployment = {
+      network: "base-sepolia" as const,
+      vault: `0x${"1".repeat(40)}`,
+      asset: "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+      owner: `0x${"2".repeat(40)}`,
+      identityAuthority: `0x${"3".repeat(40)}`,
+      feeRecipient: `0x${"4".repeat(40)}`,
+      factory: `0x${"5".repeat(40)}`,
+      registrar: `0x${"6".repeat(40)}`,
+      factoryCodeSha256: "c".repeat(64),
+      codeSha256: "d".repeat(64),
+      deploymentTransaction: `0x${"e".repeat(64)}`,
+      sourceCommit: "a".repeat(40),
+      bindingDelaySeconds: "0",
+      rotationDelaySeconds: null,
+      programId: null,
+      projectPda: null,
+      networkDomain: null,
+      upgradeAuthority: null,
+    };
+    deps.vaultSetup = {
+      networks: async () => ["base-sepolia"],
+      review: async () => {
+        throw Error("unused");
+      },
+      register: async () => deployment,
+    };
+    const registered = await call(
+      "POST",
+      "project-vaults/open-registry",
+      "applicant",
+      {
+        step: "register",
+        expectedRevision: initial.revision,
+        network: "base-sepolia",
+        claimId: "verified-owner",
+        automatic: false,
+        transactionId: deployment.deploymentTransaction,
+      },
+    );
+    if (registered.status !== 200) throw new Error(await registered.text());
+    const change = async (
+      limit: string | undefined,
+      actor: "admin" | "applicant" | "moderator" | null = "applicant",
+      replaceVault = false,
+    ) => {
+      const current = await persistence.getProject("open-registry");
+      if (!current) throw Error("Missing project");
+      const escrow = current.manifest.escrow;
+      if (!escrow) throw Error("Missing registered escrow");
+      return call("PUT", "projects/open-registry", actor ?? undefined, {
+        expectedRevision: current.revision,
+        manifest: {
+          ...current.manifest,
+          escrow: {
+            ...escrow,
+            deployments: escrow.deployments.map(
+              ({ maxNativeCostWei: _old, ...d }) => ({
+                ...d,
+                ...(limit === undefined ? {} : { maxNativeCostWei: limit }),
+                ...(replaceVault ? { vault: `0x${"9".repeat(40)}` } : {}),
+              }),
+            ),
+          },
+        },
+      });
+    };
+    expect((await change("1000000000000000", null)).status).toBe(401);
+    expect((await change("1000000000000000")).status).toBe(200);
+    expect((await change("500000000000000")).status).toBe(200);
+    expect((await change(undefined)).status).toBe(200);
+    expect((await change("0")).status).toBe(422);
+    expect((await change("500000000000000", "applicant", true)).status).toBe(
+      422,
+    );
+    access = { ...ADMIN_ACCESS, permission: "read", roleName: "read" };
+    expect((await change("500000000000000")).status).toBe(403);
+    expect(
+      (await persistence.getProject("open-registry"))?.manifest.escrow
+        ?.deployments[0].vault,
+    ).toBe(deployment.vault);
+  });
+
+  test("first bounty setup checks live management authority without changing the project", async () => {
+    await listProject();
+    const before = await persistence.getProject("open-registry");
+    expect((await call("GET", "project-setup/open-registry")).status).toBe(401);
+    access = ADMIN_ACCESS;
+    const allowed = await call(
+      "GET",
+      "project-setup/open-registry",
+      "applicant",
+    );
+    expect(allowed.status).toBe(200);
+    expect(await allowed.json()).toEqual({
+      viewer: { githubId: APPLICANT.githubId },
+      canManageBounty: true,
+    });
+    expect(await persistence.getProject("open-registry")).toEqual(before);
+    access = { ...ADMIN_ACCESS, permission: "read", roleName: "read" };
+    expect(
+      (await call("GET", "project-setup/open-registry", "applicant")).status,
+    ).toBe(403);
+    access = "unavailable";
+    expect(
+      (await call("GET", "project-setup/open-registry", "applicant")).status,
+    ).toBe(503);
+    expect(await persistence.getProject("open-registry")).toEqual(before);
+  });
+
+  test("serves a newly approved project at once, purging the cached list", async () => {
+    const empty = await call("GET", "projects");
+    expect((await empty.json()).projects).toEqual([]);
+    expect((await call("GET", "projects")).headers.get("x-slop-cache")).toBe(
+      "hit",
+    );
+    await listProject();
+    const listed = await call("GET", "projects");
+    expect(listed.headers.get("x-slop-cache")).toBe("miss");
+    expect(listed.headers.get("cache-control")).toBe(
+      "public, max-age=0, s-maxage=30",
+    );
+    const body = await listed.json();
+    expect(body.projects.map((project: { id: string }) => project.id)).toEqual([
+      "open-registry",
+    ]);
+    expect(Object.keys(body).sort()).toEqual([
+      "projects",
+      "restrictions",
+      "schemaVersion",
+    ]);
+    expect(body.restrictions).toEqual([]);
+    const single = await call("GET", "projects/open-registry");
+    expect(single.status).toBe(200);
+    // Skills publish only after a clean scan of the exact revision.
+    expect(await single.json()).toMatchObject({
+      revision: 1,
+      skillsPublished: false,
+      vetting: { state: "unscanned" },
+      project: { id: "open-registry", status: "paused" },
+    });
+    expect((await call("GET", "projects/missing")).status).toBe(404);
+  });
+
+  test("owner project images publish, validate and remove through immutable revisions", async () => {
+    access = ADMIN_ACCESS;
+    await listProject();
+    const current = await persistence.getProject("open-registry");
+    if (!current) throw new Error("Missing listed project");
+    const image =
+      "data:image/webp;base64,UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA";
+    const manifest = { ...current.manifest, image };
+    const published = await call("PUT", "projects/open-registry", "applicant", {
+      manifest,
+      expectedRevision: current.revision,
+    });
+    expect(published.status).toBe(200);
+    expect((await published.json()).changes.presentation).toEqual(["image"]);
+    expect(
+      (await (await call("GET", "projects/open-registry")).json()).project
+        .image,
+    ).toBe(image);
+    const invalid = await call("PUT", "projects/open-registry", "applicant", {
+      manifest: { ...manifest, image: "data:image/svg+xml;base64,PHN2Zz4=" },
+      expectedRevision: 2,
+    });
+    expect(invalid.status).toBe(422);
+    const removed = await call("PUT", "projects/open-registry", "applicant", {
+      manifest: current.manifest,
+      expectedRevision: 2,
+    });
+    expect(removed.status).toBe(200);
+    expect(
+      (await (await call("GET", "projects/open-registry")).json()).project
+        .image,
+    ).toBeUndefined();
+    const prior = await persistence.getRevisionText("open-registry", 2);
+    expect(JSON.parse(prior?.manifestText ?? "{}").image).toBe(image);
+  });
+
+  test("an owner revision publishes at once and appends only its expected revision", async () => {
+    access = ADMIN_ACCESS;
+    await listProject();
+    const current = await persistence.getProject("open-registry");
+    if (!current) throw new Error("Missing listed project");
+    const manifest = {
+      ...current.manifest,
+      headline: "Updated scope for the open registry",
+    };
+    const body = { manifest, expectedRevision: 1 };
+    const published = await call(
+      "PUT",
+      "projects/open-registry",
+      "applicant",
+      body,
+    );
+    expect(published.status).toBe(200);
+    const result = await published.json();
+    expect(result.changes).toEqual({
+      presentation: ["headline"],
+      executable: [],
+      financial: [],
+    });
+    expect(await persistence.getProject("open-registry")).toMatchObject({
+      revision: 2,
+      manifest: { headline: manifest.headline, status: "paused" },
+    });
+    // The stale base revision is refused instead of overwriting.
+    const stale = await call(
+      "PUT",
+      "projects/open-registry",
+      "applicant",
+      body,
+    );
+    expect(stale.status).toBe(409);
+    expect((await stale.json()).error).toBe("stale_revision");
+    // Status, listing and identity stay with the exception paths.
+    const listing = await call("PUT", "projects/open-registry", "applicant", {
+      manifest: {
+        ...manifest,
+        steward: { ...manifest.steward, displayName: "Someone else" },
+      },
+      expectedRevision: 2,
+    });
+    expect(listing.status).toBe(422);
+    expect(await listing.json()).toMatchObject({
+      error: "owner_field_restricted",
+    });
+    const unchanged = await call("PUT", "projects/open-registry", "applicant", {
+      manifest,
+      expectedRevision: 2,
+    });
+    expect((await unchanged.json()).error).toBe("no_change");
+    // Without current authority nothing is published.
+    access = { ...ADMIN_ACCESS, permission: "read", roleName: "read" };
+    const denied = await call("PUT", "projects/open-registry", "applicant", {
+      manifest: { ...manifest, headline: "A change without authority" },
+      expectedRevision: 2,
+    });
+    expect(denied.status).toBe(403);
+    expect((await denied.json()).error).toBe("authority_required");
+    // An unavailable GitHub answer is a retry, never a queued admin task.
+    deps.repositoryControl = async () => {
+      throw new Error("GitHub is down");
+    };
+    access = "unavailable";
+    const retry = await call("PUT", "projects/open-registry", "applicant", {
+      manifest: { ...manifest, headline: "A change while GitHub is down" },
+      expectedRevision: 2,
+    });
+    expect(retry.status).toBe(503);
+    expect((await retry.json()).error).toBe("github_unavailable");
+    expect((await persistence.getProject("open-registry"))?.revision).toBe(2);
+  });
+
+  test("owners create private bounty pledges and prefunded terms require current verified vault funds", async () => {
+    access = ADMIN_ACCESS;
+    const program: SecurityBountyTerms = {
+      version: "1",
+      status: "paused",
+      rewardMode: "separate",
+      eligibility: "critical-loss-of-funds",
+      amount: {
+        currency: "USDC",
+        decimals: 6,
+        network: "base",
+        grossMinor: "1000000",
+      },
+      split: { researcherBasisPoints: 7500, slopBasisPoints: 2500 },
+      sponsor: { name: "Example", githubId: APPLICANT.githubId },
+      funding: { state: "pledged" },
+      capacity: {
+        awards: 1,
+        closesAt: null,
+        exhaustionRule: "New awards wait for available funds.",
+      },
+      scope: {
+        sourceRevisions: [
+          { repository: "example/open-registry", commit: "a".repeat(40) },
+        ],
+        deployments: [],
+        includedAssets: ["Vault funds"],
+        excludedDependencies: [],
+        testingPermission: "Test only in local forks.",
+        severityRubric: "Assess the impact on covered funds.",
+        lossDefinition: "Unauthorized loss of covered funds.",
+      },
+      intake: {
+        kind: "github-private-vulnerability-reporting",
+        repository: "example/open-registry",
+      },
+      responseTargets: {
+        acknowledgeHours: 24,
+        triageBusinessDays: 3,
+        updateIntervalDays: 7,
+      },
+      approvers: {
+        technical: [APPLICANT],
+        financial: [APPLICANT],
+        dispute: [APPLICANT],
+      },
+      dispute: {
+        authority: "advisory",
+        process: "Request a private review from Slop.",
+      },
+      disclosure: "The maintainer controls public disclosure.",
+      safeHarbor: "Good-faith testing within these rules is authorized.",
+    };
+    const deployment = {
+      network: "base-sepolia" as const,
+      vault: `0x${"1".repeat(40)}`,
+      asset: "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+      owner: `0x${"2".repeat(40)}`,
+      identityAuthority: `0x${"3".repeat(40)}`,
+      feeRecipient: `0x${"4".repeat(40)}`,
+      factory: `0x${"5".repeat(40)}`,
+      registrar: `0x${"6".repeat(40)}`,
+      factoryCodeSha256: "c".repeat(64),
+      codeSha256: "d".repeat(64),
+      deploymentTransaction: `0x${"e".repeat(64)}`,
+      sourceCommit: "a".repeat(40),
+      bindingDelaySeconds: "3600",
+      rotationDelaySeconds: null,
+      programId: null,
+      projectPda: null,
+      networkDomain: null,
+      upgradeAuthority: null,
+    };
+    const settlement = {
+      schemaVersion: "1" as const,
+      effectiveCycle: "2026-10",
+      chain: "base" as const,
+      feeBasisPoints: 2500 as const,
+      withdrawalFeeBasisPoints: 200 as const,
+      feeMode: "deduct-from-gross" as const,
+      deployments: [deployment],
+    };
+    const untrusted = await create(
+      applicationManifest("open-registry", "example/open-registry", {
+        securityBounty: { ...program, settlement },
+      }),
+    );
+    expect(untrusted.status).toBe(422);
+    const initialProgram: SecurityBountyTerms = {
+      ...program,
+      status: "open",
+      rewardMode: "bounty-only",
+      fundingPolicy: "after-approval",
+      scope: {
+        ...program.scope,
+        sourceRevisions: [
+          { repository: "example/bounty-first", commit: "b".repeat(40) },
+        ],
+      },
+      intake: { ...program.intake, repository: "example/bounty-first" },
+    };
+    const initial = (securityBounty: SecurityBountyTerms) =>
+      applicationManifest("bounty-first", "example/bounty-first", {
+        reward: {
+          ...(applicationManifest("bounty-first", "example/bounty-first")
+            .reward as object),
+          monthlyCapMinor: "0",
+          monthlyCapDisplay: "$0",
+        },
+        securityBounty,
+      });
+    for (const role of ["technical", "financial", "dispute"] as const) {
+      const denied = await create(
+        initial({
+          ...initialProgram,
+          approvers: { ...initialProgram.approvers, [role]: [MODERATOR] },
+        }),
+      );
+      expect(denied.status).toBe(422);
+      expect((await denied.json()).error).toBe("security_contacts_restricted");
+    }
+    for (const invalid of [
+      {
+        ...initialProgram,
+        sponsor: { name: "Other", githubId: MODERATOR.githubId },
+      },
+      {
+        ...initialProgram,
+        approvers: {
+          ...initialProgram.approvers,
+          technical: [{ ...APPLICANT, githubLogin: MODERATOR.githubLogin }],
+        },
+      },
+    ]) {
+      const denied = await create(initial(invalid));
+      expect(denied.status).toBe(422);
+      expect((await denied.json()).error).toBe("security_contacts_restricted");
+    }
+    for (const invalid of [
+      { ...initialProgram, fundingPolicy: undefined },
+      {
+        ...initialProgram,
+        funding: {
+          state: "verified-available" as const,
+          evidence: "The creator claims funds exist",
+          verifiedAt: deps.now().toISOString(),
+        },
+      },
+    ]) {
+      const denied = await create(initial(invalid));
+      expect(denied.status).toBe(422);
+      expect((await denied.json()).error).toBe("invalid_manifest");
+    }
+    access = { ...ADMIN_ACCESS, permission: "read", roleName: "read" };
+    expect(
+      (
+        await call("POST", "projects", "applicant", {
+          manifest: initial(initialProgram),
+        })
+      ).status,
+    ).toBe(403);
+    const createdBounty = await create(
+      initial({
+        ...initialProgram,
+        settlement: { ...settlement, deployments: [] },
+      }),
+    );
+    expect(createdBounty.status).toBe(201);
+    expect((await createdBounty.json()).project).toMatchObject({
+      status: "paused",
+      manifest: {
+        reward: { monthlyCapMinor: "0", paymentMode: "disabled" },
+        securityBounty: {
+          status: "open",
+          rewardMode: "bounty-only",
+          fundingPolicy: "after-approval",
+          funding: { state: "pledged" },
+          approvers: initialProgram.approvers,
+        },
+      },
+    });
+    access = ADMIN_ACCESS;
+    const removeEmptyVaultConfig = await call(
+      "PUT",
+      "projects/bounty-first",
+      "applicant",
+      {
+        expectedRevision: 1,
+        manifest: initial(initialProgram),
+      },
+    );
+    expect(removeEmptyVaultConfig.status).toBe(200);
+    expect(
+      (await persistence.getProject("bounty-first"))?.manifest.securityBounty
+        ?.settlement,
+    ).toBeUndefined();
+    const fullAwardProgram: SecurityBountyTerms = {
+      ...initialProgram,
+      split: { researcherBasisPoints: 10000, slopBasisPoints: 0 },
+    };
+    const createWaiver = await create(initial(fullAwardProgram));
+    expect(createWaiver.status).toBe(422);
+    expect((await createWaiver.json()).error).toBe("security_split_restricted");
+    const bounty = await persistence.getProject("bounty-first");
+    if (!bounty) throw new Error("Missing newly created bounty");
+    const ownerWaiver = await call(
+      "PUT",
+      "projects/bounty-first",
+      "applicant",
+      {
+        expectedRevision: bounty.revision,
+        manifest: { ...bounty.manifest, securityBounty: fullAwardProgram },
+      },
+    );
+    expect(ownerWaiver.status).toBe(422);
+    expect((await ownerWaiver.json()).error).toBe("security_split_restricted");
+    const approvedWaiver = await call(
+      "PUT",
+      "admin/projects/bounty-first/manifest",
+      "admin",
+      {
+        expectedRevision: bounty.revision,
+        manifest: { ...bounty.manifest, securityBounty: fullAwardProgram },
+        reason: "Approve the full-award exception for this project.",
+      },
+    );
+    expect(approvedWaiver.status).toBe(200);
+    const approvedBounty = await persistence.getProject("bounty-first");
+    if (!approvedBounty) throw new Error("Missing admin-approved bounty");
+    const preserved = await call("PUT", "projects/bounty-first", "applicant", {
+      expectedRevision: approvedBounty.revision,
+      manifest: {
+        ...approvedBounty.manifest,
+        securityBounty: {
+          ...fullAwardProgram,
+          disclosure: "The owner approves the exact private disclosure.",
+        },
+      },
+    });
+    expect(preserved.status).toBe(200);
+    const currentBounty = await persistence.getProject("bounty-first");
+    if (!currentBounty) throw new Error("Missing revised bounty");
+    expect(currentBounty.manifest.securityBounty?.split).toEqual(
+      fullAwardProgram.split,
+    );
+    const replaceApprovedSplit = await call(
+      "PUT",
+      "projects/bounty-first",
+      "applicant",
+      {
+        expectedRevision: currentBounty.revision,
+        manifest: { ...currentBounty.manifest, securityBounty: initialProgram },
+      },
+    );
+    expect(replaceApprovedSplit.status).toBe(422);
+    expect((await replaceApprovedSplit.json()).error).toBe(
+      "security_split_restricted",
+    );
+    expect(
+      JSON.parse(
+        (await persistence.getRevisionText("bounty-first", bounty.revision))
+          ?.manifestText ?? "{}",
+      ).securityBounty.split,
+    ).toEqual(initialProgram.split);
+    const solanaToken = "So11111111111111111111111111111111111111112";
+    const metadataReader = deps.readTokenMetadata;
+    deps.readTokenMetadata = async (network, address) => {
+      if (network === "solana" && address === solanaToken) {
+        tokenReads.push(`${network}:${address}`);
+        return { decimals: 9, symbol: null };
+      }
+      return metadataReader(network, address);
+    };
+    const assets = [
+      ...(["base", "ethereum", "robinhood", "solana"] as const).flatMap(
+        (network) =>
+          (["stablecoin", "native"] as const).map((kind) =>
+            rewardAssetChoice(network, kind, "", ""),
+          ),
+      ),
+      rewardAssetChoice("robinhood", "token", TOKEN, "UNVERIFIED"),
+      rewardAssetChoice("solana", "token", solanaToken, "WSOL"),
+    ];
+    for (const choice of assets) {
+      const id = `bounty-${choice.network}-${choice.kind}`;
+      const repository = `example/${id}`;
+      const offered = {
+        ...initialProgram,
+        amount: {
+          currency: "FORGED",
+          decimals: 0,
+          network: "ethereum",
+          grossMinor: "0",
+          asset: {
+            ...choice,
+            decimals: 0,
+            chainId: null,
+            cluster: null,
+            verifiedAt: "1900-01-01T00:00:00.000Z",
+          },
+        },
+        intake: { ...initialProgram.intake, repository },
+        scope: {
+          ...initialProgram.scope,
+          sourceRevisions: [{ repository, commit: "b".repeat(40) }],
+        },
+      };
+      const manifest = applicationManifest(id, repository, {
+        reward: {
+          ...(initial(initialProgram).reward as object),
+        },
+        securityBounty: offered,
+      });
+      if (choice.network === "base" && choice.kind === "native") {
+        const missingUnits = await create(manifest);
+        expect(missingUnits.status).toBe(422);
+        expect(await persistence.getProject(id)).toBeNull();
+      }
+      const response = await create(manifest, { bountyAmount: "1.25" });
+      if (response.status !== 201) throw new Error(await response.text());
+      const setupFunding = (await response.json()).setup.funding;
+      expect(setupFunding).toMatchObject({ mode: "bounty", state: "pledged" });
+      const stored = await persistence.getProject(id);
+      if (!stored?.manifest.securityBounty)
+        throw new Error("Missing asset bounty");
+      const amount = stored.manifest.securityBounty.amount;
+      const definition = REWARD_ASSET_NETWORKS[choice.network];
+      const decimals =
+        choice.kind === "token"
+          ? choice.network === "solana"
+            ? 9
+            : 18
+          : definition[choice.kind].decimals;
+      expect(amount).toEqual({
+        currency:
+          choice.kind === "token" && choice.network !== "solana"
+            ? "OPEN"
+            : choice.symbol,
+        decimals,
+        network: choice.network,
+        grossMinor: `125${"0".repeat(decimals - 2)}`,
+        asset: {
+          ...choice,
+          symbol:
+            choice.kind === "token" && choice.network !== "solana"
+              ? "OPEN"
+              : choice.symbol,
+          decimals,
+          chainId: definition.chainId,
+          cluster: definition.cluster,
+          verifiedAt: deps.now().toISOString(),
+        },
+      });
+      expect(setupFunding).toMatchObject({
+        network: choice.network,
+        symbol: amount.currency,
+        decimals,
+        awardAmountMinor: amount.grossMinor,
+      });
+      expect(stored.manifest.securityBounty.settlement).toBeUndefined();
+      expect(stored.manifest.reward.monthlyCapMinor).toBe("0");
+      // Stored precision and identity win over a later client's forged metadata.
+      const preservedAsset = await call("PUT", `projects/${id}`, "applicant", {
+        expectedRevision: stored.revision,
+        manifest: {
+          ...stored.manifest,
+          headline: "Updated public scope for this private bounty",
+          securityBounty: {
+            ...stored.manifest.securityBounty,
+            amount: { ...offered.amount, grossMinor: amount.grossMinor },
+          },
+        },
+      });
+      if (preservedAsset.status !== 200)
+        throw new Error(await preservedAsset.text());
+      expect(
+        (await persistence.getProject(id))?.manifest.securityBounty?.amount,
+      ).toEqual(amount);
+      const changedWithoutUnits = await call(
+        "PUT",
+        `projects/${id}`,
+        "applicant",
+        {
+          expectedRevision: stored.revision + 1,
+          manifest: {
+            ...stored.manifest,
+            securityBounty: {
+              ...stored.manifest.securityBounty,
+              amount: { ...amount, grossMinor: "4" },
+            },
+          },
+        },
+      );
+      expect(changedWithoutUnits.status).toBe(422);
+    }
+    await listProject();
+    async function change(next: SecurityBountyTerms | undefined) {
+      const current = await persistence.getProject("open-registry");
+      if (!current) throw new Error("Missing project");
+      const { securityBounty: _old, ...manifest } = current.manifest;
+      return call("PUT", "projects/open-registry", "applicant", {
+        expectedRevision: current.revision,
+        manifest: { ...manifest, ...(next ? { securityBounty: next } : {}) },
+      });
+    }
+    const published = await change(program);
+    expect(published.status).toBe(200);
+    expect(
+      (await published.json()).project.manifest.securityBounty.status,
+    ).toBe("paused");
+    expect(
+      (
+        await change({
+          ...program,
+          status: "open",
+          funding: {
+            state: "verified-available",
+            evidence: "Owner claims funds exist",
+            verifiedAt: deps.now().toISOString(),
+          },
+        })
+      ).status,
+    ).toBe(422);
+    expect((await change({ ...program, settlement })).status).toBe(422);
+    // An explicit after-approval offer can accept reports before the owner
+    // deposits. Publishing it must not invent a balance or a vault.
+    const pledged = await change({
+      ...program,
+      status: "open",
+      fundingPolicy: "after-approval",
+      amount: { ...program.amount, grossMinor: "10000000000" },
+      capacity: { ...program.capacity, awards: null },
+    });
+    expect(pledged.status).toBe(200);
+    const pledgedProgram = (await pledged.json()).project.manifest
+      .securityBounty;
+    expect(pledgedProgram.status).toBe("open");
+    expect(pledgedProgram.funding).toEqual({ state: "pledged" });
+    expect(pledgedProgram.settlement).toBeUndefined();
+    expect(pledgedProgram.capacity.awards).toBeNull();
+    // Restoring the legacy prefunded policy preserves its funding gate.
+    expect((await change({ ...program, status: "open" })).status).toBe(422);
+    expect((await change(program)).status).toBe(200);
+    // Exercise owner registration after the chain-verifier boundary. The EVM
+    // browser workflow separately proves this boundary against a real chain.
+    const current = await persistence.getProject("open-registry");
+    if (!current) throw new Error("Missing bounty project");
+    let verificationReads = 0;
+    deps.vaultSetup = {
+      networks: async () => ["base-sepolia"],
+      review: async () => {
+        throw new Error("Not used in this API boundary case");
+      },
+      register: async (reviewed, actor, input, transactionId) => {
+        expect(reviewed.revision).toBe(current.revision);
+        expect(actor.githubId).toBe(APPLICANT.githubId);
+        expect(input.payoutPolicy).toBe("security-bounty");
+        expect(transactionId).toBe(deployment.deploymentTransaction);
+        verificationReads++;
+        return deployment;
+      },
+    };
+    const registration = {
+      step: "register",
+      expectedRevision: current.revision,
+      payoutPolicy: "security-bounty",
+      network: "base-sepolia",
+      claimId: "verified-owner",
+      automatic: false,
+      transactionId: deployment.deploymentTransaction,
+    };
+    expect(
+      (
+        await call("POST", "project-vaults/open-registry", "applicant", {
+          ...registration,
+          automatic: true,
+        })
+      ).status,
+    ).toBe(400);
+    const registered = await call(
+      "POST",
+      "project-vaults/open-registry",
+      "applicant",
+      registration,
+    );
+    expect(registered.status).toBe(200);
+    expect((await registered.json()).project.securityBounty.settlement).toEqual(
+      settlement,
+    );
+    expect(
+      (
+        await call(
+          "POST",
+          "project-vaults/open-registry",
+          "applicant",
+          registration,
+        )
+      ).status,
+    ).toBe(200);
+    expect(verificationReads).toBe(1);
+    const observedAt = deps.now().toISOString();
+    sqlite
+      .prepare(
+        `INSERT INTO security_vault_snapshots(project_id,network,chain,vault,asset_address,asset_decimals,total_deposited,total_paid,total_payout_fees,total_gross_withdrawn,total_withdrawal_fees,total_service_fees,free_balance,reserved_principal,reserved_fees,accrued_fees,reserved,block_number,block_time,observed_at) VALUES('open-registry','base-sepolia','base',?,?,6,'2000000','0','0','0','0','0','2000000',NULL,NULL,NULL,'0','64',?,?)`,
+      )
+      .run(deployment.vault, deployment.asset, observedAt, observedAt);
+    const privatePath = "project-vaults/open-registry?purpose=security-bounty";
+    expect((await call("GET", privatePath)).status).toBe(401);
+    access = { ...ADMIN_ACCESS, permission: "read", roleName: "read" };
+    expect((await call("GET", privatePath, "applicant")).status).toBe(403);
+    access = ADMIN_ACCESS;
+    const privateFunds = await call("GET", privatePath, "applicant");
+    expect(privateFunds.headers.get("cache-control")).toBe("no-store");
+    expect((await privateFunds.json()).funds).toMatchObject({
+      availableMinor: "2000000",
+      freeMinor: "2000000",
+    });
+    expect(
+      await (await call("GET", "projects/open-registry")).text(),
+    ).not.toMatch(/freeMinor|availableMinor/);
+    const opened = await change({ ...program, settlement, status: "open" });
+    expect(opened.status).toBe(200);
+    const openedProgram = (await opened.json()).project.manifest
+      .securityBounty as SecurityBountyTerms;
+    expect(openedProgram.funding).toMatchObject({
+      state: "verified-available",
+      verifiedAt: observedAt,
+    });
+    const openedRevision = await persistence.getProject("open-registry");
+    if (!openedRevision) throw new Error("Missing open revision");
+    const earlierText = sqlite
+      .prepare(
+        "SELECT manifest FROM project_revisions WHERE project_id=? AND revision=?",
+      )
+      .get("open-registry", openedRevision.revision);
+    const changed = await change({
+      ...openedProgram,
+      disclosure: "Contact the maintainer before public disclosure.",
+    });
+    expect(changed.status).toBe(200);
+    expect(
+      sqlite
+        .prepare(
+          "SELECT manifest FROM project_revisions WHERE project_id=? AND revision=?",
+        )
+        .get("open-registry", openedRevision.revision),
+    ).toEqual(earlierText);
+    deps.now = () => new Date("2026-10-18T13:00:00.000Z");
+    expect((await change({ ...openedProgram, status: "paused" })).status).toBe(
+      200,
+    );
+    const stale = await change({ ...openedProgram, status: "open" });
+    expect(stale.status).toBe(422);
+    expect((await stale.json()).error).toBe("security_funding_unavailable");
+    access = { ...ADMIN_ACCESS, permission: "read", roleName: "read" };
+    expect(
+      (await change({ ...program, settlement, status: "closed" })).status,
+    ).toBe(403);
+    access = ADMIN_ACCESS;
+    expect(
+      (await change({ ...program, settlement, status: "closed" })).status,
+    ).toBe(200);
+    expect((await change(undefined)).status).toBe(422);
+    // A later account restriction stops new registration, but does not hide
+    // the owner's existing funded state or prevent its read-only recovery.
+    deps.now = () => new Date(observedAt);
+    seedParticipationBan(sqlite, APPLICANT, ADMIN, observedAt);
+    const restrictedRead = await call("GET", privatePath, "applicant");
+    expect(restrictedRead.status).toBe(200);
+    expect(await restrictedRead.json()).toMatchObject({
+      canSetup: false,
+      funds: { availableMinor: "2000000" },
+    });
+    const restrictedWrite = await call(
+      "POST",
+      "project-vaults/open-registry",
+      "applicant",
+      registration,
+    );
+    expect(restrictedWrite.status).toBe(403);
+    expect((await restrictedWrite.json()).error).toBe("maintainer_banned");
+  });
+
+  test("reads token decimals from chain once, stores the amount in base units and keeps them on later revisions", async () => {
+    const created = await create(
+      applicationManifest("open-registry", "example/open-registry", {
+        rewardAsset: {
+          network: "base",
+          kind: "token",
+          address: TOKEN.toUpperCase().replace("0X", "0x"),
+          symbol: "OPN",
+          decimals: 0,
+        },
+        reward: {
+          ...(applicationManifest("x", "a/b").reward as object),
+          chain: "base",
+          currency: "OPN",
+        },
+      }),
+      // Whole token units; the server converts with the decimals it reads.
+      { monthlyAmount: "1000.5" },
+    );
+    expect(created.status).toBe(201);
+    expect(tokenReads).toEqual([`base:${TOKEN}`]);
+    // The stored pool must also load through the public funding projection.
+    const tokenProject = await persistence.getProject("open-registry");
+    if (!tokenProject) throw new Error("token project was not created");
+    const basis = deriveAllocationFundingBasis(
+      tokenProject.manifest,
+      "2026-10",
+    );
+    expect(basis.monthlyCapMinor).toBe("1000500000000000000000");
+    expect(allocationFundingMinor(basis)).toBe(0n);
+    // Owner decision D11: 1,000.5 tokens of 18 decimals, never dollars.
+    expect(
+      (await persistence.getProject("open-registry"))?.manifest.reward,
+    ).toMatchObject({
+      monthlyCapMinor: "1000500000000000000000",
+      monthlyCapDisplay: "1,000.5 OPEN",
+    });
+    const project = await persistence.getProject("open-registry");
+    expect(project?.manifest.rewardAsset).toEqual({
+      network: "base",
+      kind: "token",
+      address: TOKEN,
+      symbol: "OPEN",
+      decimals: 18,
+      chainId: "8453",
+      cluster: null,
+      verifiedAt: "2026-10-18T12:00:00.000Z",
+    });
+    expect(project?.manifest.reward.currency).toBe("OPEN");
+    const revised = await call(
+      "PUT",
+      "admin/projects/open-registry/manifest",
+      "admin",
+      {
+        manifest: {
+          ...project?.manifest,
+          rewardAsset: { ...project?.manifest.rewardAsset, decimals: 2 },
+          headline: "Reproducible research tooling, revised.",
+        },
+        expectedRevision: 1,
+        reason: "Headline update",
+      },
+    );
+    expect(revised.status).toBe(200);
+    expect(tokenReads).toHaveLength(1);
+    expect(
+      (await persistence.getProject("open-registry"))?.manifest.rewardAsset
+        ?.decimals,
+    ).toBe(18);
+    access = ADMIN_ACCESS;
+    for (const [time, amount] of [
+      ["2026-10-18T12:00:00.000Z", "500"],
+      ["2026-11-18T12:00:00.000Z", "250"],
+    ]) {
+      deps.now = () => new Date(time);
+      const current = await persistence.getProject("open-registry");
+      if (!current) throw new Error("token project disappeared");
+      const changed = await call("PUT", "projects/open-registry", "applicant", {
+        manifest: current.manifest,
+        expectedRevision: current.revision,
+        monthlyAmount: amount,
+      });
+      expect(changed.status, JSON.stringify(await changed.json())).toBe(200);
+    }
+    const current = await persistence.getProject("open-registry");
+    if (!current) throw new Error("token project disappeared");
+    const oldRevision = await persistence.getRevisionText(
+      "open-registry",
+      current.revision,
+    );
+    const fields = rewardFields(
+      {
+        mode: "monthly",
+        network: "base",
+        assetKind: "stablecoin",
+        tokenAddress: "",
+        tokenSymbol: "",
+        monthlyAmount: "1000",
+      },
+      deps.now(),
+    );
+    const changedAsset = await call(
+      "PUT",
+      "projects/open-registry",
+      "applicant",
+      {
+        manifest: {
+          ...current.manifest,
+          ...fields,
+          reward: {
+            ...current.manifest.reward,
+            ...(fields.reward as Record<string, unknown>),
+            rewardStartAt: current.manifest.reward.rewardStartAt,
+          },
+        },
+        expectedRevision: current.revision,
+        monthlyAmount: "1000",
+      },
+    );
+    expect(changedAsset.status, JSON.stringify(await changedAsset.json())).toBe(
+      200,
+    );
+    const changed = await persistence.getProject("open-registry");
+    if (!changed) throw new Error("changed project disappeared");
+    expect(changed.manifest.reward).toMatchObject({
+      currency: "USDC",
+      monthlyCapMinor: "1000000000",
+      rewardStartAt: current.manifest.reward.rewardStartAt,
+    });
+    expect(resolveRewardCapMinor(changed.manifest, "2026-10")).toBe("0");
+    expect(resolveRewardCapMinor(changed.manifest, "2026-11")).toBe("0");
+    expect(resolveRewardCapMinor(changed.manifest, "2026-12")).toBe(
+      "1000000000",
+    );
+    expect(
+      await persistence.getRevisionText("open-registry", current.revision),
+    ).toEqual(oldRevision);
+  });
+
+  test("refuses an unverifiable or malformed token and stores nothing", async () => {
+    const base = applicationManifest("open-registry", "example/open-registry");
+    for (const [address, error] of [
+      ["0x2222222222222222222222222222222222222222", "reward_asset_unverified"],
+      ["0x1234", "invalid_manifest"],
+    ]) {
+      const response = await create({
+        ...base,
+        rewardAsset: {
+          network: "ethereum",
+          kind: "token",
+          address,
+          symbol: "BAD",
+        },
+      });
+      expect(response.status).toBe(422);
+      expect((await response.json()).error).toBe(error);
+    }
+    expect(await persistence.listProjects()).toEqual([]);
+  });
+
+  test("a rate-limited or unreachable token RPC asks the owner to retry, not to change the token", async () => {
+    // The real reader against a fixture RPC: only the network answer varies.
+    let answer: (method: string) => Promise<Response>;
+    deps.readTokenMetadata = rpcTokenMetadataReader(
+      (async (_url, init) =>
+        answer(JSON.parse(String(init?.body)).method)) as typeof fetch,
+      { robinhood: "https://rpc.fixture.invalid" },
+    );
+    const submit = () =>
+      create(
+        {
+          ...applicationManifest("open-registry", "example/open-registry"),
+          rewardAsset: {
+            network: "robinhood",
+            kind: "token",
+            address: TOKEN,
+            symbol: "OPEN",
+          },
+        },
+        { monthlyAmount: "1000" },
+      );
+    const unavailable = [
+      async () => new Response("Too Many Requests", { status: 429 }),
+      async () => new Response("Bad Gateway", { status: 502 }),
+      async () =>
+        Response.json({
+          jsonrpc: "2.0",
+          id: 1,
+          error: { code: -32603, message: "Internal error" },
+        }),
+      async () =>
+        Response.json({
+          jsonrpc: "2.0",
+          id: 1,
+          error: { code: -32005, message: "Limit exceeded" },
+        }),
+      async () => {
+        throw new TypeError("fetch failed");
+      },
+    ];
+    for (const failure of unavailable) {
+      answer = failure;
+      const response = await submit();
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({
+        error: "reward_asset_unverified",
+      });
+    }
+    // A chain that answers and has no contract at the address still refuses it.
+    answer = async (method) =>
+      Response.json({
+        jsonrpc: "2.0",
+        id: 1,
+        result: method === "eth_chainId" ? "0x1237" : "0x",
+      });
+    const refused = await submit();
+    expect(refused.status).toBe(422);
+    expect(await refused.json()).toMatchObject({
+      error: "reward_asset_unverified",
+    });
+    expect(await persistence.listProjects()).toEqual([]);
+    // A listed token keeps the submitted symbol when its answer is malformed.
+    const word = (value: string) => value.padStart(64, "0");
+    const symbolBytes = (bytes: number[]) =>
+      bytes
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("")
+        .padEnd(64, "0");
+    let symbolAnswer = `0x${word("20")}${word("4")}${symbolBytes([0x4f, 0x50, 0x45, 0x4e])}`;
+    deps.readTokenMetadata = rpcTokenMetadataReader(
+      (async (_url, init) => {
+        const body = JSON.parse(String(init?.body)) as {
+          method: string;
+          params: [{ data: string }];
+        };
+        const result =
+          body.method === "eth_chainId"
+            ? "0x1237"
+            : body.method === "eth_getCode"
+              ? "0x6000"
+              : body.params[0].data === "0x313ce567"
+                ? `0x${word("12")}`
+                : symbolAnswer;
+        return Response.json({ jsonrpc: "2.0", id: 1, result });
+      }) as typeof fetch,
+      { robinhood: "https://rpc.fixture.invalid" },
+    );
+    const listed = await submit();
+    expect(listed.status, JSON.stringify(await listed.clone().json())).toBe(
+      201,
+    );
+    const changeAsset = async (index: number) => {
+      const current = await persistence.getProject("open-registry");
+      if (!current) throw new Error("listed token project disappeared");
+      access = ADMIN_ACCESS;
+      return call("PUT", "projects/open-registry", "applicant", {
+        manifest: {
+          ...current.manifest,
+          rewardAsset: {
+            ...current.manifest.rewardAsset,
+            address: `0x${String(index + 2).repeat(40)}`,
+          },
+        },
+        expectedRevision: current.revision,
+        monthlyAmount: "1000",
+      });
+    };
+    const malformedSymbols = [
+      // A declared length past the end of the answer has no complete body.
+      `0x${word("20")}${word("20")}${word("9")}4f50`,
+      // A string offset that is not a whole ABI word has no body to read.
+      `0x${"aa".repeat(31)}ff${word("20")}${word("4")}4f50454e`,
+      // An inner zero byte in a bytes32 symbol is not trailing padding.
+      `0x${symbolBytes([0x4f, 0x00, 0x50])}`,
+    ];
+    for (const [index, malformed] of malformedSymbols.entries()) {
+      symbolAnswer = malformed;
+      const changed = await changeAsset(index);
+      expect(changed.status, JSON.stringify(await changed.clone().json())).toBe(
+        200,
+      );
+      const stored = await persistence.getProject("open-registry");
+      expect(stored?.manifest.rewardAsset, malformed).toMatchObject({
+        symbol: "OPEN",
+        decimals: 18,
+      });
+      expect(stored?.manifest.reward.currency).toBe("OPEN");
+    }
+  });
+
+  test("refuses a project id too long for its reviewer skill name", async () => {
+    const id = "reproducible-research-toolkit-for-everyone-x";
+    const response = await create(
+      applicationManifest(id, "example/open-registry"),
+    );
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({
+      error: "invalid_manifest",
+    });
+    expect(await persistence.listProjects()).toEqual([]);
+  });
+
+  test("refuses activation when historical clean metadata lacks canonical closure", async () => {
+    await listProject();
+    const current = await persistence.getProject("open-registry");
+    const activate = (manifest: unknown) =>
+      call("PUT", "admin/projects/open-registry/manifest", "admin", {
+        manifest,
+        expectedRevision: 1,
+        reason: "Activate",
+      });
+    // Without the contribution fields the project has no generated skill.
+    if (current === null) throw new Error("project was not listed");
+    const { contribution: _fields, ...withoutFields } =
+      current.manifest as unknown as Record<string, unknown>;
+    const refused = await activate({ ...withoutFields, status: "active" });
+    expect(refused.status).toBe(422);
+    // An unscanned revision cannot activate either (VET-01).
+    const unscanned = await activate({ ...current.manifest, status: "active" });
+    expect(unscanned.status).toBe(422);
+    expect((await unscanned.json()).error).toBe("vetting_required");
+    await seedHistoricalResult("open-registry");
+    expect((await persistence.getProject("open-registry"))?.status).toBe(
+      "paused",
+    );
+    const accepted = await activate({
+      ...current?.manifest,
+      status: "active",
+      contribution: CONTRIBUTION,
+    });
+    expect(accepted.status).toBe(422);
+    expect((await accepted.json()).error).toBe("vetting_required");
+    expect((await persistence.getProject("open-registry"))?.status).toBe(
+      "paused",
+    );
+  });
+
+  test("creates a project only for current GitHub authority and refuses contradicted facts", async () => {
+    const manifest = applicationManifest(
+      "open-registry",
+      "example/open-registry",
+    );
+    access = {
+      installation: "installed",
+      installationId: 7,
+      permission: "write",
+      roleName: "maintain",
+    };
+    control = () => ({
+      state: "mismatch",
+      reason: "Repository or steward facts do not match GitHub",
+    });
+    const refused = await call("POST", "projects", "applicant", { manifest });
+    expect(refused.status).toBe(422);
+    expect(await refused.json()).toMatchObject({
+      error: "invalid_manifest",
+    });
+    // Matching public facts without the installation create nothing:
+    // install Slopbot first (owner decision D11).
+    control = () => ({ state: "matched" });
+    access = { installation: "missing" };
+    const uninstalled = await call("POST", "projects", "applicant", {
+      manifest,
+    });
+    expect(uninstalled.status).toBe(409);
+    expect(await uninstalled.json()).toMatchObject({
+      error: "slopbot_required",
+    });
+    // The installation is authoritative: read access is not enough.
+    access = {
+      installation: "installed",
+      installationId: 7,
+      permission: "read",
+      roleName: "triage",
+    };
+    const reader = await call("POST", "projects", "applicant", { manifest });
+    expect(reader.status).toBe(403);
+    // A failed lookup is a retry, not an application waiting for an admin.
+    deps.repositoryControl = async () => {
+      throw new Error("GitHub is down");
+    };
+    access = "unavailable";
+    const retry = await call("POST", "projects", "applicant", { manifest });
+    expect(retry.status).toBe(503);
+    expect((await retry.json()).error).toBe("github_unavailable");
+    expect(await persistence.listProjects()).toEqual([]);
+    // Once GitHub answers again, maintain access read through the
+    // installation creates the project.
+    deps.repositoryControl = async () => ({ state: "matched" });
+    access = {
+      installation: "installed",
+      installationId: 7,
+      permission: "write",
+      roleName: "maintain",
+    };
+    const accepted = await call("POST", "projects", "applicant", { manifest });
+    expect(accepted.status).toBe(201);
+    const body = await accepted.json();
+    expect(body.project).toMatchObject({ id: "open-registry", revision: 1 });
+    expect(body.setup.checks.authority).toMatchObject({
+      state: "verified",
+    });
+    const revisions = sqlite
+      .query("SELECT actor_github_login FROM project_revisions")
+      .all() as { actor_github_login: string }[];
+    expect(revisions).toEqual([
+      {
+        actor_github_login: "e2e-applicant",
+      },
+    ]);
+    // No application, admin email or approval notice is created.
+    expect(
+      sqlite.query("SELECT COUNT(*) AS n FROM project_applications").get(),
+    ).toEqual({ n: 0 });
+    expect(
+      sqlite.query("SELECT COUNT(*) AS n FROM notifications").get(),
+    ).toEqual({ n: 0 });
+    // The same repository cannot be listed twice.
+    const again = await call("POST", "projects", "applicant", {
+      manifest: applicationManifest("second-registry", "example/open-registry"),
+    });
+    expect(again.status).toBe(409);
+  });
+
+  test("serves the exact approved bytes of a revision", async () => {
+    await listProject();
+    const response = await call("GET", "project-revisions/open-registry/1");
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(await sha256Hex(body.manifestText)).toBe(body.manifestSha256);
+    expect(JSON.parse(body.manifestText)).toMatchObject({
+      id: "open-registry",
+      contribution: CONTRIBUTION,
+    });
+    expect(
+      (await call("GET", "project-revisions/open-registry/2")).status,
+    ).toBe(404);
+  });
+
+  test("looks up GitHub only for a signed-in visitor and caches the facts", async () => {
+    const ordinary = deps.github.fetch;
+    const ownedUrl = `https://api.github.com/users/${APPLICANT.githubLogin}/repos?type=owner&sort=pushed&per_page=100&page=1`;
+    deps.github.fetch = async (url, init) => {
+      if (url !== ownedUrl) return ordinary(url, init);
+      githubReads.push(url);
+      return Response.json([
+        {
+          full_name: `${APPLICANT.githubLogin}/open-tool`,
+          description: "Public tool",
+          private: false,
+          fork: false,
+          archived: false,
+        },
+        {
+          full_name: `${APPLICANT.githubLogin}/forked-tool`,
+          description: "Maintained public fork",
+          private: false,
+          fork: true,
+          archived: false,
+        },
+        {
+          full_name: `${APPLICANT.githubLogin}/private-tool`,
+          description: "Private",
+          private: true,
+          fork: false,
+          archived: false,
+        },
+        {
+          full_name: `${APPLICANT.githubLogin}/archived-tool`,
+          description: "Archived",
+          private: false,
+          fork: false,
+          archived: true,
+        },
+      ]);
+    };
+    expect(
+      (await call("GET", "project-github/owned-repositories")).status,
+    ).toBe(401);
+    expect(githubReads).toHaveLength(0);
+    expect(
+      (await call("GET", "project-github/repositories/example/open-registry"))
+        .status,
+    ).toBe(401);
+    const first = await call(
+      "GET",
+      "project-github/repositories/example/open-registry",
+      "applicant",
+    );
+    expect(first.status).toBe(200);
+    expect(first.headers.get("cache-control")).toBe("private, max-age=300");
+    expect((await first.json()).repository).toMatchObject({
+      repository: "example/open-registry",
+      numericId: "123456789",
+      branches: ["main", "development"],
+      branchCommits: { main: "a".repeat(40), development: "b".repeat(40) },
+      license: { state: "unknown" },
+    });
+    const reads = githubReads.length;
+    const second = await call(
+      "GET",
+      "project-github/repositories/example/open-registry",
+      "applicant",
+    );
+    expect(second.headers.get("x-slop-cache")).toBe("hit");
+    expect(githubReads).toHaveLength(reads);
+    const missing = await call(
+      "GET",
+      "project-github/repositories/example/missing",
+      "applicant",
+    );
+    expect(missing.status).toBe(404);
+    const owned = await call(
+      "GET",
+      "project-github/owned-repositories",
+      "applicant",
+    );
+    expect(owned.status).toBe(200);
+    expect(await owned.json()).toEqual({
+      repositories: [
+        {
+          repository: `${APPLICANT.githubLogin}/open-tool`,
+          description: "Public tool",
+        },
+        {
+          repository: `${APPLICANT.githubLogin}/forked-tool`,
+          description: "Maintained public fork",
+        },
+      ],
+    });
+    const ownedReads = githubReads.length;
+    const cachedOwned = await call(
+      "GET",
+      "project-github/owned-repositories",
+      "applicant",
+    );
+    expect(cachedOwned.headers.get("x-slop-cache")).toBe("hit");
+    expect(githubReads).toHaveLength(ownedReads);
+  });
+
+  for (const reused of [false, true]) {
+    test(`the owned repository picker follows a renamed account when the old login is ${reused ? "reused" : "missing"}`, async () => {
+      const reads: string[] = [];
+      deps.github.fetch = async (url) => {
+        reads.push(url);
+        if (url === `https://api.github.com/user/${APPLICANT.githubId}`)
+          return Response.json({
+            id: Number(APPLICANT.githubId),
+            login: "renamed-applicant",
+            type: "User",
+          });
+        if (url.includes("/users/renamed-applicant/repos?"))
+          return Response.json([
+            {
+              full_name: "renamed-applicant/tool",
+              description: "The signed-in account's repository",
+              private: false,
+              archived: false,
+            },
+          ]);
+        if (reused)
+          return Response.json([
+            {
+              full_name: `${APPLICANT.githubLogin}/other-account-tool`,
+              description: "Another account's public repository",
+              private: false,
+              archived: false,
+            },
+          ]);
+        return Response.json({ message: "Not Found" }, { status: 404 });
+      };
+      const response = await call(
+        "GET",
+        "project-github/owned-repositories",
+        "applicant",
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        repositories: [
+          {
+            repository: "renamed-applicant/tool",
+            description: "The signed-in account's repository",
+          },
+        ],
+      });
+      expect(
+        reads.some((url) =>
+          url.includes(`/users/${APPLICANT.githubLogin}/repos?`),
+        ),
+      ).toBe(false);
+    });
+  }
+
+  test("an unavailable or mismatched account lookup never fills the owned repository picker", async () => {
+    for (const failure of ["missing", "outage", "mismatch"] as const) {
+      const reads: string[] = [];
+      deps.github.fetch = async (url) => {
+        reads.push(url);
+        if (failure === "missing") return new Response(null, { status: 404 });
+        if (failure === "outage") return new Response(null, { status: 500 });
+        return Response.json({
+          id: 1,
+          login: APPLICANT.githubLogin,
+          type: "User",
+        });
+      };
+      const response = await call(
+        "GET",
+        "project-github/owned-repositories",
+        "applicant",
+      );
+      expect(response.status).toBe(502);
+      expect(reads).toEqual([
+        `https://api.github.com/user/${APPLICANT.githubId}`,
+      ]);
+    }
+  });
+
+  test("returns every branch through the Slopbot repository read without losing pagination", async () => {
+    const ordinary = deps.github.fetch;
+    const firstPage =
+      "https://api.github.com/repos/example/open-registry/branches?per_page=100&page=1";
+    const secondPage = firstPage.replace(/&page=1$/u, "&page=2");
+    const nextPage =
+      "https://api.github.com/repositories/123456789/branches?per_page=100&page=2";
+    const pages: string[] = [];
+    const env = {
+      SLOPBOT_APP_ID: "1",
+      SLOPBOT_APP_PRIVATE_KEY: generateKeyPairSync("rsa", {
+        modulusLength: 2048,
+      })
+        .privateKey.export({ format: "pem", type: "pkcs8" })
+        .toString(),
+    };
+    const github = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.endsWith("/installation"))
+        return Response.json({ id: 42, suspended_at: null });
+      if (url.endsWith("/access_tokens"))
+        return Response.json({ token: "installation-token-fixture" });
+      if (url === firstPage) {
+        pages.push(url);
+        return Response.json(
+          [{ name: "development", commit: { sha: "b".repeat(40) } }],
+          {
+            headers: { link: `<${nextPage}>; rel="next"` },
+          },
+        );
+      }
+      if (url === secondPage) {
+        pages.push(url);
+        return Response.json([
+          { name: "main", commit: { sha: "a".repeat(40) } },
+          { name: "release/1.x" },
+        ]);
+      }
+      return ordinary(url, init ?? {});
+    }) as typeof fetch;
+    deps.github.fetch = slopbotGithubFetch(
+      { fetch: (request) => handleRepositoryRead(request, env, github) },
+      "https://api.github.com",
+      async () => {
+        throw new Error(
+          "The installed repository must not use anonymous reads",
+        );
+      },
+    );
+    const response = await call(
+      "GET",
+      "project-github/repositories/example/open-registry",
+      "applicant",
+    );
+    expect(response.status).toBe(200);
+    expect((await response.json()).repository).toMatchObject({
+      defaultBranch: "main",
+      branches: ["development", "main", "release/1.x"],
+      branchCommits: { development: "b".repeat(40), main: "a".repeat(40) },
+      license: { state: "unknown" },
+    });
+    expect(pages).toEqual([firstPage, secondPage]);
+  });
+
+  test("branch discovery refuses failed pages and links outside the repository", async () => {
+    const ordinary = deps.github.fetch;
+    for (const next of [
+      null,
+      "https://api.github.com/repos/other/repository/branches?per_page=100&page=2",
+    ]) {
+      deps.github.fetch = async (url, init) => {
+        if (url.includes("/branches?"))
+          return next === null
+            ? Response.json({ message: "Unavailable" }, { status: 503 })
+            : Response.json([{ name: "main" }], {
+                headers: { link: `<${next}>; rel="next"` },
+              });
+        return ordinary(url, init);
+      };
+      const response = await call(
+        "GET",
+        "project-github/repositories/example/open-registry",
+        "applicant",
+      );
+      expect(response.status).toBe(502);
+      expect((await response.json()).repository).toBeUndefined();
+    }
+    deps.github.fetch = async (url, init) =>
+      url.includes("/branches?")
+        ? Response.json([{ name: "main", commit: { sha: "not-a-commit" } }])
+        : ordinary(url, init);
+    const invalidCommit = await call(
+      "GET",
+      "project-github/repositories/example/open-registry",
+      "applicant",
+    );
+    expect(invalidCommit.status).toBe(502);
+    expect((await invalidCommit.json()).repository).toBeUndefined();
+  });
+});
+
+function files(path: string): string[] {
+  const absolute = join(resolve(import.meta.dir, ".."), path);
+  return readdirSync(absolute, { recursive: true })
+    .map(String)
+    .filter((entry) => statSync(join(absolute, entry)).isFile())
+    .map((entry) => relative(absolute, join(absolute, entry)))
+    .sort();
+}
+
+/** Serves project artifacts from this test's D1 and the real templates. */
+async function publicationRequests() {
+  const root = resolve(import.meta.dir, "..");
+  const group = async (sourcePath: string, paths: string[]) => ({
+    sourcePath,
+    files: await Promise.all(
+      paths.map(async (path) => ({
+        path,
+        sha256: await sha256Hex(readFileSync(join(root, sourcePath, path))),
+      })),
+    ),
+  });
+  const index: SkillTemplateIndex = {
+    schemaVersion: "1",
+    repository: "SlopDotCash/slopdotcash",
+    commit: "d".repeat(40),
+    templateSha256: "d".repeat(64),
+    revisionStatus: "committed",
+    contributor: await group(
+      PROJECT_SKILL_TEMPLATES.contributor,
+      files(PROJECT_SKILL_TEMPLATES.contributor),
+    ),
+    reviewer: await group(
+      PROJECT_SKILL_TEMPLATES.reviewer,
+      files(PROJECT_SKILL_TEMPLATES.reviewer),
+    ),
+    renderer: {
+      paths: ["scripts/render-install-guide.mjs"],
+      sources: [],
+      revisionStatus: "committed",
+    },
+    acceptedRevisions: ["current main head"],
+  };
+  const publication = {
+    getProject: (id: string) => persistence.getProject(id),
+    listProjects: () => persistence.listProjects(),
+    listEnforcements: () => persistence.listEnforcements(),
+    enforcementGeneration: () => persistence.enforcementGeneration(),
+    loadTemplate: async () => ({
+      index,
+      readFile: async (path: string) =>
+        new Uint8Array(readFileSync(join(root, path))),
+    }),
+    vettingClearance: (
+      project: { id: string; manifest: object; revision: number },
+      templateSha256: string,
+    ) =>
+      vetting.manifestClearance(
+        project.id,
+        project.manifest,
+        project.revision,
+        async () => {
+          if (livePin.commitSha === "unreadable")
+            throw new Error("GitHub returned 502.");
+          return { commitSha: livePin.commitSha, templateSha256 };
+        },
+      ),
+    cache,
+  };
+  const get = (path: string) =>
+    handleProjectArtifactRequest(
+      new Request(`${ORIGIN}${path}`),
+      publication,
+    ) as Promise<Response>;
+  return { publication, get, index };
+}
+
+describe("generated skill publication", () => {
+  test("discovery lists only active cleared projects", async () => {
+    // #1411 D3 / bootstrap SKILL.md: the index is for agent setup. A paused
+    // project may still be cleared (legacy exemption) and may serve skill
+    // bytes, but the installer refuses status !== active. Keep the index
+    // identical so agents do not select work they must then refuse.
+    const { publication } = await publicationRequests();
+    await listProject();
+    const paused = await persistence.getProject("open-registry");
+    if (paused === null) throw new Error("project was not listed");
+    expect(paused.status).toBe("paused");
+    const active = {
+      ...paused,
+      id: "active-registry",
+      status: "active" as const,
+      manifest: {
+        ...paused.manifest,
+        id: "active-registry",
+        slug: "active-registry",
+        status: "active" as const,
+        skill: {
+          ...paused.manifest.skill,
+          id: "contribute-to-active-registry",
+        },
+        reviewSkill: {
+          ...paused.manifest.reviewSkill,
+          id: "review-active-registry-contributions",
+        },
+        repositories: [
+          {
+            ...paused.manifest.repositories[0],
+            id: "example/active-registry",
+            aliases: ["example/active-registry"],
+          },
+        ],
+      },
+    };
+    const cleared = {
+      state: "cleared" as const,
+      assessment: null,
+      grandfathered: true as const,
+    };
+    const get = (path: string) =>
+      handleProjectArtifactRequest(new Request(`${ORIGIN}${path}`), {
+        ...publication,
+        listProjects: async () => [paused, active],
+        vettingClearance: async () => cleared,
+      }) as Promise<Response>;
+    const before = await (await get("/.well-known/slop/projects.json")).json();
+    expect(before.projects).toEqual([
+      expect.objectContaining({
+        project_id: "active-registry",
+        repository: "example/active-registry",
+        skill: "contribute-to-active-registry",
+      }),
+    ]);
+    // Skill bytes for a cleared paused project remain available for inspection.
+    expect((await get("/projects/open-registry/skill.md")).status).toBe(200);
+  });
+
+  test("historical clean metadata cannot publish skills without canonical closure", async () => {
+    const { get } = await publicationRequests();
+    expect((await get("/projects/open-registry/skill.md")).status).toBe(404);
+    await listProject();
+    expect((await get("/projects/open-registry/skill.md")).status).toBe(404);
+    await seedHistoricalResult("open-registry");
+    for (const path of [
+      "skill.md",
+      "SKILL.md",
+      "skill-manifest.json",
+      "review/SKILL.md",
+      "downloads/contribute-to-open-registry.skill",
+      "codex.md",
+      "claude.md",
+      "manual.md",
+    ])
+      expect((await get(`/projects/open-registry/${path}`)).status).toBe(503);
+    expect(
+      (await (await get("/.well-known/slop/projects.json")).json()).projects,
+    ).toEqual([]);
+    const current = await persistence.getProject("open-registry");
+    const revised = await call(
+      "PUT",
+      "admin/projects/open-registry/manifest",
+      "admin",
+      {
+        manifest: {
+          ...current?.manifest,
+          headline: "Reproducible tooling, second revision.",
+        },
+        expectedRevision: 1,
+        reason: "Second revision",
+      },
+    );
+    expect(revised.status).toBe(200);
+    // A presentation change keeps the scanned content, so the gate is unchanged.
+    expect((await get("/projects/open-registry/skill.md")).status).toBe(503);
+    const executable = await call(
+      "PUT",
+      "admin/projects/open-registry/manifest",
+      "admin",
+      {
+        manifest: {
+          ...current?.manifest,
+          headline: "Reproducible tooling, second revision.",
+          contribution: { ...CONTRIBUTION, maintainerNotes: "New note." },
+        },
+        expectedRevision: 2,
+        reason: "Third revision",
+      },
+    );
+    expect(executable.status).toBe(200);
+    // Changing instructions cannot rehabilitate incomplete historical evidence.
+    expect((await get("/projects/open-registry/skill.md")).status).toBe(503);
+    await seedHistoricalResult("open-registry");
+    expect((await get("/projects/open-registry/skill.md")).status).toBe(503);
+  });
+});
+
+describe("project enforcement (ADM-06)", () => {
+  const EVIDENCE =
+    "https://github.com/example/open-registry/security/advisories/GHSA-test";
+
+  async function enforce(
+    actor: "admin" | "moderator",
+    action: string,
+    mode: "enforcement" | "enforcement-preview" = "enforcement",
+  ) {
+    const project = await persistence.getProject("open-registry");
+    const records = await persistence.listEnforcements();
+    return call("POST", `admin/projects/open-registry/${mode}`, actor, {
+      action,
+      reason: `Moderator note for ${action}`,
+      evidenceReference: EVIDENCE,
+      expectedRevision: project?.revision,
+      expectedSequence: records.length + 1,
+    });
+  }
+
+  test("an ordinary ban preserves the owner's project appeal for independent review", async () => {
+    await listProject();
+    expect((await enforce("admin", "quarantine")).status).toBe(200);
+    const appeal = {
+      projectId: "open-registry",
+      reason: "The release script was removed",
+      evidenceReference: EVIDENCE,
+    };
+    expect(
+      (await call("POST", "project-appeals", "applicant", appeal)).status,
+    ).toBe(200);
+    const ban = await enforce("admin", "ban");
+    expect(ban.status).toBe(200);
+    expect((await ban.json()).record.appealAfter).toBe("requested");
+
+    const review = await enforce("moderator", "reinstate");
+    expect(review.status).toBe(409);
+    expect((await review.json()).error).toBe("vetting_required");
+    const duplicate = await call(
+      "POST",
+      "project-appeals",
+      "applicant",
+      appeal,
+    );
+    expect(duplicate.status).toBe(409);
+    expect((await duplicate.json()).error).toBe("appeal_open");
+    const selfReview = await enforce("admin", "reinstate");
+    expect(selfReview.status).toBe(403);
+    expect((await selfReview.json()).error).toBe("independent_review_required");
+
+    const denied = await enforce("moderator", "deny_reinstatement");
+    expect(denied.status).toBe(200);
+    expect((await denied.json()).record.appealAfter).toBe("denied");
+    const afterDenial = await enforce("moderator", "reinstate");
+    expect(afterDenial.status).toBe(409);
+    expect((await afterDenial.json()).error).toBe("no_open_appeal");
+  });
+
+  // Slopbot's live registry for the listed repository (the record's GitHub id).
+  const SLOPBOT_JOB = {
+    owner: "example",
+    repo: "open-registry",
+    repositoryId: 123456789,
+  };
+  const slopbotReview = () => reviewRegistration(db as never, SLOPBOT_JOB);
+
+  test("Slopbot keeps the security-only review after a quarantine or ban revision lands", async () => {
+    await listProject();
+    // A paused project keeps the security-only review (owner decision D12).
+    expect(await slopbotReview()).toEqual({
+      scope: "security",
+      projectId: "open-registry",
+    });
+    const quarantined = await enforce("admin", "quarantine");
+    expect((await quarantined.json()).record.result).toBe("revision_appended");
+    expect(
+      (await persistence.getProject("open-registry"))?.manifest.listingTier,
+    ).toBe("retired");
+    // The quarantine's own retirement is not the owner's retirement.
+    expect(await slopbotReview()).toEqual({
+      scope: "security",
+      projectId: "open-registry",
+    });
+    expect((await enforce("admin", "ban")).status).toBe(200);
+    expect(await slopbotReview()).toEqual({
+      scope: "security",
+      projectId: "open-registry",
+    });
+  });
+
+  test("an owner's retirement still ends Slopbot review when a quarantine follows", async () => {
+    await listProject();
+    const project = await persistence.getProject("open-registry");
+    if (project === null) throw new Error("open-registry is not listed");
+    const retired = await call(
+      "PUT",
+      "admin/projects/open-registry/manifest",
+      "admin",
+      {
+        manifest: {
+          ...project.manifest,
+          status: "paused",
+          listingTier: "retired",
+        },
+        expectedRevision: project.revision,
+        reason: "Retire the project",
+      },
+    );
+    expect(retired.status).toBe(200);
+    expect(await slopbotReview()).toBeNull();
+    const quarantined = await enforce("admin", "quarantine");
+    expect((await quarantined.json()).record.result).toBe("no_revision_needed");
+    expect(await slopbotReview()).toBeNull();
+  });
+
+  test("missing quarantine revision evidence leaves Slopbot only an appeal's penalty reversal", async () => {
+    await listProject();
+    const quarantined = await enforce("admin", "quarantine");
+    expect((await quarantined.json()).record.result).toBe("revision_appended");
+    // Revisions are permanent, so the read of the retained rows is hidden.
+    const withoutRevisions = {
+      ...db,
+      prepare: (sql: string) => {
+        const statement = db.prepare(sql);
+        if (
+          !sql.includes(
+            "SELECT manifest, manifest_sha256 FROM project_revisions",
+          )
+        )
+          return statement;
+        return {
+          ...statement,
+          bind: (...values: unknown[]) => ({
+            ...statement.bind(...values),
+            first: async () => null,
+          }),
+        };
+      },
+    };
+    // Unproved, the retirement counts as the owner's: no review, but an
+    // appeal or a maintainer reopen still reaches the penalty reversal.
+    expect(
+      await reviewRegistration(withoutRevisions as never, SLOPBOT_JOB),
+    ).toBeNull();
+    expect(
+      await reversalOnlyRegistration(withoutRevisions as never, SLOPBOT_JOB),
+    ).toEqual({ projectId: "open-registry" });
+  });
+
+  test("quarantines and bans while refusing an appeal with only historical clean metadata", async () => {
+    const { get } = await publicationRequests();
+    await listProject();
+    await seedHistoricalResult("open-registry");
+    // Retained metadata is not canonical closure, so the project stays paused.
+    expect((await call("GET", "projects")).status).toBe(200);
+    expect((await call("GET", "projects")).headers.get("x-slop-cache")).toBe(
+      "hit",
+    );
+    expect((await get("/projects/open-registry/SKILL.md")).status).toBe(503);
+    expect(
+      (await (await get("/.well-known/slop/projects.json")).json()).projects,
+    ).toEqual([]);
+
+    // Without a configured moderator role the actions stay closed.
+    deps.moderatorGithubIds = new Set();
+    const closed = await enforce("admin", "quarantine");
+    expect(closed.status).toBe(403);
+    expect((await closed.json()).error).toBe("moderation_unavailable");
+    deps.moderatorGithubIds = new Set([ADMIN.githubId, MODERATOR.githubId]);
+
+    // The preview shows the exact revision and writes nothing.
+    const preview = await enforce("admin", "quarantine", "enforcement-preview");
+    expect(preview.status).toBe(200);
+    expect((await preview.json()).preview).toMatchObject({
+      stateBefore: "clear",
+      stateAfter: "quarantined",
+      result: "revision_appended",
+      revision: {
+        before: 1,
+        after: 2,
+        statusBefore: "paused",
+        statusAfter: "paused",
+        listingTierBefore: "community",
+        listingTierAfter: "retired",
+      },
+    });
+    expect(await persistence.listEnforcements()).toEqual([]);
+
+    const quarantined = await enforce("admin", "quarantine");
+    expect(quarantined.status).toBe(200);
+    expect((await quarantined.json()).record).toMatchObject({
+      sequence: 1,
+      action: "quarantine",
+      actor: ADMIN,
+      actorRole: "project-moderator",
+      decisionSource: "admin-panel",
+      evidenceReference: EVIDENCE,
+      repositoryGithubId: "123456789",
+      repositoryKeys: ["example/open-registry"],
+      beforeRevision: 1,
+      afterRevision: 2,
+      result: "revision_appended",
+    });
+    const revision = await persistence.getProject("open-registry");
+    expect(revision).toMatchObject({ revision: 2, status: "paused" });
+    expect(revision?.manifest.listingTier).toBe("retired");
+    // The warm caches cannot serve the project after the record lands.
+    const list = await call("GET", "projects");
+    expect(list.headers.get("x-slop-cache")).toBe("miss");
+    expect((await list.json()).restrictions).toMatchObject([
+      { projectId: "open-registry", state: "quarantined", appeal: "none" },
+    ]);
+    const single = await call("GET", "projects/open-registry");
+    expect(single.status).toBe(410);
+    expect((await single.json()).restriction.state).toBe("quarantined");
+    expect((await get("/projects/open-registry/SKILL.md")).status).toBe(410);
+    expect(
+      (
+        await get(
+          "/projects/open-registry/downloads/contribute-to-open-registry.skill",
+        )
+      ).status,
+    ).toBe(410);
+    expect(
+      (await (await get("/.well-known/slop/projects.json")).json()).projects,
+    ).toEqual([]);
+
+    // A revision cannot lift the restriction.
+    const lifted = await call(
+      "PUT",
+      "admin/projects/open-registry/manifest",
+      "admin",
+      {
+        manifest: { ...revision?.manifest, listingTier: "community" },
+        expectedRevision: 2,
+        reason: "Try to relist",
+      },
+    );
+    expect(lifted.status).toBe(409);
+    expect((await lifted.json()).error).toBe("project_restricted");
+    // Neither can a new project for the renamed repository.
+    const renamed = await create(
+      applicationManifest("renamed-registry", "example/renamed-registry"),
+    );
+    expect(renamed.status).toBe(403);
+    expect((await renamed.json()).error).toBe("repository_restricted");
+
+    // Escalation to a ban needs no second revision.
+    const banned = await enforce("admin", "ban");
+    expect(banned.status).toBe(200);
+    expect((await banned.json()).record).toMatchObject({
+      stateAfter: "banned",
+      result: "no_revision_needed",
+      afterRevision: null,
+    });
+    const early = await enforce("moderator", "reinstate");
+    expect(early.status).toBe(409);
+    expect((await early.json()).error).toBe("no_open_appeal");
+    // ELG-02: the applicant who listed the project files the appeal. Another
+    // account that is neither steward nor applicant cannot.
+    const appeal = {
+      projectId: "open-registry",
+      reason: "The release script was removed",
+      evidenceReference: EVIDENCE,
+    };
+    const stranger = await call("POST", "project-appeals", "moderator", appeal);
+    expect(stranger.status).toBe(403);
+    const appealed = await call("POST", "project-appeals", "applicant", appeal);
+    expect(appealed.status).toBe(200);
+    expect((await appealed.json()).record).toMatchObject({
+      action: "request_reinstatement",
+      actor: APPLICANT,
+      actorRole: "project-applicant",
+      decisionSource: "owner-request",
+      stateAfter: "banned",
+      appealAfter: "requested",
+      afterRevision: null,
+    });
+    const again = await call("POST", "project-appeals", "applicant", appeal);
+    expect(again.status).toBe(409);
+    expect((await again.json()).error).toBe("appeal_open");
+    // An owner record can only be an appeal.
+    expect(() =>
+      sqlite.exec(
+        `INSERT INTO project_enforcements (${ENFORCEMENT_COLUMNS}) SELECT 'enf_owner_forged', project_id, 4, 'reinstate', 'clear', 'granted', reason, evidence_reference, repository_github_id, repository_keys, actor_github_id, actor_github_login, actor_role, decision_source, before_revision, before_manifest_sha256, NULL, NULL, 'no_revision_needed', created_at, NULL FROM project_enforcements WHERE sequence = 3`,
+      ),
+    ).toThrow("CHECK constraint failed");
+    // The moderator who banned cannot decide the appeal.
+    const self = await enforce("admin", "reinstate");
+    expect(self.status).toBe(403);
+    expect((await self.json()).error).toBe("independent_review_required");
+    const unscannedAppeal = await enforce("moderator", "reinstate");
+    expect(unscannedAppeal.status).toBe(409);
+    expect((await unscannedAppeal.json()).error).toBe("vetting_required");
+    expect((await call("GET", "projects/open-registry")).status).toBe(410);
+    const maliciousId = await seedHistoricalResult(
+      "open-registry",
+      "malicious",
+    );
+    const cleanId = await seedHistoricalResult("open-registry");
+    // A clean scan alone cannot waive a confirmed malicious finding.
+    const restrictedProject = await persistence.getProject("open-registry");
+    if (!restrictedProject) throw new Error("Missing restricted project");
+    const bannedClearance = await vetting.manifestClearance(
+      "open-registry",
+      restrictedProject.manifest,
+      2,
+      async () => livePin,
+    );
+    expect(bannedClearance.state).toBe("banned");
+    // The confirmed-malicious re-ban supersedes the first appeal, so the
+    // applicant appeals the current restriction before reinstatement is
+    // attempted again; a project appeal from before the re-ban no longer
+    // opens it.
+    const reappealed = await call(
+      "POST",
+      "project-appeals",
+      "applicant",
+      appeal,
+    );
+    expect(reappealed.status).toBe(200);
+    const scannedPin = livePin;
+    livePin = { ...livePin, commitSha: "b".repeat(40) };
+    const staleScan = await enforce("moderator", "reinstate");
+    expect(staleScan.status).toBe(409);
+    expect((await staleScan.json()).error).toBe("vetting_required");
+    livePin = scannedPin;
+    const refused = await enforce("moderator", "reinstate");
+    expect(refused.status).toBe(409);
+    expect((await refused.json()).error).toBe("vetting_required");
+    expect(
+      sqlite
+        .query("SELECT count(*) AS n FROM project_vetting_reinstatements")
+        .get(),
+    ).toEqual({ n: 0 });
+    const restricted = await persistence.getProject("open-registry");
+    expect(restricted).toMatchObject({ revision: 2, status: "paused" });
+    expect(restricted?.manifest.listingTier).toBe("retired");
+    expect((await call("GET", "projects/open-registry")).status).toBe(410);
+    expect((await get("/projects/open-registry/SKILL.md")).status).toBe(410);
+
+    // A concurrent revision must abort the database write, not leave a
+    // scanner result or appeal pointing at an enforcement that did not land.
+    const records = await persistence.listEnforcements();
+    const latestRecord = records.at(-1);
+    if (!latestRecord) throw new Error("Missing enforcement record");
+    expect(
+      await persistence.appendEnforcement(
+        {
+          ...latestRecord,
+          id: "enf_stale_database_revision",
+          sequence: latestRecord.sequence + 1,
+          beforeRevision: 999,
+        },
+        null,
+        [],
+      ),
+    ).toBe("conflict");
+    expect(await persistence.listEnforcements()).toHaveLength(records.length);
+    // A stale preview cannot be confirmed, and history is append-only.
+    const stale = await call(
+      "POST",
+      "admin/projects/open-registry/enforcement",
+      "moderator",
+      {
+        action: "quarantine",
+        reason: "Stale",
+        evidenceReference: EVIDENCE,
+        expectedRevision: 4,
+        expectedSequence: 1,
+      },
+    );
+    expect(stale.status).toBe(409);
+    expect(() =>
+      sqlite.exec("UPDATE project_enforcements SET reason = 'edited'"),
+    ).toThrow("immutable");
+    expect(() => sqlite.exec("DELETE FROM project_enforcements")).toThrow(
+      "permanent",
+    );
+    const history = await call("GET", "admin/projects", "moderator");
+    expect(
+      (await history.json()).projects[0].enforcement.records.map(
+        (record: { action: string }) => record.action,
+      ),
+    ).toEqual([
+      "quarantine",
+      "ban",
+      "request_reinstatement",
+      "ban",
+      "request_reinstatement",
+    ]);
+    // Independently preserve the append-only persistence contract. This is
+    // historical database setup, never HTTP admission or a complete scan.
+    if (!restricted || !latestRecord)
+      throw new Error("Missing restricted state");
+    const plan = planEnforcement({
+      action: "reinstate",
+      actor: MODERATOR,
+      project: restricted,
+      restriction: projectRestriction("open-registry", records),
+      listedBefore: true,
+    });
+    if (!plan.manifest) throw new Error("Missing reinstatement revision plan");
+    const manifestText = JSON.stringify(plan.manifest);
+    const manifestSha256 = await sha256Hex(
+      new TextEncoder().encode(manifestText),
+    );
+    const at = "2026-10-18T13:00:00.000Z";
+    expect(
+      await persistence.appendEnforcement(
+        {
+          ...latestRecord,
+          id: "enf_historical_persistence_review",
+          sequence: latestRecord.sequence + 1,
+          action: "reinstate",
+          stateAfter: "clear",
+          appealAfter: "granted",
+          actor: MODERATOR,
+          actorRole: "project-moderator",
+          decisionSource: "admin-panel",
+          beforeRevision: restricted.revision,
+          beforeManifestSha256: restricted.manifestSha256,
+          afterRevision: restricted.revision + 1,
+          afterManifestSha256: manifestSha256,
+          result: "revision_appended",
+          systemIssuer: undefined,
+          vettingReview: {
+            assessmentId: cleanId,
+            maliciousAssessmentIds: [maliciousId],
+          },
+          createdAt: at,
+        },
+        {
+          projectId: restricted.id,
+          expectedRevision: restricted.revision,
+          manifest: plan.manifest,
+          manifestText,
+          manifestSha256,
+          reason: "Historical persistence contract",
+          actor: MODERATOR,
+          at,
+        },
+        [],
+      ),
+    ).toBe("recorded");
+    const bridge = sqlite
+      .query("SELECT * FROM project_vetting_reinstatements")
+      .get() as { assessment_id: string; malicious_assessment_ids: string };
+    expect(bridge.assessment_id).toBe(cleanId);
+    expect(JSON.parse(bridge.malicious_assessment_ids)).toEqual([maliciousId]);
+    expect(() =>
+      sqlite.exec("DELETE FROM project_vetting_reinstatements"),
+    ).toThrow("permanent");
+    // Even a stored historical appeal cannot publish skills without closure.
+    expect((await get("/projects/open-registry/SKILL.md")).status).not.toBe(
+      200,
+    );
+    await seedHistoricalResult("open-registry", "malicious");
+    const restored = await persistence.getProject("open-registry");
+    if (!restored) throw new Error("Missing restored persistence revision");
+    expect(
+      (
+        await vetting.manifestClearance(
+          "open-registry",
+          restored.manifest,
+          restored.revision,
+          async () => livePin,
+        )
+      ).state,
+    ).toBe("banned");
+  });
+
+  test("a revision of another project cannot claim a banned repository", async () => {
+    await listProject();
+    // Listed before the ban: the renamed repository, same GitHub id.
+    await listProject(
+      applicationManifest("renamed-registry", "example/renamed-registry"),
+    );
+    // Listed before the ban: a different repository.
+    const base = applicationManifest(
+      "other-registry",
+      "example/other-registry",
+    );
+    await listProject({
+      ...base,
+      authority: {
+        ...(base.authority as Record<string, unknown>),
+        repositoryId: "222222222",
+        repositoryNodeId: "R_other",
+      },
+    });
+    expect((await enforce("admin", "quarantine")).status).toBe(200);
+    expect((await enforce("admin", "ban")).status).toBe(200);
+    async function revise(
+      projectId: string,
+      change: (manifest: ProjectDefinition) => Record<string, unknown>,
+    ) {
+      const project = await persistence.getProject(projectId);
+      if (project === null) throw new Error(`${projectId} is not listed`);
+      const response = await call(
+        "PUT",
+        `admin/projects/${projectId}/manifest`,
+        "admin",
+        {
+          manifest: change(project.manifest),
+          expectedRevision: 1,
+          reason: "List the banned repository again",
+        },
+      );
+      expect(response.status).toBe(403);
+      expect((await response.json()).error).toBe("repository_restricted");
+      expect(await persistence.getProject(projectId)).toMatchObject({
+        revision: 1,
+      });
+    }
+    // The banned repository's GitHub id under its new name.
+    await revise("renamed-registry", (manifest) => ({
+      ...manifest,
+      listingTier: "featured",
+    }));
+    // The banned repository's old path appended as an alias.
+    await revise("other-registry", (manifest) => ({
+      ...manifest,
+      repositories: manifest.repositories.map((repository) => ({
+        ...repository,
+        aliases: ["example/open-registry"],
+      })),
+    }));
+  });
+
+  test("a ban closes the public routes of another project listed for the repository", async () => {
+    const { publication } = await publicationRequests();
+    // Vetting is a separate gate; a clean scan lets this test reach the
+    // restriction gate on every artifact route.
+    const get = (path: string) =>
+      handleProjectArtifactRequest(new Request(`${ORIGIN}${path}`), {
+        ...publication,
+        vettingClearance: async () => ({
+          state: "cleared",
+          assessment: {
+            id: `vet_${"0".repeat(32)}`,
+            revision: 1,
+            state: "clean",
+            commitSha: livePin.commitSha,
+            templateSha256: livePin.templateSha256,
+            policyVersion: null,
+            requestedAt: "2026-10-18T12:00:00.000Z",
+            completedAt: "2026-10-18T12:00:01.000Z",
+            modelRuns: [],
+            artifacts: 0,
+            heldArtifacts: 0,
+          },
+        }),
+      }) as Promise<Response>;
+    const routes = [
+      "/projects/renamed-registry/skill.md",
+      "/projects/renamed-registry/downloads/contribute-to-renamed-registry.skill",
+    ];
+    await listProject();
+    // Listed before the ban: the renamed repository, same GitHub id.
+    await listProject(
+      applicationManifest("renamed-registry", "example/renamed-registry"),
+    );
+    for (const route of routes) expect((await get(route)).status).toBe(200);
+    expect((await enforce("admin", "quarantine")).status).toBe(200);
+    expect((await enforce("admin", "ban")).status).toBe(200);
+
+    for (const route of routes) expect((await get(route)).status).toBe(410);
+    expect(
+      (await (await get("/.well-known/slop/projects.json")).json()).projects,
+    ).toEqual([]);
+    const single = await call("GET", "projects/renamed-registry");
+    expect(single.status).toBe(410);
+    const closed = await single.json();
+    // The record, and so the only appeal, lives on the banned project.
+    expect(closed.restriction).toMatchObject({
+      projectId: "renamed-registry",
+      sourceProjectId: "open-registry",
+      state: "banned",
+    });
+    expect((await (await call("GET", "projects")).json()).restrictions).toEqual(
+      [
+        expect.objectContaining({
+          projectId: "open-registry",
+          sourceProjectId: "open-registry",
+          state: "banned",
+        }),
+        expect.objectContaining({
+          projectId: "renamed-registry",
+          sourceProjectId: "open-registry",
+          state: "banned",
+        }),
+      ],
+    );
+  });
+
+  test("another project listed for a banned repository can still be retired", async () => {
+    await listProject();
+    // Listed before the ban: the renamed repository, same GitHub id.
+    await listProject(
+      applicationManifest("renamed-registry", "example/renamed-registry"),
+    );
+    expect((await enforce("admin", "quarantine")).status).toBe(200);
+    expect((await enforce("admin", "ban")).status).toBe(200);
+    const registry = async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (input: string | URL | Request) =>
+        handleProjectApi(new Request(input), deps)) as typeof fetch;
+      try {
+        return await fetchProjectRegistry(ORIGIN);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    };
+    // projects:sync asks an admin to append B's paused, retired revision.
+    expect((await registry()).withheld).toEqual(["renamed-registry"]);
+    async function revise(
+      change: (manifest: ProjectDefinition) => Record<string, unknown>,
+    ) {
+      const project = await persistence.getProject("renamed-registry");
+      if (project === null) throw new Error("renamed-registry is not listed");
+      return call("PUT", "admin/projects/renamed-registry/manifest", "admin", {
+        manifest: change(project.manifest),
+        expectedRevision: project.revision,
+        reason: "Retire the project of the banned repository",
+      });
+    }
+    const retire = (manifest: ProjectDefinition) => ({
+      ...manifest,
+      status: "paused",
+      listingTier: "retired",
+    });
+    // Every other revision still cannot claim the banned repository.
+    for (const change of [
+      (manifest: ProjectDefinition) => ({ ...manifest, status: "active" }),
+      (manifest: ProjectDefinition) => ({
+        ...manifest,
+        listingTier: "featured",
+      }),
+      (manifest: ProjectDefinition) => ({
+        ...retire(manifest),
+        repositories: manifest.repositories.map((repository) => ({
+          ...repository,
+          aliases: ["example/open-registry"],
+        })),
+      }),
+    ]) {
+      const refused = await revise(change);
+      expect(refused.status).toBe(403);
+      expect((await refused.json()).error).toBe("repository_restricted");
+    }
+    expect(await persistence.getProject("renamed-registry")).toMatchObject({
+      revision: 1,
+    });
+
+    expect((await revise(retire)).status).toBe(200);
+    expect(await persistence.getProject("renamed-registry")).toMatchObject({
+      revision: 2,
+      manifest: { status: "paused", listingTier: "retired" },
+    });
+    expect((await registry()).withheld).toEqual([]);
+    // The retired project cannot be listed again while the ban holds.
+    const restored = await revise((manifest) => ({
+      ...manifest,
+      listingTier: "community",
+    }));
+    expect(restored.status).toBe(403);
+    expect((await restored.json()).error).toBe("repository_restricted");
+  });
+
+  test("a revision fails when a restriction lands after its read", async () => {
+    await listProject();
+    const listed = await persistence.getProject("open-registry");
+    // Retired already, so the quarantine appends no revision of its own and
+    // only the enforcement guard can refuse the stale write.
+    const retired = await call(
+      "PUT",
+      "admin/projects/open-registry/manifest",
+      "admin",
+      {
+        manifest: { ...listed?.manifest, listingTier: "retired" },
+        expectedRevision: 1,
+        reason: "Retire",
+      },
+    );
+    expect(retired.status).toBe(200);
+    const read = persistence.listEnforcements.bind(persistence);
+    // The quarantine lands between the restriction read and the append.
+    persistence.listEnforcements = async () => {
+      const records = await read();
+      persistence.listEnforcements = read;
+      const quarantined = await enforce("admin", "quarantine");
+      expect((await quarantined.json()).record.result).toBe(
+        "no_revision_needed",
+      );
+      return records;
+    };
+    const raced = await call(
+      "PUT",
+      "admin/projects/open-registry/manifest",
+      "admin",
+      {
+        manifest: { ...listed?.manifest, listingTier: "community" },
+        expectedRevision: 2,
+        reason: "List again",
+      },
+    );
+    expect(raced.status).toBe(409);
+    const after = await persistence.getProject("open-registry");
+    expect(after).toMatchObject({ revision: 2, status: "paused" });
+    expect(after?.manifest.listingTier).toBe("retired");
+  });
+});
+
+test("cached skill and public clearance cannot survive loss of retained evidence", async () => {
+  const { get } = await publicationRequests();
+  await listProject();
+  const id = await seedHistoricalResult("open-registry");
+  const assessment = await vetting.getAssessment(id);
+  if (!assessment?.result || isScanResult(assessment.result))
+    throw new Error("Missing historical fixture assessment");
+  const historical = assessment.result;
+  const skillPath = "/projects/open-registry/skill.md";
+  const oldSkill = await get(skillPath);
+  const oldDetail = await call("GET", "projects/open-registry");
+  expect(oldSkill.status).toBe(503);
+  expect((await oldDetail.clone().json()).skillsPublished).toBe(false);
+  const generation = await persistence.enforcementGeneration();
+  // Seed the exact legacy cache keys, as if an earlier deployment had cached them.
+  for (const [path, response] of [
+    [skillPath, new Response("Previously cached skill bytes")],
+    [
+      "/api/v1/projects/open-registry",
+      new Response(
+        JSON.stringify({
+          skillsPublished: true,
+          vetting: { state: "cleared" },
+        }),
+      ),
+    ],
+    [
+      "/.well-known/slop/projects.json",
+      new Response(
+        JSON.stringify({
+          schemaVersion: "1",
+          projects: [
+            {
+              project_id: "open-registry",
+              repository: "example/open-registry",
+              skill: "contribute-to-open-registry",
+            },
+          ],
+        }),
+      ),
+    ],
+  ] as const)
+    await cache.put(
+      new Request(`${ORIGIN}/__slop-cache/projects-v1/g${generation}${path}`),
+      response,
+    );
+  await retained.bucket.delete(`vetting/objects/${historical.traceSha256}`);
+  const refused = await get(skillPath);
+  expect(refused.status).toBe(503);
+  expect(refused.headers.get("cache-control")).toBe("no-store");
+  const detail = await call("GET", "projects/open-registry");
+  expect(detail.headers.get("access-control-allow-origin")).toBe("*");
+  expect(detail.headers.get("cache-control")).toContain("no-store");
+  expect(await detail.json()).toMatchObject({
+    skillsPublished: false,
+    vetting: { state: "unverified" },
+  });
+  expect(
+    (await (await get("/.well-known/slop/projects.json")).json()).projects,
+  ).toEqual([]);
+});
+
+describe("referral attribution (PRJ-05)", () => {
+  const REFERRER = { githubId: "900000010", githubLogin: "e2e-referrer" };
+  const liveActors = new Map<
+    string,
+    { githubId: string; githubLogin: string; type?: string }
+  >();
+  beforeEach(() => {
+    liveActors.clear();
+    const fetcher = deps.github.fetch;
+    deps.github.fetch = async (url, init) => {
+      const match = /^https:\/\/api.github.com\/users\/([^/?]+)$/.exec(url);
+      if (!match) return fetcher(url, init);
+      const actor = liveActors.get(match[1].toLowerCase());
+      return actor
+        ? Response.json({
+            id: Number(actor.githubId),
+            login: actor.githubLogin,
+            type: actor.type ?? "User",
+          })
+        : new Response(null, { status: 404 });
+    };
+  });
+  /** A signed-in slop.cash account, as the points sign-in records one. */
+  function joinMember(actor: { githubId: string; githubLogin: string }) {
+    liveActors.set(actor.githubLogin.toLowerCase(), actor);
+    sqlite
+      .prepare(
+        "INSERT INTO points_members(actor_id,github_id,login,joined_at,public) VALUES(?,?,?,?,1)",
+      )
+      .run(
+        actor.githubId,
+        actor.githubId,
+        actor.githubLogin,
+        "2026-10-01T00:00:00.000Z",
+      );
+  }
+
+  test("records the referrer once and leaves omitted referrals unset", async () => {
+    joinMember(REFERRER);
+    const manifest = applicationManifest("referred", "example/referred");
+    const submitted = await create(manifest, { referrer: "E2E-Referrer" });
+    expect(submitted.status).toBe(201);
+    const { project } = await submitted.json();
+    // Store the current canonical GitHub login, not the input casing.
+    expect(project.referrer).toEqual(REFERRER);
+    expect((await persistence.getProject("referred"))?.referrer).toEqual(
+      REFERRER,
+    );
+    const admin = await call("GET", "admin/projects", "admin");
+    expect(
+      (await admin.json()).projects.find(
+        (entry: { id: string }) => entry.id === "referred",
+      ).referrer,
+    ).toEqual(REFERRER);
+    // Neither row can change or drop the referrer afterwards.
+    expect(() =>
+      sqlite.exec(
+        "UPDATE projects SET referrer_github_login = 'other' WHERE id = 'referred'",
+      ),
+    ).toThrow(/project referrer is immutable/u);
+    expect(() =>
+      sqlite.exec(
+        "UPDATE projects SET referrer_github_id = NULL WHERE id = 'referred'",
+      ),
+    ).toThrow(/project referrer is immutable/u);
+    // An omitted referral remains unset in both the response and stored row.
+    const unassigned = await listProject();
+    expect(unassigned.referrer).toBeNull();
+    expect(
+      (await persistence.getProject("open-registry"))?.referrer,
+    ).toBeNull();
+  });
+
+  test("a recycled login cannot attribute the applicant to an older cached member", async () => {
+    joinMember({ githubId: "900000020", githubLogin: APPLICANT.githubLogin });
+    joinMember(APPLICANT);
+    const manifest = applicationManifest("recycled", "example/recycled");
+    const response = await create(manifest, {
+      referrer: APPLICANT.githubLogin,
+    });
+    expect(response.status).toBe(422);
+    expect(await persistence.listProjects()).toEqual([]);
+    // Even one stale cached row is insufficient if the current holder has never joined.
+    liveActors.set(APPLICANT.githubLogin.toLowerCase(), {
+      githubId: "900000030",
+      githubLogin: APPLICANT.githubLogin,
+    });
+    const unknown = await create(manifest, {
+      referrer: APPLICANT.githubLogin,
+    });
+    expect(unknown.status).toBe(422);
+  });
+
+  test("refuses the applicant, the steward, team accounts and unknown logins", async () => {
+    joinMember(APPLICANT);
+    joinMember(ADMIN);
+    joinMember({ githubId: "987654321", githubLogin: "example" });
+    const manifest = applicationManifest("refused", "example/refused");
+    const cases: unknown[] = [
+      "e2e-applicant",
+      "example",
+      "e2e-admin",
+      "nobody-here",
+      "not a login!",
+      42,
+    ];
+    for (const referrer of cases) {
+      const response = await create(manifest, { referrer });
+      expect(response.status).toBe(422);
+      const body = await response.json();
+      expect(body.error).toBe("invalid_referrer");
+    }
+    // An organization is refused as a referrer, not reported as a GitHub outage.
+    liveActors.set("example-org", {
+      githubId: "987654322",
+      githubLogin: "example-org",
+      type: "Organization",
+    });
+    const organization = await create(manifest, { referrer: "example-org" });
+    expect(organization.status).toBe(422);
+    expect(await organization.json()).toMatchObject({
+      error: "personal_account_required",
+    });
+    // A refused referral stores nothing, so the owner can submit again.
+    expect(await persistence.listProjects()).toEqual([]);
+    const accepted = await create(manifest, { referrer: null });
+    expect(accepted.status).toBe(201);
+    expect((await accepted.json()).project.referrer).toBeNull();
+  });
+});

@@ -1,0 +1,35 @@
+name: Private intake health watch
+on:
+  schedule:
+    - cron: "47 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  watch:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: slop-intake-watch
+      cancel-in-progress: false
+    timeout-minutes: 5
+    steps:
+      - name: Read optional intake health
+        run: |
+          body="$RUNNER_TEMP/slop-intake-status.json"
+          status="$(curl --silent --show-error --max-time 30 --max-filesize 65536 --output "$body" --write-out '%{http_code}' https://api.slop.cash/api/v1/private-request-intake)"
+          if [ "$status" != "200" ]; then
+            echo "::error::Optional trace intake is unavailable (HTTP $status). GitHub contribution remains open. The slop-identity Worker renews the observation on its hourly cron; see backend/trace/PRIVATE_INTAKE_RECOVERY.md."
+            exit 1
+          fi
+          node - "$body" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const value = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          if (value?.enabled !== true || typeof value?.verifiedAt !== "string") {
+            throw new TypeError("Optional trace intake is not enabled; GitHub contribution remains open.");
+          }
+          const age = Date.now() - Date.parse(value.verifiedAt);
+          if (!Number.isFinite(age) || age > 3 * 60 * 60 * 1000) {
+            throw new TypeError("Optional trace intake observation is older than three hours; the hourly Worker renewal is not landing.");
+          }
+          NODE

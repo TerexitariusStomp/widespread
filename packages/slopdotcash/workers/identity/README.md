@@ -1,0 +1,248 @@
+# Slop identity Worker
+
+`slop-identity` is the only component that handles GitHub sign-in. It uses the
+GitHub authorization-code flow with PKCE and returns a one-time, 90-second
+identity assertion. It never accepts an existing PAT, `gh auth token`, workflow
+token, or GitHub device token.
+
+The public authority is fixed to `https://identity.slop.cash`. The only OAuth
+callback is:
+
+```text
+https://identity.slop.cash/v1/oauth/callback
+```
+
+There is no caller-supplied callback or return URL. Assertion consumption uses
+the `https://identity.internal` host through a Cloudflare service binding. The
+public custom domain cannot reach that host-routed endpoint.
+
+## Installed-client contract
+
+The installed client keeps `flowId`, `pollCapability`, the returned assertion,
+and the final Slop session token only in process memory. It must not put them in
+argv, environment variables, files, stdout, logs, traces, receipts, or model
+context.
+
+Start sign-in:
+
+```http
+POST https://identity.slop.cash/v1/oauth/start
+Content-Type: application/json
+
+{"audience":"private-trace-api"}
+```
+
+Success is HTTP 201:
+
+```json
+{
+  "flowId": "flow_<opaque>",
+  "authorizationUrl": "https://identity.slop.cash/v1/oauth/authorize?...",
+  "pollCapability": "<opaque>",
+  "expiresAt": "2026-08-15T20:05:00.000Z",
+  "pollAfterSeconds": 2
+}
+```
+
+Show only `authorizationUrl` to the user. Printing it is acceptable; do not
+print the rest of the response. The safest portable behavior is to ask the user
+to open that URL. An OS browser API may open it directly if that API does not
+invoke a shell or log the URL.
+
+Poll no faster than `pollAfterSeconds`:
+
+```http
+POST https://identity.slop.cash/v1/oauth/poll
+Content-Type: application/json
+
+{
+  "flowId": "flow_<opaque>",
+  "pollCapability": "<opaque>",
+  "audience": "private-trace-api"
+}
+```
+
+Before the callback completes, HTTP 202 returns:
+
+```json
+{"status":"pending","retryAfterSeconds":2}
+```
+
+After verified GitHub sign-in, exactly one poll returns HTTP 200:
+
+```json
+{
+  "status": "complete",
+  "assertion": "slop_assert_v1_<opaque>",
+  "assertionType": "SlopIdentity",
+  "expiresAt": "2026-08-15T20:01:30.000Z"
+}
+```
+
+Immediately send the assertion once to the trace API:
+
+```http
+POST https://api.slop.cash/api/v1/auth/session
+X-Slop-Identity-Assertion: slop_assert_v1_<opaque>
+```
+
+Then overwrite the in-memory assertion. Repeated polling returns HTTP 410.
+Wrong, expired, or already-used capabilities return HTTP 410 without revealing
+whether the browser completed sign-in. The trace API's session exchange
+returns the separate ten-minute contributor session described in
+`backend/trace/README.md`.
+
+## Security properties
+
+- OAuth state is 256 random bits, hash-only in D1, and bound to an HttpOnly,
+  Secure, SameSite=Lax `__Host-` cookie.
+- The PKCE verifier is encrypted in D1 with AES-256-GCM and flow-bound
+  additional authenticated data. The atomic callback claim clears its
+  ciphertext before contacting GitHub.
+- GitHub's authorization code and user access token exist only in the callback
+  request/runtime. The access token is used once to read `/user`, is never
+  persisted or returned, and is cleared before returning.
+- No OAuth scopes are requested. The only retained identity is the immutable
+  numeric GitHub actor ID and validated login.
+- Poll capabilities and assertions are stored only as SHA-256 digests.
+- Assertions are fixed to `private-trace-api`, consumed atomically, and never
+  carry an operator role. The identity Worker has no role-issuance endpoint.
+- Worker-native counters provide an approximate edge shield at 60 OAuth starts
+  and 600 polls per minute per connecting address and Cloudflare location. D1
+  atomically enforces the exact product limits of 12 starts and 120 polls per
+  minute from a secret-derived client digest; raw connecting addresses are not
+  persisted.
+- Expired flows and assertions are removed hourly. Trace retention is
+  unaffected.
+- Response bodies and application logs never contain GitHub codes or access
+  tokens. Persisted Worker invocation logs are disabled because OAuth codes
+  arrive in the standard callback query parameter. Do not enable full-URL
+  Logpush fields or production request tails for this Worker.
+
+## Provisioning
+
+Create a GitHub App owned by the designated Slop operator organization:
+
+- Homepage: `https://slop.cash`
+- Callback: `https://identity.slop.cash/v1/oauth/callback`
+- Webhooks: disabled for this App
+- Repository permissions: none
+- Organization permissions: none
+- Account permissions: none. The authenticated `/user` identity lookup uses
+  the user access token's intrinsic identity without requesting extra account
+  data.
+
+Use a dedicated App. Do not reuse an App that has repository, workflow, or
+administration permissions.
+
+The Worker reuses the private D1 database. After provisioning the database, add
+its actual `database_id` to the `IDENTITY_DB` entry in `wrangler.toml`, then:
+
+```bash
+bunx wrangler d1 migrations apply slop-private --remote --config workers/identity/wrangler.toml
+bunx wrangler secret put GITHUB_APP_CLIENT_ID --config workers/identity/wrangler.toml
+bunx wrangler secret put GITHUB_APP_CLIENT_SECRET --config workers/identity/wrangler.toml
+node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("base64url"))' \
+  | bunx wrangler secret put IDENTITY_STATE_KEY --config workers/identity/wrangler.toml
+node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("base64url"))' \
+  | bunx wrangler secret put IDENTITY_ASSERTION_KEY --config workers/identity/wrangler.toml
+bunx wrangler secret put GITHUB_INTAKE_STATUS_TOKEN --config workers/identity/wrangler.toml
+bunx wrangler deploy --config workers/identity/wrangler.toml
+```
+
+`IDENTITY_STATE_KEY` and `IDENTITY_ASSERTION_KEY` are independent random
+32-byte base64url values.
+
+`GITHUB_INTAKE_STATUS_TOKEN` is a fine-grained GitHub personal access token
+with the operator organization as resource owner, access to this repository
+only, and the single repository permission **Administration: read-only**. GitHub
+answers the private-vulnerability-reporting status to anonymous callers and to
+repository admins, and refuses every other signed-in caller with 403, so a
+token without that permission is rejected and the Worker falls back to the
+anonymous budget. The token's job is to give the hourly intake renewal its own
+5,000 requests per hour GitHub budget:
+Cloudflare Workers share egress addresses across tenants, and the anonymous
+60 requests per hour budget of an address is regularly exhausted by others,
+which made the anonymous renewal skip at random. Use a token owned by the
+operator organization or a maintainer, never a contributor token. The Worker
+sends it only to `api.github.com` for the private-vulnerability-reporting
+status. A token GitHub refuses is logged as `slop private intake token
+rejected` and the request is repeated anonymously once, so rotation lapses
+degrade to the anonymous budget instead of stopping renewal. The protected
+release lists this secret in its exact Worker secret inventory, so set it
+before the first release that expects it.
+
+Bind the Worker to the Pages trace API as `SLOP_IDENTITY`. Keep
+`workers_dev = false`; only the custom OAuth domain and service binding should
+invoke it.
+
+The final `wrangler deploy` above is a one-time provisioning operation because
+it creates the custom domain and cron trigger. Normal production releases use
+the protected workflow's `wrangler versions upload` followed by
+`wrangler versions deploy`; that updates the active code and bindings without
+requesting zone-level Workers Routes authority or rewriting the established
+domain.
+
+The same hourly trigger also renews the optional private intake observation
+(`private_intake_status` in the shared D1 database) from GitHub's public
+private-vulnerability-reporting status. Cleanup and renewal run independently;
+either failing is logged as a fixed string and fails the invocation without
+stopping the other. Renewal needs no Cloudflare credential and no GitHub
+permission; it presents `GITHUB_INTAKE_STATUS_TOKEN` purely for rate-limit
+accounting and never refreshes the observation on an unreachable,
+rate-limited, or malformed answer. A skipped renewal is logged as
+`slop private intake renewal skipped: <reason> [status]` where the reason is
+one of `unreachable`, `rate-limited`, `unauthorized`, `rejected`, or
+`malformed`. See `backend/trace/PRIVATE_INTAKE_RECOVERY.md`.
+
+The hourly trigger also calls the named `REPORTING_READINESS` service binding.
+It refreshes registered repositories' private-reporting status through the
+existing Slopbot App and stores safe observations in `repository_reporting_status`.
+The identity schedule calls `slop-slopbot` in production and
+`slop-repository-access-staging` in staging; Slopbot's own cron does not run this
+refresh. The receiver has no public refresh route. A failed refresh preserves the last
+good observation with a stale state and does not stop identity cleanup. This is
+separate from the fixed-site optional trace intake observation above. It does
+not enable automatic report submission or add a schedule or credential.
+When `SLOPBOT_RELEASE` is disabled, the production publication copy omits only
+this binding. Identity cleanup continues, and existing observations expire to
+stale or remain unknown. A configured binding's failed call still fails the
+scheduled invocation after cleanup has run.
+
+The protected release verifies the live cleanup schedule against this Worker's
+canonical configuration before code/database deployment and after version activation.
+If the live schedule list is entirely empty, the release restores only the canonical
+cleanup schedule and independently reads it back. Additional or changed nonempty
+triggers fail closed without modification. Version activation itself does not
+repair trigger drift. The repair never modifies domains or broadens credentials;
+claim the deployment lever on the tracking issue before other trigger changes. Never enable
+invocation logs or publish OAuth capabilities to diagnose cleanup. A matching
+schedule is configuration evidence only; separately verify a scheduled execution
+removes expired metadata while preserving live flows and permanent trace objects.
+
+Before enabling clients, verify the custom domain's DNS and TLS separately and
+prove rate limiting, assertion replay, and CSRF rejection in production. The
+Workers Rate Limiting bindings are the fast approximate edge shield at a
+higher abuse threshold than the product policy. A single atomic D1 statement
+enforces the exact per-client fixed window with a
+secret-derived client digest; neither raw client addresses nor an eventually
+consistent counter become the durable authority. Zone WAF rules remain defense
+in depth and must not replace the route-specific Worker counters.
+
+## Local development handoff
+
+Local development uses the existing GitHub App and production callback.
+`POST /v1/local/start` accepts the points audience and an exact HTTP loopback
+origin (localhost or 127.0.0.1 with an explicit port). The origin is encoded in
+the random flow identifier stored with the normal PKCE and state checks.
+After the callback, `POST /v1/local/poll` consumes this flow once and returns
+its GitHub identity only to the holder of its random polling capability.
+Normal polling refuses local flows, and local polling refuses normal flows.
+No production session or production assertion is issued for a local flow.
+
+The local backend polls over HTTPS, validates the bound return origin, and
+issues a separate 90-second, single-use local assertion for the existing
+local session exchange. The callback closes the popup or returns the same tab
+to the local login page; the saved local flow restores its original destination.
+Local handoff requests use the existing start/poll rate limits. No database
+migration, extra GitHub callback, CORS expansion, or local GitHub secret is required.

@@ -1,0 +1,71 @@
+name = "eliza-computer"
+pages_build_output_dir = "./dist"
+compatibility_date = "2026-07-30"
+
+[vars]
+PUBLIC_SITE_URL = "https://slop.cash"
+# GitHub numeric actor IDs allowed to review project applications: lalalune
+# and drew-dot-com. Admin email recipients live in workers/notify.
+ADMIN_GITHUB_IDS = "18633264,202660855"
+# Production moderators (PRD section 11, owner decision of 24 October 2026).
+PROJECT_MODERATOR_GITHUB_IDS = "18633264,202660855"
+# Monthly payment period (owner decision D1, 24 October 2026): calendar UTC
+# month from 2026-11; the cutoff is 72 hours after the month ends.
+MONTHLY_PAYMENT_SCHEDULE = '{"firstPeriod":"2026-11","cutoffSecondsAfterPeriodEnd":259200}'
+# The protected release derives PAYMENT_NETWORKS and attester bindings from
+# MAINNET_EXECUTION. An unassembled local artifact cannot activate payments.
+PAYMENT_NETWORKS = '[]'
+# Automatic private-report intake (PRD section 8; owner activation of 26
+# October 2026). Routes stay closed unless every intake App secret is set.
+SLOP_PRIVATE_INTAKE_MODE = "on"
+
+[[d1_databases]]
+binding = "SLOP_DB"
+database_name = "slop-private"
+database_id = "1b453124-2709-45af-8389-151a8105c461"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "PRIVATE_TRACES"
+bucket_name = "slop-private-traces"
+
+# Scanner evidence is separate from permanent contributor traces.
+# Access requires the fixed-in-source evidence policy (EVIDENCE_POLICY in evidence.ts) and scanner public keys.
+[[r2_buckets]]
+binding = "VETTING_EVIDENCE"
+bucket_name = "slop-vetting-evidence"
+
+# Project setup verifies installation authority through the deployed bot.
+[[services]]
+binding = "SLOPBOT"
+service = "slop-slopbot"
+
+# Authenticated subscription assessments use Slopbot's existing journal.
+[[services]]
+binding = "SLOPBOT_VALUE_IMPORT"
+service = "slop-slopbot"
+entrypoint = "HistoricalValuePublisher"
+
+[[services]]
+binding = "VETTING_SANDBOX"
+service = "slop-vetting-sandbox"
+
+[[services]]
+binding = "SLOP_IDENTITY"
+service = "slop-identity"
+
+# Released by the protected production workflow before Pages publication.
+[[services]]
+binding = "SLOP_NOTIFY"
+service = "slop-notify"
+
+# Cloudflare's non-inheritable bindings must be declared separately for every
+# environment. Keeping preview explicit and binding-free prevents preview
+# deployments from reaching the permanent production trace store.
+[env.preview]
+d1_databases = []
+r2_buckets = []
+services = []
+
+[env.preview.vars]
+PUBLIC_SITE_URL = "https://slop.cash"

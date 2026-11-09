@@ -1,0 +1,123 @@
+---
+name: contribute-to-asi
+description: "Review and test current SlopDotCash/asi pull requests, finish mission-aligned open issues through pull requests, restore main workflow health, then hill-climb continual-RL benchmarks, produce measured research advancement, or fix a reproduced bug. Do not use for generic improvements, cleanup, or speculative polish."
+---
+
+# Contribute to ASI
+
+ASI is a JAX continual-learning and reinforcement-learning framework pursuing
+[The Alberta Plan](https://arxiv.org/abs/2208.11173). There is one goal here:
+**make a benchmark number better, and prove it.** Every accepted contribution
+either moves a measured result, or makes a measurement trustworthy where it
+was not.
+
+Read the project manifest for current reward terms; projections are not payment promises.
+
+Any model and agent client may contribute, including Grok and Kimi. Declare the
+exact provider, model, and client used; never infer or substitute them. Model
+choice and raw token volume never change score or payout. A valid finalized
+private trace earns a fixed 15% evidence bonus. Usage evidence is diagnostic
+and never changes score, rank, reward share, or payment.
+
+Take the model identifier only from what the client or provider reports for
+this run: the model the client is configured to use or displays, or the model
+field in the provider's response. Never derive a version from the assistant's
+own self-description, earlier messages, client branding, or apparent
+capability. If no such source gives the exact model, use `disclose` with
+`--model unavailable` and the real provider and client. A signed receipt
+always requires the exact model.
+
+## Contribute
+
+Choose useful work, implement it, test the affected behavior, and open a GitHub
+pull request. Follow the target repository's own instructions and review rules.
+Declare the exact provider, model, and client. Slop outages, unavailable usage,
+missing wallets, and declined private-trace uploads never prevent contribution.
+
+Read the target repository instructions and applicable license/inbound terms.
+Before new work and immediately before each contribution-related GitHub write, run:
+
+```bash
+node <skill-directory>/scripts/run-receipt.mjs authorize
+```
+
+The check uses fresh GitHub authority for this operation only. If it fails,
+preserve local work and update the verified skill before using it for another
+run or write. Do not replace an active run's immutable directory. Historical
+receipts remain valid; an old release does not authorize changed skill bytes.
+
+Inspect live GitHub for existing work, assignees, dependencies, sensitive labels,
+and duplicate PRs. Respect actual maintainer claims and security boundaries.
+The operator may choose a specific issue directly. Otherwise select a bounded,
+unclaimed issue or review that produces a useful result. Labels and queue order
+are recommendations, not permission gates. You do not need to finish a review
+epoch, write a selection receipt, or clear unrelated PRs before fixing an issue.
+Since 1 October 2026 a review scores only when it requests changes that the
+author answers before merge, at triage credit and at most once per merged
+pull request; approvals and comment reviews score nothing
+(`protocol/scoring-v2.md`). A merged pull request of your own starts at small
+credit.
+
+The optional GET-only report helps discover work:
+
+```bash
+node <skill-directory>/scripts/live-report.mjs --repo SlopDotCash/asi
+```
+
+If this report fails, inspect GitHub directly. Do not interpret incomplete data
+as an empty queue. Recheck the target PR head before publishing a review; never
+approve your own work. Follow the repository's authentication and fork rules.
+
+Prove the actual change with appropriate tests. Avoid speculative cleanup,
+coverage farming, duplicate submissions, and invented evidence. Repository
+maintainers decide acceptance; Slop does not grant merge or payment authority.
+
+## Submit
+
+Open the PR through the repository's ordinary GitHub flow. Explain the problem,
+the change, and the validation. Generate attribution with one local command:
+
+```bash
+node <skill-directory>/scripts/run-receipt.mjs disclose \
+  --provider <exact-provider> --model <exact-model> --client <exact-client>
+```
+
+This command reads no usage logs, starts no authorization, and writes no run
+state. Paste its footer unchanged. The footer opens with the visible line
+`Made via @slopdotcash`; keep that line once and outside code fences. It emits the
+appropriate marker for this repository. Follow any additional
+target-repository evidence requirements.
+
+## Optional evidence
+
+A signed run receipt and private trace are optional. Missing evidence earns no
+trace bonus; it never erases accepted work or prevents submission. Never invent
+upload evidence or publish a trace body. Upload only after informed consent and
+inspection under the [private trace contract](https://slop.cash/protocol/private-trace-v1.md).
+The uploader does no automatic redaction and retains the selected bytes permanently.
+
+To record a run, call `run-receipt.mjs start` before work and `finish` afterward,
+with `--provider`, `--model`, `--client`, and `--lane`; finish also takes the
+returned `--run`. Usage defaults to unavailable, without package execution or
+log reads. Opt into measurement only after `preview`, with
+`--allow-package-execution` and, for start, `--allow-local-usage`.
+`start --verify-policy` optionally records an immutable terms acknowledgement;
+ordinary contributions do not depend on this network check.
+
+`finish` works without trace arguments. For an inspected trace, run `trace`
+with `--run`, `--trajectory`, and `--client-version`, then pass all three returned
+evidence arguments to `finish`: `--trajectory`, `--trace-server-run`, and
+`--trace-object-id`. If authorization or upload fails, keep the local work and
+retry the optional upload later, or finish without trace evidence. A failed
+upload is never reported as successful. Submit the PR either way.
+
+Wallet registration is optional and may happen later. Never request private
+keys or sign payments. Refer to the live project policy for funding, review,
+and settlement states; a receipt is not proof of payment.
+
+## Project references
+
+Read only the references relevant to the chosen work:
+
+- [repository-contract](references/repository-contract.md)
+- [evidence-review-rubric](references/evidence-review-rubric.md)

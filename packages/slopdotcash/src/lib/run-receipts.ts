@@ -1,0 +1,772 @@
+import {
+  exactKeys,
+  isCanonicalUint,
+  isExactUtc,
+  isRecord,
+  nonNegativeInteger,
+} from "./record-validation.mjs";
+/**
+ * Defines the public, device-signed project-run receipt embedded in a GitHub
+ * contribution footer. The receipt proves stable bytes and device continuity;
+ * its local usage figures remain supporting evidence rather than provider proof.
+ */
+
+import {
+  isExactClientIdentifier,
+  isExactModelIdentifier,
+  isExactProviderIdentifier,
+} from "./model-identity";
+import {
+  findHistoricalProject,
+  findHistoricalProjectByRepositoryId,
+  type ProjectId,
+} from "./projects.mjs";
+import type { RepositoryId } from "./repositories.mjs";
+
+const RUN_RECEIPT_SCHEMA_VERSION = "2" as const;
+export type RunReceiptSchemaVersion = "1" | "2";
+
+const RUN_ID_PATTERN = /^run_[0-9A-HJKMNP-TV-Z]{26}$/u;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
+const FULL_SKILL_REVISION_PATTERN =
+  /^[a-z0-9_.-]+\/[a-z0-9_.-]+@[0-9a-f]{40}:[^\s`]+$/iu;
+const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/u;
+
+type UsageConfidence = "bounded" | "exact" | "unavailable";
+
+export interface ProjectRunUsage {
+  source: "ccusage-session-v20" | "none";
+  confidence: UsageConfidence;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  totalTokens: number;
+  costMicroUsd: string;
+  sessionCount: number;
+}
+
+export interface ProjectRunReceipt {
+  schemaVersion: RunReceiptSchemaVersion;
+  runId: string;
+  projectId: ProjectId;
+  repositoryId: RepositoryId;
+  startedAt: string;
+  completedAt: string;
+  provider: string;
+  model: string;
+  client: string;
+  skillRevision: string;
+  skillSha256: string;
+  policyAcknowledgement?: {
+    policyRevision: string;
+    licenseSha256: string | null;
+    inboundTermsSha256: string | null;
+    prizeRulesSha256: string | null;
+    acknowledgedAt: string;
+  };
+  usage: ProjectRunUsage;
+  trajectorySha256: string | null;
+  traceUpload: {
+    authority: "https://api.slop.cash";
+    serverRunId: string;
+    objectId: string;
+    sha256: string;
+  } | null;
+  signatureAlgorithm: "ed25519";
+  devicePublicKey: string;
+  deviceKeyId: string;
+  deviceSignature: string;
+}
+
+interface ProjectReceiptPolicyBinding {
+  id: ProjectId;
+  terms: {
+    revision: string;
+    receiptPolicy:
+      | {
+          state: "pending-authority-activation";
+          activatedAt: null;
+          bindings: readonly [];
+        }
+      | {
+          state: "active";
+          activatedAt: string;
+          bindings: readonly {
+            policyRevision: string;
+            licenseSha256: string;
+            inboundTermsSha256: string | null;
+            prizeRulesSha256: string | null;
+            activatedAt: string;
+          }[];
+        };
+    repositoryLicense: { fileSha256: string | null };
+    inbound: { fileSha256: string | null };
+    externalPrize: { rulesSha256: string | null } | null;
+  };
+}
+
+/**
+ * Joins a structurally valid receipt to the reviewed policy manifest used by
+ * ingestion. Historical ingestion must resolve the manifest at the receipt's
+ * immutable skill revision; passing an unpinned or current substitute is not a
+ * valid join.
+ */
+export function assertRunReceiptPolicyJoin(
+  receipt: ProjectRunReceipt,
+  project: ProjectReceiptPolicyBinding,
+): ProjectRunReceipt {
+  if (receipt.projectId !== project.id) {
+    throw new TypeError("run receipt policy project does not match");
+  }
+  const activation = project.terms.receiptPolicy;
+  if (receipt.schemaVersion === "1") {
+    if (
+      activation.state === "active" &&
+      Date.parse(receipt.completedAt) >= Date.parse(activation.activatedAt)
+    ) {
+      throw new TypeError(
+        "v1 run receipt is not allowed after project policy activation",
+      );
+    }
+    return receipt;
+  }
+  const acknowledgement = receipt.policyAcknowledgement;
+  if (activation.state !== "active") {
+    if (
+      !acknowledgement ||
+      acknowledgement.policyRevision !== project.terms.revision ||
+      acknowledgement.licenseSha256 !==
+        project.terms.repositoryLicense.fileSha256 ||
+      acknowledgement.inboundTermsSha256 !== project.terms.inbound.fileSha256 ||
+      acknowledgement.prizeRulesSha256 !==
+        (project.terms.externalPrize?.rulesSha256 ?? null)
+    ) {
+      throw new TypeError(
+        "run receipt policy acknowledgement does not match the disclosed project policy",
+      );
+    }
+    return receipt;
+  }
+  if (Date.parse(receipt.startedAt) < Date.parse(activation.activatedAt)) {
+    throw new TypeError(
+      "v2 run receipt started before project policy activation",
+    );
+  }
+  const binding = activation.bindings.find(
+    (entry) => entry.policyRevision === acknowledgement?.policyRevision,
+  );
+  if (
+    !acknowledgement ||
+    !binding ||
+    Date.parse(receipt.startedAt) < Date.parse(binding.activatedAt) ||
+    acknowledgement.licenseSha256 !== binding.licenseSha256 ||
+    acknowledgement.inboundTermsSha256 !== binding.inboundTermsSha256 ||
+    acknowledgement.prizeRulesSha256 !== binding.prizeRulesSha256
+  ) {
+    throw new TypeError(
+      "run receipt policy acknowledgement does not match the pinned project policy",
+    );
+  }
+  return receipt;
+}
+
+interface RunReceiptMarker {
+  provider: string;
+  model: string;
+  client: ProjectRunReceipt["client"];
+  skill_revision: string;
+  run: {
+    schema_version: RunReceiptSchemaVersion;
+    run_id: string;
+    project: ProjectId;
+    repository: RepositoryId;
+    started_at: string;
+    completed_at: string;
+    skill_sha256: string;
+    policy_acknowledgement?: {
+      policy_revision: string;
+      license_sha256: string | null;
+      inbound_terms_sha256: string | null;
+      prize_rules_sha256: string | null;
+      acknowledged_at: string;
+    };
+    usage: {
+      source: ProjectRunUsage["source"];
+      confidence: UsageConfidence;
+      input_tokens: number;
+      output_tokens: number;
+      cache_creation_tokens: number;
+      cache_read_tokens: number;
+      total_tokens: number;
+      cost_micro_usd: string;
+      session_count: number;
+    };
+    trajectory_sha256: string | null;
+    trace_upload?: {
+      authority: "https://api.slop.cash";
+      server_run_id: string;
+      object_id: string;
+      sha256: string;
+    };
+    signature_algorithm: "ed25519";
+    device_public_key: string;
+    device_key_id: string;
+    device_signature: string;
+  };
+}
+
+/** Validates the camel-case receipt shape published in leaderboard snapshots. */
+export function assertProjectRunReceipt(value: unknown): ProjectRunReceipt {
+  if (!isRecord(value)) throw new TypeError("run receipt must be an object");
+  const hasTraceUpload = Object.hasOwn(value, "traceUpload");
+  const hasPolicyAcknowledgement = Object.hasOwn(
+    value,
+    "policyAcknowledgement",
+  );
+  exactKeys(
+    value,
+    [
+      "client",
+      "completedAt",
+      "deviceKeyId",
+      "devicePublicKey",
+      "deviceSignature",
+      "model",
+      ...(hasPolicyAcknowledgement ? ["policyAcknowledgement"] : []),
+      "projectId",
+      "provider",
+      "repositoryId",
+      "runId",
+      "schemaVersion",
+      "signatureAlgorithm",
+      "skillRevision",
+      "skillSha256",
+      "startedAt",
+      "trajectorySha256",
+      ...(hasTraceUpload ? ["traceUpload"] : []),
+      "usage",
+    ],
+    "run receipt",
+  );
+  if (!isRecord(value.usage))
+    throw new TypeError("run receipt.usage must be an object");
+  exactKeys(
+    value.usage,
+    [
+      "cacheCreationTokens",
+      "cacheReadTokens",
+      "confidence",
+      "costMicroUsd",
+      "inputTokens",
+      "outputTokens",
+      "sessionCount",
+      "source",
+      "totalTokens",
+    ],
+    "run receipt.usage",
+  );
+  return assertRunReceiptMarker({
+    provider: value.provider,
+    model: value.model,
+    client: value.client,
+    skill_revision: value.skillRevision,
+    run: {
+      schema_version: value.schemaVersion,
+      run_id: value.runId,
+      project: value.projectId,
+      repository: value.repositoryId,
+      started_at: value.startedAt,
+      completed_at: value.completedAt,
+      skill_sha256: value.skillSha256,
+      ...(hasPolicyAcknowledgement && isRecord(value.policyAcknowledgement)
+        ? {
+            policy_acknowledgement: {
+              policy_revision: value.policyAcknowledgement.policyRevision,
+              license_sha256: value.policyAcknowledgement.licenseSha256,
+              inbound_terms_sha256:
+                value.policyAcknowledgement.inboundTermsSha256,
+              prize_rules_sha256: value.policyAcknowledgement.prizeRulesSha256,
+              acknowledged_at: value.policyAcknowledgement.acknowledgedAt,
+            },
+          }
+        : {}),
+      usage: {
+        source: value.usage.source,
+        confidence: value.usage.confidence,
+        input_tokens: value.usage.inputTokens,
+        output_tokens: value.usage.outputTokens,
+        cache_creation_tokens: value.usage.cacheCreationTokens,
+        cache_read_tokens: value.usage.cacheReadTokens,
+        total_tokens: value.usage.totalTokens,
+        cost_micro_usd: value.usage.costMicroUsd,
+        session_count: value.usage.sessionCount,
+      },
+      trajectory_sha256: value.trajectorySha256,
+      ...(hasTraceUpload && isRecord(value.traceUpload)
+        ? {
+            trace_upload: {
+              authority: value.traceUpload.authority,
+              server_run_id: value.traceUpload.serverRunId,
+              object_id: value.traceUpload.objectId,
+              sha256: value.traceUpload.sha256,
+            },
+          }
+        : {}),
+      signature_algorithm: value.signatureAlgorithm,
+      device_public_key: value.devicePublicKey,
+      device_key_id: value.deviceKeyId,
+      device_signature: value.deviceSignature,
+    },
+  });
+}
+
+function isoTimestamp(value: unknown, path: string): string {
+  if (!isExactUtc(value)) {
+    throw new TypeError(`${path} must be a canonical UTC ISO timestamp`);
+  }
+  return value;
+}
+
+function identifier(value: unknown, path: string, maxLength = 128): string {
+  if (
+    typeof value !== "string" ||
+    value.length < 1 ||
+    value.length > maxLength ||
+    /^n\/a$/iu.test(value) ||
+    !/^[a-z0-9][a-z0-9._:/+-]*$/iu.test(value)
+  ) {
+    throw new TypeError(`${path} must be a concrete identifier`);
+  }
+  return value;
+}
+
+function declaredIdentity(
+  value: unknown,
+  path: string,
+  validator: (input: unknown) => input is string,
+): string {
+  if (!validator(value)) {
+    throw new TypeError(`${path} must be an exact non-placeholder identifier`);
+  }
+  return value;
+}
+
+function digest(value: unknown, path: string): string {
+  if (typeof value !== "string" || !SHA256_PATTERN.test(value)) {
+    throw new TypeError(`${path} must be a lowercase SHA-256 digest`);
+  }
+  return value;
+}
+
+function optionalDigest(value: unknown, path: string): string | null {
+  return value === null ? null : digest(value, path);
+}
+
+function base64url(
+  value: unknown,
+  path: string,
+  minimumLength: number,
+): string {
+  if (
+    typeof value !== "string" ||
+    value.length < minimumLength ||
+    value.length > 4096 ||
+    !BASE64URL_PATTERN.test(value)
+  ) {
+    throw new TypeError(`${path} must be unpadded base64url`);
+  }
+  return value;
+}
+
+function minorUnits(value: unknown, path: string): string {
+  if (!isCanonicalUint(value)) {
+    throw new TypeError(`${path} must be canonical integer minor units`);
+  }
+  BigInt(value);
+  return value;
+}
+
+/** Converts the compact GitHub marker payload into the canonical receipt. */
+export function assertRunReceiptMarker(value: unknown): ProjectRunReceipt {
+  if (!isRecord(value)) throw new TypeError("run marker must be an object");
+  exactKeys(
+    value,
+    ["client", "model", "provider", "run", "skill_revision"],
+    "run marker",
+  );
+  if (!isRecord(value.run))
+    throw new TypeError("run marker.run must be an object");
+  const hasTraceUpload = Object.hasOwn(value.run, "trace_upload");
+  const hasPolicyAcknowledgement = Object.hasOwn(
+    value.run,
+    "policy_acknowledgement",
+  );
+  exactKeys(
+    value.run,
+    [
+      "completed_at",
+      "device_key_id",
+      "device_public_key",
+      "device_signature",
+      "project",
+      ...(hasPolicyAcknowledgement ? ["policy_acknowledgement"] : []),
+      "repository",
+      "run_id",
+      "schema_version",
+      "signature_algorithm",
+      "skill_sha256",
+      "started_at",
+      "trajectory_sha256",
+      ...(hasTraceUpload ? ["trace_upload"] : []),
+      "usage",
+    ],
+    "run marker.run",
+  );
+  if (!isRecord(value.run.usage)) {
+    throw new TypeError("run marker.run.usage must be an object");
+  }
+  exactKeys(
+    value.run.usage,
+    [
+      "cache_creation_tokens",
+      "cache_read_tokens",
+      "confidence",
+      "cost_micro_usd",
+      "input_tokens",
+      "output_tokens",
+      "session_count",
+      "source",
+      "total_tokens",
+    ],
+    "run marker.run.usage",
+  );
+
+  const project =
+    typeof value.run.project === "string"
+      ? findHistoricalProject(value.run.project)
+      : null;
+  if (!project) throw new TypeError("run marker project is not registered");
+  const repositoryProject =
+    typeof value.run.repository === "string"
+      ? findHistoricalProjectByRepositoryId(value.run.repository)
+      : null;
+  if (!repositoryProject || repositoryProject.id !== project.id) {
+    throw new TypeError("run marker repository does not belong to the project");
+  }
+  if (
+    value.run.schema_version !== "1" &&
+    value.run.schema_version !== RUN_RECEIPT_SCHEMA_VERSION
+  ) {
+    throw new TypeError("run marker schema_version is unsupported");
+  }
+  if (
+    (value.run.schema_version === "2") !== hasPolicyAcknowledgement ||
+    (value.run.schema_version === "1" && hasPolicyAcknowledgement)
+  ) {
+    throw new TypeError(
+      "run marker policy acknowledgement does not match its schema",
+    );
+  }
+  if (
+    typeof value.run.run_id !== "string" ||
+    !RUN_ID_PATTERN.test(value.run.run_id)
+  ) {
+    throw new TypeError("run marker run_id is invalid");
+  }
+  const startedAt = isoTimestamp(value.run.started_at, "run marker.started_at");
+  const completedAt = isoTimestamp(
+    value.run.completed_at,
+    "run marker.completed_at",
+  );
+  if (Date.parse(completedAt) < Date.parse(startedAt)) {
+    throw new TypeError("run marker completed_at precedes started_at");
+  }
+  const client = declaredIdentity(
+    value.client,
+    "run marker.client",
+    isExactClientIdentifier,
+  );
+  const provider = declaredIdentity(
+    value.provider,
+    "run marker.provider",
+    isExactProviderIdentifier,
+  );
+  const model = declaredIdentity(
+    value.model,
+    "run marker.model",
+    isExactModelIdentifier,
+  );
+  if (
+    typeof value.skill_revision !== "string" ||
+    !FULL_SKILL_REVISION_PATTERN.test(value.skill_revision) ||
+    !value.skill_revision.endsWith(`:${project.skill.sourcePath}`)
+  ) {
+    throw new TypeError("run marker skill_revision is not the project skill");
+  }
+  if (
+    value.run.usage.source !== "ccusage-session-v20" &&
+    value.run.usage.source !== "none"
+  ) {
+    throw new TypeError("run marker usage source is unsupported");
+  }
+  const confidence = value.run.usage.confidence;
+  if (
+    !(["bounded", "exact", "unavailable"] as const).includes(
+      confidence as UsageConfidence,
+    )
+  ) {
+    throw new TypeError("run marker usage confidence is invalid");
+  }
+  if (value.run.signature_algorithm !== "ed25519") {
+    throw new TypeError("run marker signature algorithm is unsupported");
+  }
+  const usage: ProjectRunUsage = {
+    source: value.run.usage.source,
+    confidence: confidence as UsageConfidence,
+    inputTokens: nonNegativeInteger(
+      value.run.usage.input_tokens,
+      "run marker.usage.input_tokens",
+    ),
+    outputTokens: nonNegativeInteger(
+      value.run.usage.output_tokens,
+      "run marker.usage.output_tokens",
+    ),
+    cacheCreationTokens: nonNegativeInteger(
+      value.run.usage.cache_creation_tokens,
+      "run marker.usage.cache_creation_tokens",
+    ),
+    cacheReadTokens: nonNegativeInteger(
+      value.run.usage.cache_read_tokens,
+      "run marker.usage.cache_read_tokens",
+    ),
+    totalTokens: nonNegativeInteger(
+      value.run.usage.total_tokens,
+      "run marker.usage.total_tokens",
+    ),
+    costMicroUsd: minorUnits(
+      value.run.usage.cost_micro_usd,
+      "run marker.usage.cost_micro_usd",
+    ),
+    sessionCount: nonNegativeInteger(
+      value.run.usage.session_count,
+      "run marker.usage.session_count",
+    ),
+  };
+  if (usage.confidence === "unavailable") {
+    if (
+      usage.inputTokens !== 0 ||
+      usage.outputTokens !== 0 ||
+      usage.cacheCreationTokens !== 0 ||
+      usage.cacheReadTokens !== 0 ||
+      usage.totalTokens !== 0 ||
+      usage.costMicroUsd !== "0" ||
+      usage.sessionCount !== 0
+    ) {
+      throw new TypeError("unavailable usage must contain zero values");
+    }
+  } else if (
+    usage.source !== "ccusage-session-v20" ||
+    usage.totalTokens === 0 ||
+    usage.sessionCount === 0
+  ) {
+    throw new TypeError("available usage must contain tokens and sessions");
+  }
+  if (usage.source === "none" && usage.confidence !== "unavailable") {
+    throw new TypeError("usage without an adapter must be unavailable");
+  }
+
+  const trajectorySha256 = optionalDigest(
+    value.run.trajectory_sha256,
+    "run marker.trajectory_sha256",
+  );
+  let traceUpload: ProjectRunReceipt["traceUpload"] = null;
+  if (hasTraceUpload) {
+    if (!isRecord(value.run.trace_upload)) {
+      throw new TypeError("run marker.trace_upload must be an object");
+    }
+    exactKeys(
+      value.run.trace_upload,
+      ["authority", "object_id", "server_run_id", "sha256"],
+      "run marker.trace_upload",
+    );
+    const sha256 = digest(
+      value.run.trace_upload.sha256,
+      "run marker.trace_upload.sha256",
+    );
+    const serverRunId = identifier(
+      value.run.trace_upload.server_run_id,
+      "run marker.trace_upload.server_run_id",
+      160,
+    );
+    if (
+      value.run.trace_upload.authority !== "https://api.slop.cash" ||
+      value.run.trace_upload.object_id !== `sha256:${sha256}` ||
+      trajectorySha256 !== sha256
+    ) {
+      throw new TypeError("run marker trace upload evidence does not match");
+    }
+    traceUpload = {
+      authority: "https://api.slop.cash",
+      serverRunId,
+      objectId: value.run.trace_upload.object_id,
+      sha256,
+    };
+  }
+
+  let policyAcknowledgement: ProjectRunReceipt["policyAcknowledgement"];
+  if (hasPolicyAcknowledgement) {
+    if (!isRecord(value.run.policy_acknowledgement)) {
+      throw new TypeError(
+        "run marker.policy_acknowledgement must be an object",
+      );
+    }
+    exactKeys(
+      value.run.policy_acknowledgement,
+      [
+        "acknowledged_at",
+        "inbound_terms_sha256",
+        "license_sha256",
+        "policy_revision",
+        "prize_rules_sha256",
+      ],
+      "run marker.policy_acknowledgement",
+    );
+    const policyRevision = identifier(
+      value.run.policy_acknowledgement.policy_revision,
+      "run marker.policy_acknowledgement.policy_revision",
+      80,
+    );
+    policyAcknowledgement = {
+      policyRevision,
+      licenseSha256: optionalDigest(
+        value.run.policy_acknowledgement.license_sha256,
+        "run marker.policy_acknowledgement.license_sha256",
+      ),
+      inboundTermsSha256: optionalDigest(
+        value.run.policy_acknowledgement.inbound_terms_sha256,
+        "run marker.policy_acknowledgement.inbound_terms_sha256",
+      ),
+      prizeRulesSha256: optionalDigest(
+        value.run.policy_acknowledgement.prize_rules_sha256,
+        "run marker.policy_acknowledgement.prize_rules_sha256",
+      ),
+      acknowledgedAt: isoTimestamp(
+        value.run.policy_acknowledgement.acknowledged_at,
+        "run marker.policy_acknowledgement.acknowledged_at",
+      ),
+    };
+    const acknowledgedTime = Date.parse(policyAcknowledgement.acknowledgedAt);
+    if (
+      acknowledgedTime < Date.parse(startedAt) ||
+      acknowledgedTime > Date.parse(completedAt)
+    ) {
+      throw new TypeError(
+        "run marker policy acknowledgement must fall within the run",
+      );
+    }
+  }
+
+  return {
+    schemaVersion: value.run.schema_version,
+    runId: value.run.run_id,
+    projectId: project.id,
+    repositoryId: value.run.repository as RepositoryId,
+    startedAt,
+    completedAt,
+    provider,
+    model,
+    client,
+    skillRevision: value.skill_revision,
+    skillSha256: digest(value.run.skill_sha256, "run marker.skill_sha256"),
+    ...(policyAcknowledgement ? { policyAcknowledgement } : {}),
+    usage,
+    trajectorySha256,
+    traceUpload,
+    signatureAlgorithm: "ed25519",
+    devicePublicKey: base64url(
+      value.run.device_public_key,
+      "run marker.device_public_key",
+      40,
+    ),
+    deviceKeyId: digest(value.run.device_key_id, "run marker.device_key_id"),
+    deviceSignature: base64url(
+      value.run.device_signature,
+      "run marker.device_signature",
+      64,
+    ),
+  };
+}
+
+/** Builds the exact marker object from a validated receipt. */
+export function runReceiptMarker(receipt: ProjectRunReceipt): RunReceiptMarker {
+  const project = findHistoricalProject(receipt.projectId);
+  if (!project) throw new TypeError("receipt project is not registered");
+  return {
+    provider: receipt.provider,
+    model: receipt.model,
+    client: receipt.client,
+    skill_revision: receipt.skillRevision,
+    run: {
+      schema_version: receipt.schemaVersion,
+      run_id: receipt.runId,
+      project: receipt.projectId,
+      repository: receipt.repositoryId,
+      started_at: receipt.startedAt,
+      completed_at: receipt.completedAt,
+      skill_sha256: receipt.skillSha256,
+      ...(receipt.policyAcknowledgement
+        ? {
+            policy_acknowledgement: {
+              policy_revision: receipt.policyAcknowledgement.policyRevision,
+              license_sha256: receipt.policyAcknowledgement.licenseSha256,
+              inbound_terms_sha256:
+                receipt.policyAcknowledgement.inboundTermsSha256,
+              prize_rules_sha256:
+                receipt.policyAcknowledgement.prizeRulesSha256,
+              acknowledged_at: receipt.policyAcknowledgement.acknowledgedAt,
+            },
+          }
+        : {}),
+      usage: {
+        source: receipt.usage.source,
+        confidence: receipt.usage.confidence,
+        input_tokens: receipt.usage.inputTokens,
+        output_tokens: receipt.usage.outputTokens,
+        cache_creation_tokens: receipt.usage.cacheCreationTokens,
+        cache_read_tokens: receipt.usage.cacheReadTokens,
+        total_tokens: receipt.usage.totalTokens,
+        cost_micro_usd: receipt.usage.costMicroUsd,
+        session_count: receipt.usage.sessionCount,
+      },
+      trajectory_sha256: receipt.trajectorySha256,
+      ...(receipt.traceUpload
+        ? {
+            trace_upload: {
+              authority: receipt.traceUpload.authority,
+              server_run_id: receipt.traceUpload.serverRunId,
+              object_id: receipt.traceUpload.objectId,
+              sha256: receipt.traceUpload.sha256,
+            },
+          }
+        : {}),
+      signature_algorithm: receipt.signatureAlgorithm,
+      device_public_key: receipt.devicePublicKey,
+      device_key_id: receipt.deviceKeyId,
+      device_signature: receipt.deviceSignature,
+    },
+  };
+}
+
+/** Returns the stable bytes signed by the receipt device key. */
+export function runReceiptSigningPayload(receipt: ProjectRunReceipt): string {
+  const marker = runReceiptMarker(receipt);
+  const { device_signature: _signature, ...unsignedRun } = marker.run;
+  return JSON.stringify({
+    provider: marker.provider,
+    model: marker.model,
+    client: marker.client,
+    skill_revision: marker.skill_revision,
+    run: unsignedRun,
+  });
+}

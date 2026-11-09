@@ -1,0 +1,39 @@
+name: Cancel CI for closed pull requests
+
+# A merged or closed pull request no longer needs its checks. Cancel the
+# remaining pull request runs for its final head so they release runners.
+# Push, schedule and manual runs are never touched. No pull request code is
+# checked out or executed.
+
+on:
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  actions: write
+
+jobs:
+  cancel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Cancel active pull request runs for the closed head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SELF_RUN: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Missing pull request head commit."; exit 1; }
+          runs="$(gh run list --commit "$HEAD_SHA" --limit 100 --json databaseId,event,status \
+            --jq '.[] | select(.status != "completed") | select(.event == "pull_request" or .event == "pull_request_target") | .databaseId')"
+          echo "Active pull request runs for $HEAD_SHA: $(echo "$runs" | grep -c . || true)"
+          # Force cancellation also stops `always()` jobs, so a closed pull
+          # request does not keep a runner for a check that no longer matters.
+          for run in $runs; do
+            if [ "$run" != "$SELF_RUN" ]; then
+              gh api -X POST "repos/$GH_REPO/actions/runs/$run/force-cancel" >/dev/null \
+                && echo "Cancelled run $run." || echo "Run $run already finished."
+            fi
+          done

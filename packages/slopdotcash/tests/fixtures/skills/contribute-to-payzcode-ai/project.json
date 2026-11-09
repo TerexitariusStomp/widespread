@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "1",
+  "projectId": "payzcode-ai",
+  "repositoryId": "lysande62/payzcode-enterprise",
+  "skillName": "contribute-to-payzcode-ai",
+  "skillSourcePath": "skills/contribute-to-payzcode-ai",
+  "publicOrigin": "https://slop.cash/projects/payzcode-ai",
+  "policyAuthority": "https://slop.cash",
+  "usageAdapters": {
+    "codex": "codex",
+    "claude-code": "claude",
+    "grok-build": "grok"
+  }
+}

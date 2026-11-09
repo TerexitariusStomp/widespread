@@ -1,0 +1,4697 @@
+import { GitHubClient } from "../workers/slopbot/github";
+import {
+  fetchProjectPenaltyState,
+  loadParticipationBans,
+  loadValueInputs,
+  penaltyFeedProjects,
+  VALUE_FEED_UNAVAILABLE_EXIT_CODE,
+  ValueFeedUnavailableError,
+} from "./value-ingestion";
+/**
+ * Collects the rolling contribution ledger and current work queues from the
+ * authenticated GitHub GraphQL API. Time slicing, cursor pagination, runtime
+ * validation, and atomic output keep API limits or partial data from ever
+ * becoming a plausible-looking empty snapshot.
+ */
+
+import type { ConnectionPage, PageInfo } from "./github-pagination";
+import { resolveGitHubToken } from "./github-token";
+
+export { resolveGitHubToken } from "./github-token";
+
+import { readFileSync } from "node:fs";
+import { mkdir, rename, rm } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { type DeploymentTier, deploymentTier } from "../src/lib/deployment";
+import { loadEvaluatorAwardEvents } from "../src/lib/evaluator-awards";
+import {
+  assertPublishableLeaderboardSnapshot,
+  canonicalActorAvatarUrl,
+  createLeaderboardSnapshot,
+  DETAILED_MERGED_PULL_REQUESTS_PER_MONTH,
+  dedupeByNodeId,
+  type EvidenceCategory,
+  type GitHubActor,
+  type GitHubActorKind,
+  type GitHubLabel,
+  type GitHubTextSource,
+  type IssueRecord,
+  isBotActor,
+  isMergedPullRequestBodyEligibleForEvidence,
+  type LeaderboardInput,
+  type LeaderboardSnapshot,
+  type LeaderboardSourceMetadata,
+  type MergedPullRequestOutcome,
+  type MergedPullRequestReviewRecord,
+  type ModelAttribution,
+  type PullRequestFile,
+  type PullRequestRecord,
+  type PullRequestReview,
+  pullRequestTextSources,
+  SCORE_WINDOW_DAYS,
+  type ScoreEvent,
+  selectUniqueVerifiedEvidence,
+  type UnavailableSource,
+  VERIFICATION_WINDOW_DAYS,
+  type VerifiedEvidenceArtifact,
+} from "../src/lib/leaderboard";
+import {
+  REGISTERED_REPOSITORIES,
+  TARGET_REPOSITORIES,
+  type TargetRepository,
+} from "../src/lib/repositories.mjs";
+import {
+  assertValueScoringPolicy,
+  type ValueScoringPolicy,
+  valueScoringPolicy,
+} from "../src/lib/scoring-policy";
+import {
+  isTransientArtifactFailure,
+  planReferencedArtifacts,
+  verifyReferencedArtifacts,
+} from "./pr-evidence-artifacts.mjs";
+import {
+  type PullRequestGitFiles,
+  recoverPullRequestGitFiles,
+} from "./pull-request-git-files";
+import { verifyRunReceiptSignature } from "./run-receipt-crypto";
+
+export const SEARCH_SAFE_RESULT_LIMIT = 950;
+// Search ranges are second-precise (`searchRange`, `midpoint`), so a burst is
+// split down to one second; only a single second over the cap still refuses.
+// A one-minute floor refused a 1,072-merge bulk merge in 45 s (6 Nov 2026).
+export const MINIMUM_SEARCH_SLICE_MS = 1_000;
+export const GRAPHQL_PAGE_SIZE = 100;
+export const MINIMUM_GRAPHQL_PAGE_SIZE = 1;
+export const DETAIL_BATCH_SIZE = 25;
+export const REVIEW_DETAIL_BATCH_SIZE = 100;
+export const MAX_TRANSIENT_ATTEMPTS = 3;
+export const MAX_GRAPHQL_REQUEST_ATTEMPTS = 5;
+// Detail queries routinely take 20–40 seconds on repositories with thousands
+// of recent pull requests. A shorter timeout causes GitHub to finish and bill
+// work that the client has already abandoned, exhausting the Actions token on
+// retries even though the successful query itself is inexpensive.
+export const GRAPHQL_REQUEST_TIMEOUT_MS = 60_000;
+export const MAX_GRAPHQL_RESPONSE_BYTES = 64 * 1024 * 1024;
+// Permit the usable portion of a 5,000-point token while preserving the same
+// 100-point reserve on lower-limit tokens. The effective cap is always bounded
+// by the limit GitHub reports, so a 1,000-point token still stops at 900.
+export const MAX_GENERATION_COST = 4_900;
+export const MINIMUM_RATE_LIMIT_RESERVE = 100;
+export const MINIMUM_STARTING_RATE_LIMIT = 900;
+export const MAX_EVIDENCE_ARTIFACTS_PER_SNAPSHOT = 64;
+export const MAX_EVIDENCE_SOURCES_PER_SNAPSHOT = 64;
+export const MAX_EVIDENCE_ARTIFACTS_PER_SOURCE =
+  MAX_EVIDENCE_ARTIFACTS_PER_SNAPSHOT;
+export const EVIDENCE_VERIFICATION_CONCURRENCY = 4;
+export const EVIDENCE_ARTIFACT_TIMEOUT_MS = 5_000;
+/** Extra fetches of one artifact after a transport failure. */
+export const EVIDENCE_TRANSIENT_RETRIES = 2;
+export const EVIDENCE_TRANSIENT_RETRY_DELAY_MS = 1_000;
+export const EVIDENCE_CONTENT_DIGEST_LIMIT_BYTES = 32 * 1024 * 1024;
+export const DEFAULT_OUTPUT_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../public/data/leaderboard.json",
+);
+const ACCEPTED_REVIEW_HISTORY_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../data/accepted-review-history.json",
+);
+
+function loadAcceptedReviewHistory(): {
+  events: ScoreEvent[];
+  attributions: ModelAttribution[];
+} {
+  const value = JSON.parse(
+    readFileSync(ACCEPTED_REVIEW_HISTORY_PATH, "utf8"),
+  ) as unknown;
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    (value as { schemaVersion?: unknown }).schemaVersion !== "2" ||
+    !Array.isArray((value as { events?: unknown }).events) ||
+    !Array.isArray((value as { attributions?: unknown }).attributions) ||
+    Object.keys(value).sort().join("\0") !==
+      "attributions\0events\0schemaVersion"
+  ) {
+    throw new TypeError("accepted review history manifest is invalid");
+  }
+  return value as { events: ScoreEvent[]; attributions: ModelAttribution[] };
+}
+
+type JsonRecord = Record<string, unknown>;
+type GraphqlVariables = Record<
+  string,
+  boolean | number | readonly string[] | string | null | undefined
+>;
+type FetchLike = (
+  input: RequestInfo | URL,
+  init?: RequestInit,
+) => Promise<Response>;
+
+interface NestedPageState {
+  totalCount: number;
+  pageInfo: PageInfo;
+}
+
+type PendingPullRequestReview = Omit<
+  PullRequestReview,
+  "inlineCommentCount"
+> & {
+  commitId: string | null;
+};
+type PendingPullRequestRecord = Omit<PullRequestRecord, "reviews"> & {
+  headRefOid: string;
+  reviews: PendingPullRequestReview[];
+};
+type PendingMergedPullRequestReviewRecord = Omit<
+  MergedPullRequestReviewRecord,
+  "reviews"
+> & {
+  reviews: PendingPullRequestReview[];
+};
+
+interface ParsedPullRequest {
+  record: PendingPullRequestRecord;
+  state: string;
+  pages: {
+    comments: NestedPageState;
+    reviews: NestedPageState;
+    files: NestedPageState | null;
+    closingIssues: NestedPageState;
+  };
+}
+
+interface ParsedMergedPullRequestReview {
+  record: PendingMergedPullRequestReviewRecord;
+  state: string;
+  pages: {
+    comments: NestedPageState;
+    reviews: NestedPageState;
+  };
+}
+
+interface ParsedIssue {
+  record: IssueRecord;
+  state: string;
+  references: ConnectionPage<{
+    id: string;
+    pullRequestId: string | null;
+  }> | null;
+  pages: {
+    comments: NestedPageState;
+    closedByPullRequests: NestedPageState;
+  };
+}
+
+interface NodeReference {
+  id: string;
+  kind: "Issue" | "PullRequest";
+  outcome: MergedPullRequestOutcome | null;
+  openVersion: string | null;
+  commitPage?: NestedPageState & { baseRefOid: string; headRefOid: string };
+}
+
+type ExpectedRecordState = "closed" | "merged" | "open";
+
+export class OpenSetChangedError extends Error {}
+
+/** A previously enumerated node is no longer addressable; never omit it in place. */
+export class SourceNodeUnavailableError extends Error {
+  override readonly name = "SourceNodeUnavailableError";
+  constructor(
+    readonly sources: UnavailableSource[],
+    options?: ErrorOptions,
+  ) {
+    super(
+      "GitHub could not resolve an enumerated source node; a fresh complete census is required",
+      options,
+    );
+  }
+}
+
+/** Retries only a concurrent mutation of evidence-bound open work. */
+export async function retrySlopSnapshot<T>(
+  collect: (attempt: number) => Promise<T>,
+): Promise<T> {
+  let lastChange: OpenSetChangedError | null = null;
+  for (let attempt = 1; attempt <= MAX_TRANSIENT_ATTEMPTS; attempt += 1) {
+    try {
+      return await collect(attempt);
+    } catch (error) {
+      // error-policy:J1 Open evidence is non-scoring; only its typed concurrent
+      // mutation is recollected at this boundary.
+      if (!(error instanceof OpenSetChangedError)) throw error;
+      lastChange = error;
+    }
+  }
+  throw new Error(
+    `Open evidence changed during ${MAX_TRANSIENT_ATTEMPTS} consecutive verification attempts`,
+    { cause: lastChange },
+  );
+}
+
+/** Retries a paginated open-work listing when its live total changes. */
+export async function retryOpenReferenceListing<T>(
+  collect: () => Promise<T>,
+): Promise<T> {
+  return await retrySlopSnapshot(() => collect());
+}
+
+class GraphqlResponseBoundaryError extends Error {}
+
+/** GitHub gateway answers that the bounded retry treats as transient. */
+const GATEWAY_FAILURE_STATUSES: readonly number[] = [502, 503, 504];
+
+/**
+ * GitHub's gateway failed a request on every bounded attempt (502, 503 or
+ * 504 with a non-JSON body). For a `nodes(ids:)` batch the usual cause is the
+ * batch itself: twenty-five open pull requests that each carry over a thousand
+ * changed files exceed what one GraphQL request can assemble, so batch callers
+ * split the ids instead of failing the run (`executeNodeBatch`).
+ */
+export class GraphqlUpstreamError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "GraphqlUpstreamError";
+    this.status = status;
+  }
+}
+
+/**
+ * Runs one `nodes(ids:)` query. When the gateway fails the whole batch, the
+ * two halves are requested separately and reassembled in request order, down
+ * to single ids, which still fail closed.
+ */
+export async function executeNodeBatch(
+  client: Pick<GraphqlExecutor, "execute">,
+  document: string,
+  ids: readonly string[],
+  variables: GraphqlVariables = {},
+): Promise<JsonRecord> {
+  try {
+    return await client.execute(document, { ...variables, ids });
+  } catch (error) {
+    if (!(error instanceof GraphqlUpstreamError) || ids.length < 2) throw error;
+    const middle = Math.ceil(ids.length / 2);
+    const head = await executeNodeBatch(
+      client,
+      document,
+      ids.slice(0, middle),
+      variables,
+    );
+    const tail = await executeNodeBatch(
+      client,
+      document,
+      ids.slice(middle),
+      variables,
+    );
+    return {
+      ...tail,
+      nodes: [
+        ...asArray(head.nodes, "data.nodes"),
+        ...asArray(tail.nodes, "data.nodes"),
+      ],
+    };
+  }
+}
+
+export interface RateLimitSnapshot {
+  cost: number;
+  consumedDuringRun: number;
+  limit: number;
+  remaining: number;
+  resetAt: string;
+}
+
+export interface GraphqlExecutor {
+  recoverPullRequestFiles?(
+    repository: TargetRepository,
+    repositoryId: string,
+    node: JsonRecord,
+  ): Promise<PullRequestGitFiles>;
+  compareCommitPage?(
+    repository: TargetRepository,
+    base: string,
+    head: string,
+    page: number,
+  ): Promise<JsonRecord>;
+  execute(document: string, variables?: GraphqlVariables): Promise<JsonRecord>;
+  ensureBudget?(requiredCost: number): Promise<void>;
+  getRequestCount(): number;
+  getRateLimit(): RateLimitSnapshot;
+}
+
+export interface GenerationProgress {
+  phase:
+    | "merged-pull-requests"
+    | "resolved-issues"
+    | "open-issues"
+    | "open-pull-requests";
+  completed: number;
+  total: number;
+}
+
+export interface GenerateOptions {
+  /**
+   * The versioned producer for new work. Defaults to the recorded owner
+   * decision. Value assessments come only from the authoritative hosted feed.
+   * A feed failure prevents this publication instead of falling back to
+   * legacy scoring; an outage exits with VALUE_FEED_UNAVAILABLE_EXIT_CODE so
+   * the release keeps the last published snapshot and retries.
+   */
+  scoringPolicy?: ValueScoringPolicy;
+  now?: Date;
+  actualNow?: Date;
+  onProgress?: (progress: GenerationProgress) => void;
+  evidenceFetch?: FetchLike;
+  evidenceToken?: string;
+  evidenceTimeoutMs?: number;
+  evidenceRetryDelayMs?: number;
+  evaluatedContributions?: ScoreEvent[];
+  retainedReviewEvents?: ScoreEvent[];
+  retainedReviewAttributions?: ModelAttribution[];
+  /** The site this build publishes; staging reads its registry from staging. */
+  deploymentTier?: DeploymentTier;
+  /** Shared only across the one complete-census retry in runGenerator. */
+  sourceRecovery?: {
+    unavailableSources: UnavailableSource[];
+    allowJointHolds: boolean;
+  };
+}
+
+export function collectEvaluatedReviewArtifactKeys(
+  events: ReadonlyArray<Pick<ScoreEvent, "category" | "repository" | "source">>,
+): Set<string> {
+  return new Set(
+    events
+      .filter(
+        (event) =>
+          event.category === "evaluated-contribution" &&
+          event.source.kind === "review",
+      )
+      .map(
+        (event) =>
+          `${event.repository.toLowerCase()}\u0000${event.source.number}`,
+      ),
+  );
+}
+
+export interface GeneratorDependencies {
+  getToken: () => Promise<string>;
+  createClient: (token: string) => GraphqlExecutor;
+  generate: (
+    client: GraphqlExecutor,
+    options?: GenerateOptions,
+  ) => Promise<LeaderboardSnapshot>;
+  write: (snapshot: LeaderboardSnapshot, outputPath: string) => Promise<void>;
+  onCensusRetry?: () => void;
+}
+
+const ACTOR_FRAGMENT = `
+  fragment LeaderboardActor on Actor {
+    __typename
+    login
+    avatarUrl
+    url
+    ... on User { id }
+    ... on Bot { id }
+    ... on Mannequin { id }
+    ... on Organization { id }
+  }
+`;
+
+const LABEL_FIELDS = `
+  totalCount
+  nodes {
+    id
+    name
+    color
+  }
+`;
+
+const ASSIGNEE_FIELDS = `
+  totalCount
+  nodes {
+    __typename
+    id
+    login
+    avatarUrl
+    url
+  }
+`;
+
+const COMMENT_FIELDS = `
+  totalCount
+  pageInfo { hasNextPage endCursor }
+  nodes {
+    id
+    body
+    createdAt
+    updatedAt
+    authorAssociation
+    url
+    author { ...LeaderboardActor }
+  }
+`;
+
+const REVIEW_FIELDS = `
+  totalCount
+  pageInfo { hasNextPage endCursor }
+  nodes {
+    id
+    body
+    state
+    submittedAt
+    url
+    commit { oid }
+    author { ...LeaderboardActor }
+  }
+`;
+
+const FILE_FIELDS = `
+  totalCount
+  pageInfo { hasNextPage endCursor }
+  nodes {
+    path
+    additions
+    deletions
+  }
+`;
+
+const PULL_REQUEST_FRAGMENT = `
+  fragment LeaderboardPullRequest on PullRequest {
+    id
+    state
+    number
+    title
+    url
+    body
+    createdAt
+    updatedAt
+    lastEditedAt
+    editor { ...LeaderboardActor }
+    mergedAt
+    closedAt
+    isDraft
+    headRefOid
+    reviewDecision
+    reviewRequests(first: 1) { totalCount }
+    author { ...LeaderboardActor }
+    additions
+    deletions
+    changedFiles
+    commits { totalCount }
+    labels(first: 100) { ${LABEL_FIELDS} }
+    assignees(first: 100) { ${ASSIGNEE_FIELDS} }
+    comments(first: 100) { ${COMMENT_FIELDS} }
+    reviews(first: 100) { ${REVIEW_FIELDS} }
+    files(first: 100) { ${FILE_FIELDS} }
+    closingIssuesReferences(first: 100) {
+      totalCount
+      pageInfo { hasNextPage endCursor }
+      nodes { id }
+    }
+  }
+`;
+
+const MERGED_PULL_REQUEST_REVIEW_FRAGMENT = `
+  fragment LeaderboardMergedPullRequestReview on PullRequest {
+    id
+    state
+    number
+    title
+    url
+    body
+    createdAt
+    updatedAt
+    lastEditedAt
+    editor { ...LeaderboardActor }
+    mergedAt
+    headRefOid
+    author { ...LeaderboardActor }
+    comments(first: 100) { ${COMMENT_FIELDS} }
+    reviews(states: $reviewStates, first: 100) { ${REVIEW_FIELDS} }
+  }
+`;
+
+const ISSUE_REFERENCE_FIELDS = `
+  totalCount
+  pageInfo { hasNextPage endCursor }
+  nodes {
+    ... on CrossReferencedEvent {
+      id
+      source { __typename ... on PullRequest { id } }
+    }
+  }
+`;
+
+const ISSUE_FRAGMENT = `
+  fragment LeaderboardIssue on Issue {
+    id
+    state
+    number
+    title
+    url
+    body
+    createdAt
+    updatedAt
+    closedAt
+    stateReason
+    author { ...LeaderboardActor }
+    labels(first: 100) { ${LABEL_FIELDS} }
+    assignees(first: 100) { ${ASSIGNEE_FIELDS} }
+    comments(first: 100) { ${COMMENT_FIELDS} }
+    timelineItems(first: 100, itemTypes: [CROSS_REFERENCED_EVENT]) @include(if: $includeReferences) { ${ISSUE_REFERENCE_FIELDS} }
+    closedByPullRequestsReferences(first: 100) {
+      totalCount
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        id
+        number
+        url
+        mergedAt
+        body
+        createdAt
+        updatedAt
+        author { ...LeaderboardActor }
+      }
+    }
+  }
+`;
+
+/** Loads the rate-limit budget when no registry repository is collected. */
+const RATE_LIMIT_QUERY = `
+  query LeaderboardRateLimit {
+    rateLimit { cost limit remaining resetAt }
+  }
+`;
+
+const PREFLIGHT_QUERY = `
+  query LeaderboardPreflight($owner: String!, $name: String!) {
+    repository(owner: $owner, name: $name) { id isPrivate updatedAt }
+    rateLimit { cost limit remaining resetAt }
+  }
+`;
+
+const SEARCH_REFERENCES_QUERY = `
+  query LeaderboardSearchReferences(
+    $searchQuery: String!
+    $after: String
+    $pageSize: Int!
+  ) {
+    search(
+      type: ISSUE
+      query: $searchQuery
+      first: $pageSize
+      after: $after
+    ) {
+      issueCount
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        __typename
+        ... on Issue { id }
+        ... on PullRequest {
+          id
+          state
+          number
+          title
+          url
+          body
+          createdAt
+          updatedAt
+          mergedAt
+          author { ...LeaderboardActor }
+          additions
+          deletions
+          baseRefName
+          baseRefOid
+          headRefOid
+          commits(first: 100) {
+            totalCount
+            pageInfo { hasNextPage endCursor }
+            nodes { commit { oid author { user { ...LeaderboardActor } } } }
+          }
+        }
+      }
+    }
+    rateLimit { cost limit remaining resetAt }
+  }
+  ${ACTOR_FRAGMENT}
+`;
+
+const MORE_OUTCOME_COMMITS_QUERY = `
+  query LeaderboardOutcomeCommits($id: ID!, $after: String!) {
+    node(id: $id) {
+      ... on PullRequest {
+        id
+        state
+        mergedAt
+        baseRefName
+        commits(first: 100, after: $after) {
+          totalCount
+          pageInfo { hasNextPage endCursor }
+          nodes { commit { oid author { user { ...LeaderboardActor } } } }
+        }
+      }
+    }
+    rateLimit { cost limit remaining resetAt }
+  }
+  ${ACTOR_FRAGMENT}
+`;
+
+const PULL_REQUEST_DETAILS_QUERY = `
+  query LeaderboardPullRequestDetails($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      __typename
+      ... on PullRequest { ...LeaderboardPullRequest }
+    }
+    rateLimit { cost limit remaining resetAt }
+  }
+  ${ACTOR_FRAGMENT}
+  ${PULL_REQUEST_FRAGMENT}
+`;
+
+const MERGED_FILE_SOURCE_QUERY = `
+  query LeaderboardMergedFileSource($id: ID!) {
+    node(id: $id) {
+      __typename
+      ... on PullRequest {
+        id state mergedAt headRefOid
+        repository { id databaseId isPrivate nameWithOwner }
+        mergeCommit {
+          oid
+          parents(first: 2) { totalCount nodes { oid } }
+        }
+      }
+    }
+    rateLimit { cost limit remaining resetAt }
+  }
+`;
+
+const MERGED_PULL_REQUEST_REVIEWS_QUERY = `
+  query LeaderboardMergedPullRequestReviews($ids: [ID!]!, $reviewStates: [PullRequestReviewState!]) {
+    nodes(ids: $ids) {
+      __typename
+      ... on PullRequest { ...LeaderboardMergedPullRequestReview }
+    }
+    rateLimit { cost limit remaining resetAt }
+  }
+  ${ACTOR_FRAGMENT}
+  ${MERGED_PULL_REQUEST_REVIEW_FRAGMENT}
+`;
+
+const REVIEWED_PULL_REQUEST_REFERENCES_QUERY = `
+  query LeaderboardReviewedPullRequestReferences($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      __typename
+      ... on PullRequest {
+        id
+        updatedAt
+        reviews(states: [APPROVED, CHANGES_REQUESTED]) { totalCount }
+      }
+    }
+    rateLimit { cost limit remaining resetAt }
+  }
+`;
+
+const ISSUE_DETAILS_QUERY = `
+  query LeaderboardIssueDetails($ids: [ID!]!, $includeReferences: Boolean!) {
+    nodes(ids: $ids) {
+      __typename
+      ... on Issue { ...LeaderboardIssue }
+    }
+    rateLimit { cost limit remaining resetAt }
+  }
+  ${ACTOR_FRAGMENT}
+  ${ISSUE_FRAGMENT}
+`;
+
+const OPEN_PULL_REQUEST_REFERENCES_QUERY = `
+  query LeaderboardOpenPullRequestReferences(
+    $owner: String!
+    $name: String!
+    $after: String
+    $pageSize: Int!
+  ) {
+    repository(owner: $owner, name: $name) {
+      id
+      pullRequests(
+        states: OPEN
+        first: $pageSize
+        after: $after
+        orderBy: { field: UPDATED_AT, direction: DESC }
+      ) {
+        totalCount
+        pageInfo { hasNextPage endCursor }
+        nodes { id updatedAt headRefOid }
+      }
+    }
+    rateLimit { cost limit remaining resetAt }
+  }
+`;
+
+const OPEN_ISSUE_REFERENCES_QUERY = `
+  query LeaderboardOpenIssueReferences(
+    $owner: String!
+    $name: String!
+    $after: String
+    $pageSize: Int!
+  ) {
+    repository(owner: $owner, name: $name) {
+      id
+      issues(
+        states: OPEN
+        first: $pageSize
+        after: $after
+        orderBy: { field: UPDATED_AT, direction: DESC }
+      ) {
+        totalCount
+        pageInfo { hasNextPage endCursor }
+        nodes { id updatedAt }
+      }
+    }
+    rateLimit { cost limit remaining resetAt }
+  }
+`;
+
+const MORE_PULL_REQUEST_COMMENTS_QUERY = `
+  query LeaderboardMorePullRequestComments($id: ID!, $after: String!) {
+    node(id: $id) {
+      ... on PullRequest {
+        comments(first: 100, after: $after) { ${COMMENT_FIELDS} }
+      }
+    }
+    rateLimit { cost limit remaining resetAt }
+  }
+  ${ACTOR_FRAGMENT}
+`;
+
+const MORE_ISSUE_REFERENCES_QUERY = `
+  query LeaderboardMoreIssueReferences($id: ID!, $after: String!) {
+    node(id: $id) {
+      ... on Issue {
+        timelineItems(first: 100, after: $after, itemTypes: [CROSS_REFERENCED_EVENT]) { ${ISSUE_REFERENCE_FIELDS} }
+      }
+    }
+    rateLimit { cost limit remaining resetAt }
+  }
+`;
+
+const MORE_ISSUE_COMMENTS_QUERY = `
+  query LeaderboardMoreIssueComments($id: ID!, $after: String!) {
+    node(id: $id) {
+      ... on Issue {
+        comments(first: 100, after: $after) { ${COMMENT_FIELDS} }
+      }
+    }
+    rateLimit { cost limit remaining resetAt }
+  }
+  ${ACTOR_FRAGMENT}
+`;
+
+const MORE_REVIEWS_QUERY = `
+  query LeaderboardMoreReviews($id: ID!, $after: String!) {
+    node(id: $id) {
+      ... on PullRequest {
+        id
+        headRefOid
+        reviews(first: 100, after: $after) { ${REVIEW_FIELDS} }
+      }
+    }
+    rateLimit { cost limit remaining resetAt }
+  }
+  ${ACTOR_FRAGMENT}
+`;
+
+const MORE_FORMAL_REVIEWS_QUERY = `
+  query LeaderboardMoreFormalReviews($id: ID!, $after: String!) {
+    node(id: $id) {
+      ... on PullRequest {
+        id
+        headRefOid
+        reviews(
+          states: [APPROVED, CHANGES_REQUESTED]
+          first: 100
+          after: $after
+        ) { ${REVIEW_FIELDS} }
+      }
+    }
+    rateLimit { cost limit remaining resetAt }
+  }
+  ${ACTOR_FRAGMENT}
+`;
+
+const REVIEW_INLINE_COMMENTS_QUERY = `
+  query LeaderboardReviewInlineComments($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      __typename
+      ... on PullRequestReview {
+        id
+        comments(first: 100) { ${COMMENT_FIELDS} }
+      }
+    }
+    rateLimit { cost limit remaining resetAt }
+  }
+  ${ACTOR_FRAGMENT}
+`;
+
+const MORE_REVIEW_INLINE_COMMENTS_QUERY = `
+  query LeaderboardMoreReviewInlineComments($id: ID!, $after: String!) {
+    node(id: $id) {
+      ... on PullRequestReview {
+        id
+        comments(first: 100, after: $after) { ${COMMENT_FIELDS} }
+      }
+    }
+    rateLimit { cost limit remaining resetAt }
+  }
+  ${ACTOR_FRAGMENT}
+`;
+
+const MORE_FILES_QUERY = `
+  query LeaderboardMoreFiles($id: ID!, $after: String!) {
+    node(id: $id) {
+      ... on PullRequest {
+        state
+        isDraft
+        headRefOid
+        files(first: 100, after: $after) { ${FILE_FIELDS} }
+      }
+    }
+    rateLimit { cost limit remaining resetAt }
+  }
+`;
+
+const MORE_CLOSING_ISSUES_QUERY = `
+  query LeaderboardMoreClosingIssues($id: ID!, $after: String!) {
+    node(id: $id) {
+      ... on PullRequest {
+        closingIssuesReferences(first: 100, after: $after) {
+          totalCount
+          pageInfo { hasNextPage endCursor }
+          nodes { id }
+        }
+      }
+    }
+    rateLimit { cost limit remaining resetAt }
+  }
+`;
+
+const MORE_CLOSING_PULL_REQUESTS_QUERY = `
+  query LeaderboardMoreClosingPullRequests($id: ID!, $after: String!) {
+    node(id: $id) {
+      ... on Issue {
+        closedByPullRequestsReferences(first: 100, after: $after) {
+          totalCount
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            id
+            number
+            url
+            mergedAt
+            body
+            createdAt
+            updatedAt
+            author { ...LeaderboardActor }
+          }
+        }
+      }
+    }
+    rateLimit { cost limit remaining resetAt }
+  }
+  ${ACTOR_FRAGMENT}
+`;
+
+function asRecord(value: unknown, path: string): JsonRecord {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${path} must be an object`);
+  }
+  return value as JsonRecord;
+}
+
+function asArray(value: unknown, path: string): unknown[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`${path} must be an array`);
+  }
+  return value;
+}
+
+function asString(value: unknown, path: string): string {
+  if (typeof value !== "string") {
+    throw new Error(`${path} must be a string`);
+  }
+  return value;
+}
+
+function asNullableString(value: unknown, path: string): string | null {
+  if (value === null) {
+    return null;
+  }
+  return asString(value, path);
+}
+
+function asFullCommitSha(value: unknown, path: string): string {
+  const commitId = asString(value, path);
+  if (!/^[a-f0-9]{40}$/i.test(commitId)) {
+    throw new Error(`${path} must be a full commit SHA`);
+  }
+  return commitId.toLowerCase();
+}
+
+function asNumber(value: unknown, path: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${path} must be a finite number`);
+  }
+  return value;
+}
+
+function asBoolean(value: unknown, path: string): boolean {
+  if (typeof value !== "boolean") {
+    throw new Error(`${path} must be a boolean`);
+  }
+  return value;
+}
+
+function child(record: JsonRecord, key: string, path: string): JsonRecord {
+  return asRecord(record[key], `${path}.${key}`);
+}
+
+function parsePageInfo(value: unknown, path: string): PageInfo {
+  const page = asRecord(value, path);
+  return {
+    hasNextPage: asBoolean(page.hasNextPage, `${path}.hasNextPage`),
+    endCursor: asNullableString(page.endCursor, `${path}.endCursor`),
+  };
+}
+
+function actorKind(value: string): GitHubActorKind {
+  if (
+    value === "Bot" ||
+    value === "Mannequin" ||
+    value === "Organization" ||
+    value === "User"
+  ) {
+    return value;
+  }
+  return "Unknown";
+}
+
+function parseActor(value: unknown, path: string): GitHubActor | null {
+  if (value === null) {
+    return null;
+  }
+  const actor = asRecord(value, path);
+  return {
+    id: asString(actor.id, `${path}.id`),
+    login: asString(actor.login, `${path}.login`),
+    avatarUrl: canonicalActorAvatarUrl(
+      asString(actor.avatarUrl, `${path}.avatarUrl`),
+    ),
+    url: asString(actor.url, `${path}.url`),
+    kind: actorKind(asString(actor.__typename, `${path}.__typename`)),
+  };
+}
+
+function parseLabels(value: unknown, path: string): GitHubLabel[] {
+  const connection = asRecord(value, path);
+  const nodes = asArray(connection.nodes, `${path}.nodes`).map(
+    (nodeValue, index) => {
+      const node = asRecord(nodeValue, `${path}.nodes[${index}]`);
+      return {
+        id: asString(node.id, `${path}.nodes[${index}].id`),
+        name: asString(node.name, `${path}.nodes[${index}].name`),
+        color: asString(node.color, `${path}.nodes[${index}].color`),
+      };
+    },
+  );
+  const totalCount = asNumber(connection.totalCount, `${path}.totalCount`);
+  if (nodes.length !== totalCount) {
+    throw new Error(
+      `${path} has ${totalCount} labels; the 100-label collector cannot return a complete record`,
+    );
+  }
+  return dedupeByNodeId(nodes);
+}
+
+function parseAssignees(value: unknown, path: string): GitHubActor[] {
+  const connection = asRecord(value, path);
+  const nodes = asArray(connection.nodes, `${path}.nodes`).map(
+    (nodeValue, index) => {
+      const actor = parseActor(nodeValue, `${path}.nodes[${index}]`);
+      if (!actor) {
+        throw new Error(`${path}.nodes[${index}] cannot be null`);
+      }
+      return actor;
+    },
+  );
+  const totalCount = asNumber(connection.totalCount, `${path}.totalCount`);
+  if (nodes.length !== totalCount) {
+    throw new Error(
+      `${path} has ${totalCount} assignees; the 100-assignee collector cannot return a complete record`,
+    );
+  }
+  return dedupeByNodeId(nodes);
+}
+
+function parseComments(
+  value: unknown,
+  path: string,
+  artifactId: string,
+): ConnectionPage<GitHubTextSource> {
+  const connection = asRecord(value, path);
+  return {
+    totalCount: asNumber(connection.totalCount, `${path}.totalCount`),
+    pageInfo: parsePageInfo(connection.pageInfo, `${path}.pageInfo`),
+    nodes: asArray(connection.nodes, `${path}.nodes`).map(
+      (nodeValue, index) => {
+        const nodePath = `${path}.nodes[${index}]`;
+        const node = asRecord(nodeValue, nodePath);
+        return {
+          id: asString(node.id, `${nodePath}.id`),
+          artifactId,
+          kind: "comment",
+          body: asString(node.body, `${nodePath}.body`),
+          url: asString(node.url, `${nodePath}.url`),
+          createdAt: asString(node.createdAt, `${nodePath}.createdAt`),
+          updatedAt: asString(node.updatedAt, `${nodePath}.updatedAt`),
+          author: parseActor(node.author, `${nodePath}.author`),
+          authorAssociation: asString(
+            node.authorAssociation,
+            `${nodePath}.authorAssociation`,
+          ),
+        };
+      },
+    ),
+  };
+}
+
+function parseReviews(
+  value: unknown,
+  path: string,
+): ConnectionPage<PendingPullRequestReview> {
+  const connection = asRecord(value, path);
+  return {
+    totalCount: asNumber(connection.totalCount, `${path}.totalCount`),
+    pageInfo: parsePageInfo(connection.pageInfo, `${path}.pageInfo`),
+    nodes: asArray(connection.nodes, `${path}.nodes`).map(
+      (nodeValue, index) => {
+        const nodePath = `${path}.nodes[${index}]`;
+        const node = asRecord(nodeValue, nodePath);
+        return {
+          id: asString(node.id, `${nodePath}.id`),
+          body: asString(node.body, `${nodePath}.body`),
+          state: asString(node.state, `${nodePath}.state`),
+          submittedAt: asNullableString(
+            node.submittedAt,
+            `${nodePath}.submittedAt`,
+          ),
+          url: asString(node.url, `${nodePath}.url`),
+          commitId:
+            node.commit === null
+              ? null
+              : asFullCommitSha(
+                  child(node, "commit", nodePath).oid,
+                  `${nodePath}.commit.oid`,
+                ),
+          author: parseActor(node.author, `${nodePath}.author`),
+        };
+      },
+    ),
+  };
+}
+
+function parseFiles(
+  value: unknown,
+  path: string,
+): ConnectionPage<PullRequestFile> {
+  const connection = asRecord(value, path);
+  return {
+    totalCount: asNumber(connection.totalCount, `${path}.totalCount`),
+    pageInfo: parsePageInfo(connection.pageInfo, `${path}.pageInfo`),
+    nodes: asArray(connection.nodes, `${path}.nodes`).map(
+      (nodeValue, index) => {
+        const nodePath = `${path}.nodes[${index}]`;
+        const node = asRecord(nodeValue, nodePath);
+        return {
+          path: asString(node.path, `${nodePath}.path`),
+          additions: asNumber(node.additions, `${nodePath}.additions`),
+          deletions: asNumber(node.deletions, `${nodePath}.deletions`),
+        };
+      },
+    ),
+  };
+}
+
+function parseClosingIssueIds(
+  value: unknown,
+  path: string,
+): ConnectionPage<{ id: string }> {
+  const connection = asRecord(value, path);
+  return {
+    totalCount: asNumber(connection.totalCount, `${path}.totalCount`),
+    pageInfo: parsePageInfo(connection.pageInfo, `${path}.pageInfo`),
+    nodes: asArray(connection.nodes, `${path}.nodes`).map(
+      (nodeValue, index) => {
+        const nodePath = `${path}.nodes[${index}]`;
+        const node = asRecord(nodeValue, nodePath);
+        return { id: asString(node.id, `${nodePath}.id`) };
+      },
+    ),
+  };
+}
+
+function parseClosingPullRequests(
+  value: unknown,
+  path: string,
+): ConnectionPage<IssueRecord["closedByPullRequests"][number]> {
+  const connection = asRecord(value, path);
+  return {
+    totalCount: asNumber(connection.totalCount, `${path}.totalCount`),
+    pageInfo: parsePageInfo(connection.pageInfo, `${path}.pageInfo`),
+    nodes: asArray(connection.nodes, `${path}.nodes`).map(
+      (nodeValue, index) => {
+        const nodePath = `${path}.nodes[${index}]`;
+        const node = asRecord(nodeValue, nodePath);
+        return {
+          id: asString(node.id, `${nodePath}.id`),
+          number: asNumber(node.number, `${nodePath}.number`),
+          url: asString(node.url, `${nodePath}.url`),
+          mergedAt: asNullableString(node.mergedAt, `${nodePath}.mergedAt`),
+          body: asString(node.body, `${nodePath}.body`),
+          createdAt: asString(node.createdAt, `${nodePath}.createdAt`),
+          updatedAt: asString(node.updatedAt, `${nodePath}.updatedAt`),
+          author: parseActor(node.author, `${nodePath}.author`),
+        };
+      },
+    ),
+  };
+}
+
+function pageState<T>(page: ConnectionPage<T>): NestedPageState {
+  return { totalCount: page.totalCount, pageInfo: page.pageInfo };
+}
+
+function parsePullRequest(value: unknown, path: string): ParsedPullRequest {
+  const node = asRecord(value, path);
+  const id = asString(node.id, `${path}.id`);
+  const comments = parseComments(node.comments, `${path}.comments`, id);
+  const reviews = parseReviews(node.reviews, `${path}.reviews`);
+  // GitHub can return null for an oversized draft diff, even with zero diff
+  // counters. Retain that draft, but never represent unavailable files as [].
+  const files =
+    node.files === null && node.state === "OPEN" && node.isDraft === true
+      ? null
+      : parseFiles(node.files, `${path}.files`);
+  const closingIssues = parseClosingIssueIds(
+    node.closingIssuesReferences,
+    `${path}.closingIssuesReferences`,
+  );
+  return {
+    state: asString(node.state, `${path}.state`),
+    record: {
+      id,
+      number: asNumber(node.number, `${path}.number`),
+      title: asString(node.title, `${path}.title`),
+      url: asString(node.url, `${path}.url`),
+      body: asString(node.body, `${path}.body`),
+      createdAt: asString(node.createdAt, `${path}.createdAt`),
+      updatedAt: asString(node.updatedAt, `${path}.updatedAt`),
+      lastEditedAt: asNullableString(node.lastEditedAt, `${path}.lastEditedAt`),
+      editor: parseActor(node.editor, `${path}.editor`),
+      mergedAt: asNullableString(node.mergedAt, `${path}.mergedAt`),
+      ...(node.closedAt === undefined
+        ? {}
+        : { closedAt: asNullableString(node.closedAt, `${path}.closedAt`) }),
+      isDraft: asBoolean(node.isDraft, `${path}.isDraft`),
+      headRefOid: asFullCommitSha(node.headRefOid, `${path}.headRefOid`),
+      reviewDecision: asNullableString(
+        node.reviewDecision,
+        `${path}.reviewDecision`,
+      ),
+      activeReviewRequestCount: asNumber(
+        child(node, "reviewRequests", path).totalCount,
+        `${path}.reviewRequests.totalCount`,
+      ),
+      author: parseActor(node.author, `${path}.author`),
+      assignees: parseAssignees(node.assignees, `${path}.assignees`),
+      labels: parseLabels(node.labels, `${path}.labels`),
+      files: files?.nodes ?? null,
+      comments: comments.nodes,
+      reviews: reviews.nodes,
+      closingIssueIds: closingIssues.nodes.map((issue) => issue.id),
+      additions: asNumber(node.additions, `${path}.additions`),
+      deletions: asNumber(node.deletions, `${path}.deletions`),
+      changedFiles: asNumber(node.changedFiles, `${path}.changedFiles`),
+      commitCount: asNumber(
+        child(node, "commits", path).totalCount,
+        `${path}.commits.totalCount`,
+      ),
+    },
+    pages: {
+      comments: pageState(comments),
+      reviews: pageState(reviews),
+      files: files === null ? null : pageState(files),
+      closingIssues: pageState(closingIssues),
+    },
+  };
+}
+
+function parseMergedPullRequestReview(
+  value: unknown,
+  path: string,
+): ParsedMergedPullRequestReview {
+  const node = asRecord(value, path);
+  const id = asString(node.id, `${path}.id`);
+  const comments = parseComments(node.comments, `${path}.comments`, id);
+  const reviews = parseReviews(node.reviews, `${path}.reviews`);
+  return {
+    state: asString(node.state, `${path}.state`),
+    record: {
+      id,
+      number: asNumber(node.number, `${path}.number`),
+      title: asString(node.title, `${path}.title`),
+      url: asString(node.url, `${path}.url`),
+      body: asString(node.body, `${path}.body`),
+      createdAt: asString(node.createdAt, `${path}.createdAt`),
+      updatedAt: asString(node.updatedAt, `${path}.updatedAt`),
+      lastEditedAt: asNullableString(node.lastEditedAt, `${path}.lastEditedAt`),
+      editor: parseActor(node.editor, `${path}.editor`),
+      mergedAt: asNullableString(node.mergedAt, `${path}.mergedAt`),
+      headRefOid: asFullCommitSha(node.headRefOid, `${path}.headRefOid`),
+      author: parseActor(node.author, `${path}.author`),
+      comments: comments.nodes,
+      reviews: reviews.nodes,
+    },
+    pages: {
+      comments: pageState(comments),
+      reviews: pageState(reviews),
+    },
+  };
+}
+
+function parseIssueReferences(
+  value: unknown,
+  path: string,
+): NonNullable<ParsedIssue["references"]> {
+  const connection = asRecord(value, path);
+  return {
+    totalCount: asNumber(connection.totalCount, `${path}.totalCount`),
+    pageInfo: parsePageInfo(connection.pageInfo, `${path}.pageInfo`),
+    nodes: asArray(connection.nodes, `${path}.nodes`).map((value, index) => {
+      const nodePath = `${path}.nodes[${index}]`;
+      const node = asRecord(value, nodePath);
+      const source = child(node, "source", nodePath);
+      const kind = asString(source.__typename, `${nodePath}.source.__typename`);
+      if (kind !== "Issue" && kind !== "PullRequest")
+        throw new Error(`${nodePath} has an unsupported reference source`);
+      return {
+        id: asString(node.id, `${nodePath}.id`),
+        pullRequestId:
+          kind === "PullRequest"
+            ? asString(source.id, `${nodePath}.source.id`)
+            : null,
+      };
+    }),
+  };
+}
+
+function parseIssue(value: unknown, path: string): ParsedIssue {
+  const node = asRecord(value, path);
+  const id = asString(node.id, `${path}.id`);
+  const comments = parseComments(node.comments, `${path}.comments`, id);
+  const closedByPullRequests = parseClosingPullRequests(
+    node.closedByPullRequestsReferences,
+    `${path}.closedByPullRequestsReferences`,
+  );
+  return {
+    references:
+      node.state === "OPEN"
+        ? parseIssueReferences(node.timelineItems, `${path}.timelineItems`)
+        : null,
+    state: asString(node.state, `${path}.state`),
+    record: {
+      id,
+      number: asNumber(node.number, `${path}.number`),
+      title: asString(node.title, `${path}.title`),
+      url: asString(node.url, `${path}.url`),
+      body: asString(node.body, `${path}.body`),
+      createdAt: asString(node.createdAt, `${path}.createdAt`),
+      updatedAt: asString(node.updatedAt, `${path}.updatedAt`),
+      closedAt: asNullableString(node.closedAt, `${path}.closedAt`),
+      stateReason: asNullableString(node.stateReason, `${path}.stateReason`),
+      author: parseActor(node.author, `${path}.author`),
+      assignees: parseAssignees(node.assignees, `${path}.assignees`),
+      labels: parseLabels(node.labels, `${path}.labels`),
+      comments: comments.nodes,
+      closedByPullRequests: closedByPullRequests.nodes,
+    },
+    pages: {
+      comments: pageState(comments),
+      closedByPullRequests: pageState(closedByPullRequests),
+    },
+  };
+}
+
+function parseSearchPage<T>(
+  data: JsonRecord,
+  parser: (value: unknown, path: string) => T,
+): ConnectionPage<T> {
+  const search = child(data, "search", "data");
+  return {
+    totalCount: asNumber(search.issueCount, "data.search.issueCount"),
+    pageInfo: parsePageInfo(search.pageInfo, "data.search.pageInfo"),
+    nodes: asArray(search.nodes, "data.search.nodes").map((node, index) =>
+      parser(node, `data.search.nodes[${index}]`),
+    ),
+  };
+}
+
+function parseRepositoryConnection<T>(
+  data: JsonRecord,
+  field: "issues" | "pullRequests",
+  parser: (value: unknown, path: string) => T,
+): { repositoryId: string; page: ConnectionPage<T> } {
+  const repository = child(data, "repository", "data");
+  const connection = child(repository, field, "data.repository");
+  return {
+    repositoryId: asString(repository.id, "data.repository.id"),
+    page: {
+      totalCount: asNumber(
+        connection.totalCount,
+        `data.repository.${field}.totalCount`,
+      ),
+      pageInfo: parsePageInfo(
+        connection.pageInfo,
+        `data.repository.${field}.pageInfo`,
+      ),
+      nodes: asArray(connection.nodes, `data.repository.${field}.nodes`).map(
+        (node, index) =>
+          parser(node, `data.repository.${field}.nodes[${index}]`),
+      ),
+    },
+  };
+}
+
+function sanitizeGraphqlError(value: unknown): string {
+  if (typeof value === "string") {
+    return value.slice(0, 500);
+  }
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    const message = (value as JsonRecord).message;
+    if (typeof message === "string") {
+      return message.slice(0, 500);
+    }
+  }
+  return "Unknown GraphQL error";
+}
+
+function unavailableRequestedSources(
+  envelope: JsonRecord,
+  variables: GraphqlVariables,
+): UnavailableSource[] {
+  const ids = variables.ids;
+  const data = envelope.data;
+  if (
+    !Array.isArray(ids) ||
+    ids.length === 0 ||
+    !ids.every((id) => typeof id === "string") ||
+    typeof data !== "object" ||
+    data === null ||
+    Array.isArray(data)
+  )
+    return [];
+  const nodes = (data as JsonRecord).nodes;
+  const qualifies =
+    Array.isArray(nodes) &&
+    nodes.length === ids.length &&
+    Array.isArray(envelope.errors) &&
+    envelope.errors.length > 0 &&
+    envelope.errors.every((value) => {
+      if (typeof value !== "object" || value === null || Array.isArray(value))
+        return false;
+      const error = value as JsonRecord;
+      const path = error.path;
+      return (
+        error.type === "NOT_FOUND" &&
+        Array.isArray(path) &&
+        path.length === 2 &&
+        path[0] === "nodes" &&
+        Number.isInteger(path[1]) &&
+        path[1] >= 0 &&
+        path[1] < ids.length &&
+        nodes[path[1]] === null
+      );
+    });
+  if (!qualifies) return [];
+  const indices = (envelope.errors as JsonRecord[]).map(
+    (error) => (error.path as number[])[1],
+  );
+  const missing = new Set(indices);
+  if (
+    (nodes as unknown[]).some((node, index) =>
+      node === null
+        ? !missing.has(index)
+        : typeof node !== "object" ||
+          node === null ||
+          (node as JsonRecord).id !== ids[index],
+    )
+  )
+    return [];
+  return [...new Set(indices.map((index) => ids[index] as string))]
+    .sort()
+    .map((nodeId) => ({ nodeId, reason: "NOT_FOUND" }));
+}
+
+function parseRateLimit(
+  value: unknown,
+): Omit<RateLimitSnapshot, "consumedDuringRun"> {
+  const rateLimit = asRecord(value, "data.rateLimit");
+  return {
+    cost: asNumber(rateLimit.cost, "data.rateLimit.cost"),
+    limit: asNumber(rateLimit.limit, "data.rateLimit.limit"),
+    remaining: asNumber(rateLimit.remaining, "data.rateLimit.remaining"),
+    resetAt: asString(rateLimit.resetAt, "data.rateLimit.resetAt"),
+  };
+}
+
+export interface GitHubGraphqlClientOptions {
+  requestTimeoutMs?: number;
+  maxGenerationCost?: number;
+  minimumRateLimitReserve?: number;
+  retryBaseDelayMs?: number;
+  recoverFiles?: typeof recoverPullRequestGitFiles;
+}
+
+function isTransientNetworkError(value: unknown): boolean {
+  if (value instanceof TypeError) {
+    return true;
+  }
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const error = value as { code?: unknown; name?: unknown };
+  return (
+    error.name === "AbortError" ||
+    [
+      "ConnectionRefused",
+      "FailedToOpenSocket",
+      "ECONNREFUSED",
+      "ECONNRESET",
+      "EHOSTUNREACH",
+      "ENETUNREACH",
+      "ETIMEDOUT",
+      "EAI_AGAIN",
+      "UND_ERR_CONNECT_TIMEOUT",
+      "UND_ERR_SOCKET",
+    ].includes(typeof error.code === "string" ? error.code : "")
+  );
+}
+
+function isJsonContentType(value: string | null): boolean {
+  if (!value) {
+    return false;
+  }
+  const mediaType = value.split(";", 1)[0]?.trim().toLowerCase();
+  return (
+    mediaType === "application/json" || mediaType?.endsWith("+json") === true
+  );
+}
+
+function secondaryRateLimitDelayMs(
+  response: Response,
+  responseBody: string,
+): number | null {
+  if (response.status !== 403 && response.status !== 429) return null;
+  let message = "";
+  try {
+    const payload = JSON.parse(responseBody) as { message?: unknown };
+    if (typeof payload.message === "string") message = payload.message;
+  } catch {
+    return null;
+  }
+  if (!/secondary rate limit|abuse detection/iu.test(message)) return null;
+  const retryAfter = response.headers.get("retry-after");
+  if (retryAfter !== null && /^\d+$/u.test(retryAfter)) {
+    const seconds = Number(retryAfter);
+    if (Number.isSafeInteger(seconds)) return seconds * 1_000;
+  }
+  // GitHub directs clients without Retry-After guidance to wait at least one
+  // minute before retrying a secondary-limit response.
+  return 60_000;
+}
+
+async function retryDelay(milliseconds: number): Promise<void> {
+  await new Promise<void>((resolveDelay) => {
+    setTimeout(resolveDelay, milliseconds);
+  });
+}
+
+async function readGraphqlResponseBody(response: Response): Promise<string> {
+  const declaredLength = response.headers.get("content-length");
+  if (declaredLength !== null) {
+    const parsedLength = Number(declaredLength);
+    if (!/^\d+$/u.test(declaredLength) || !Number.isSafeInteger(parsedLength)) {
+      throw new GraphqlResponseBoundaryError(
+        "GitHub GraphQL returned an invalid Content-Length",
+      );
+    }
+    if (parsedLength > MAX_GRAPHQL_RESPONSE_BYTES) {
+      throw new GraphqlResponseBoundaryError(
+        `GitHub GraphQL response exceeds ${MAX_GRAPHQL_RESPONSE_BYTES} bytes`,
+      );
+    }
+  }
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new GraphqlResponseBoundaryError(
+      "GitHub GraphQL returned no readable response body",
+    );
+  }
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const decode = (chunk?: Uint8Array, stream = false): string => {
+    try {
+      return decoder.decode(chunk, { stream });
+    } catch (error) {
+      if (!(error instanceof TypeError)) throw error;
+      throw new GraphqlResponseBoundaryError(
+        "GitHub GraphQL response is not valid UTF-8",
+        { cause: error },
+      );
+    }
+  };
+  let byteLength = 0;
+  let body = "";
+  try {
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      byteLength += chunk.value.byteLength;
+      if (byteLength > MAX_GRAPHQL_RESPONSE_BYTES) {
+        await reader.cancel("response exceeded size limit");
+        throw new GraphqlResponseBoundaryError(
+          `GitHub GraphQL response exceeds ${MAX_GRAPHQL_RESPONSE_BYTES} bytes`,
+        );
+      }
+      // Stream reads can also throw TypeError; preserve those for transport retries.
+      body += decode(chunk.value, true);
+    }
+    body += decode();
+  } finally {
+    reader.releaseLock();
+  }
+  return body;
+}
+
+// A 502/503/504 on a paginated read is usually GitHub timing out while it
+// builds the requested page, not a transient edge fault: repeating the
+// identical page reliably repeats the timeout. Halving `pageSize` keeps the
+// opaque `after` cursor valid, because a smaller `first` returns fewer nodes
+// from the same position, so callers page more times over an unchanged result
+// set and every reported total stays comparable.
+function narrowedPageSize(
+  variables: GraphqlVariables,
+): GraphqlVariables | null {
+  const current = variables.pageSize;
+  if (typeof current !== "number" || !Number.isInteger(current)) return null;
+  if (current <= MINIMUM_GRAPHQL_PAGE_SIZE) return null;
+  return {
+    ...variables,
+    pageSize: Math.max(MINIMUM_GRAPHQL_PAGE_SIZE, Math.floor(current / 2)),
+  };
+}
+
+function describePageSize(variables: GraphqlVariables): string {
+  const current = variables.pageSize;
+  return typeof current === "number" ? `; page size ${current}` : "";
+}
+
+function comparisonBuildTimedOut(status: number, body: string): boolean {
+  if (status !== 422) return false;
+  try {
+    return (
+      asRecord(JSON.parse(body), "comparison error").message ===
+      "Server Error: Sorry, this diff is taking too long to generate."
+    );
+  } catch {
+    return false;
+  }
+}
+
+export class GitHubGraphqlClient implements GraphqlExecutor {
+  readonly #token: string;
+  readonly #fetch: FetchLike;
+  readonly #requestTimeoutMs: number;
+  readonly #maxGenerationCost: number;
+  readonly #minimumRateLimitReserve: number;
+  readonly #retryBaseDelayMs: number;
+  readonly #recoverFiles: typeof recoverPullRequestGitFiles;
+  #requestCount = 0;
+  #rateLimit: RateLimitSnapshot | null = null;
+  #consumedCost = 0;
+  #windowConsumedCost = 0;
+  #startingRemaining: number | null = null;
+
+  #effectiveMaxGenerationCost(): number {
+    if (!this.#rateLimit) {
+      return this.#maxGenerationCost;
+    }
+    return Math.min(
+      this.#maxGenerationCost,
+      Math.max(0, this.#rateLimit.limit - this.#minimumRateLimitReserve),
+    );
+  }
+
+  constructor(
+    token: string,
+    fetcher: FetchLike = globalThis.fetch,
+    options: GitHubGraphqlClientOptions = {},
+  ) {
+    if (!token.trim()) {
+      throw new Error("GitHub token cannot be empty");
+    }
+    const requestTimeoutMs =
+      options.requestTimeoutMs ?? GRAPHQL_REQUEST_TIMEOUT_MS;
+    const maxGenerationCost = options.maxGenerationCost ?? MAX_GENERATION_COST;
+    const minimumRateLimitReserve =
+      options.minimumRateLimitReserve ?? MINIMUM_RATE_LIMIT_RESERVE;
+    const retryBaseDelayMs = options.retryBaseDelayMs ?? 250;
+    for (const [name, value] of [
+      ["requestTimeoutMs", requestTimeoutMs],
+      ["maxGenerationCost", maxGenerationCost],
+      ["minimumRateLimitReserve", minimumRateLimitReserve],
+      ["retryBaseDelayMs", retryBaseDelayMs],
+    ] as const) {
+      if (!Number.isFinite(value) || value < 0) {
+        throw new Error(`${name} must be a non-negative finite number`);
+      }
+    }
+    this.#token = token.trim();
+    this.#fetch = fetcher;
+    this.#requestTimeoutMs = requestTimeoutMs;
+    this.#maxGenerationCost = maxGenerationCost;
+    this.#minimumRateLimitReserve = minimumRateLimitReserve;
+    this.#retryBaseDelayMs = retryBaseDelayMs;
+    this.#recoverFiles = options.recoverFiles ?? recoverPullRequestGitFiles;
+  }
+
+  async ensureBudget(requiredCost: number): Promise<void> {
+    if (!Number.isInteger(requiredCost) || requiredCost < 0) {
+      throw new Error("requiredCost must be a non-negative integer");
+    }
+    if (!this.#rateLimit) return;
+    const effectiveMaxGenerationCost = this.#effectiveMaxGenerationCost();
+    if (requiredCost > effectiveMaxGenerationCost) {
+      throw new Error(
+        `Required GitHub GraphQL cost ${requiredCost} exceeds the safe per-window budget ${effectiveMaxGenerationCost}`,
+      );
+    }
+    const available = Math.min(
+      effectiveMaxGenerationCost - this.#windowConsumedCost,
+      this.#rateLimit.remaining - this.#minimumRateLimitReserve,
+    );
+    if (requiredCost <= available) return;
+
+    const resetAt = Date.parse(this.#rateLimit.resetAt);
+    if (!Number.isFinite(resetAt)) {
+      throw new Error("GitHub GraphQL returned an invalid rate-limit resetAt");
+    }
+    await retryDelay(Math.max(0, resetAt - Date.now() + 1_000));
+    this.#windowConsumedCost = 0;
+    this.#startingRemaining = null;
+    this.#rateLimit = {
+      ...this.#rateLimit,
+      cost: 0,
+      consumedDuringRun: this.#consumedCost,
+      remaining: this.#rateLimit.limit,
+    };
+  }
+
+  async execute(
+    document: string,
+    variables: GraphqlVariables = {},
+  ): Promise<JsonRecord> {
+    return this.#executeRequest(document, variables);
+  }
+
+  async compareCommitPage(
+    repository: TargetRepository,
+    base: string,
+    head: string,
+    page: number,
+  ): Promise<JsonRecord> {
+    const path = `/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/compare/${base}...${head}?per_page=${GRAPHQL_PAGE_SIZE}&page=${page}`;
+    return this.#executeRequest("", {}, path);
+  }
+
+  async recoverPullRequestFiles(
+    repository: TargetRepository,
+    repositoryId: string,
+    original: JsonRecord,
+  ): Promise<PullRequestGitFiles> {
+    const id = asString(original.id, "pull request.id");
+    const data = await this.execute(MERGED_FILE_SOURCE_QUERY, { id });
+    const node = child(data, "node", "data");
+    const source = child(node, "repository", "data.node");
+    if (
+      node.__typename !== "PullRequest" ||
+      node.id !== id ||
+      node.state !== "MERGED" ||
+      original.state !== "MERGED" ||
+      node.mergedAt !== original.mergedAt ||
+      node.headRefOid !== original.headRefOid ||
+      source.id !== repositoryId ||
+      (repository.expectedNodeId !== null &&
+        source.id !== repository.expectedNodeId) ||
+      source.isPrivate !== false
+    )
+      throw new Error("Merged file source identity changed or is unavailable");
+    const merge = child(node, "mergeCommit", "data.node");
+    const parents = child(merge, "parents", "data.node.mergeCommit");
+    if (parents.totalCount !== 2)
+      throw new Error("Merged file recovery requires complete merge parents");
+    return this.#recoverFiles({
+      repository: {
+        id: asNumber(source.databaseId, "data.node.repository.databaseId"),
+        node_id: asString(source.id, "data.node.repository.id"),
+        private: false,
+        full_name: asString(
+          source.nameWithOwner,
+          "data.node.repository.nameWithOwner",
+        ),
+      },
+      head: asFullCommitSha(node.headRefOid, "data.node.headRefOid"),
+      merge: {
+        sha: asFullCommitSha(merge.oid, "data.node.mergeCommit.oid"),
+        parents: asArray(
+          parents.nodes,
+          "data.node.mergeCommit.parents.nodes",
+        ).map((parent, index) => ({
+          sha: asFullCommitSha(
+            asRecord(parent, "merge parent").oid,
+            `data.node.mergeCommit.parents.nodes[${index}].oid`,
+          ),
+        })),
+      },
+    });
+  }
+
+  async #executeRequest(
+    document: string,
+    variables: GraphqlVariables,
+    restPath?: string,
+  ): Promise<JsonRecord> {
+    const apiLabel = restPath ? "GitHub comparison" : "GitHub GraphQL";
+    let response: Response | null = null;
+    let payload: unknown;
+    let parsedResponse = false;
+    let activeVariables = variables;
+    for (
+      let attempt = 1;
+      attempt <= MAX_GRAPHQL_REQUEST_ATTEMPTS;
+      attempt += 1
+    ) {
+      if (!restPath) await this.ensureBudget(1);
+      this.#requestCount += 1;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => {
+        controller.abort();
+      }, this.#requestTimeoutMs);
+      let responseBody = "";
+      try {
+        response = await this.#fetch(
+          `https://api.github.com${restPath ?? "/graphql"}`,
+          {
+            method: restPath ? "GET" : "POST",
+            redirect: "error",
+            headers: {
+              Accept: "application/vnd.github+json",
+              Authorization: `Bearer ${this.#token}`,
+              "Content-Type": "application/json",
+              "User-Agent": "eliza-computer-leaderboard",
+              "X-GitHub-Api-Version": "2022-11-28",
+            },
+            body: restPath
+              ? undefined
+              : JSON.stringify({ query: document, variables: activeVariables }),
+            signal: controller.signal,
+          },
+        );
+        responseBody = await readGraphqlResponseBody(response);
+      } catch (cause) {
+        if (cause instanceof GraphqlResponseBoundaryError) throw cause;
+        // error-policy:J2 Retry only transient transport failures; the final
+        // attempt rethrows with the request boundary and original cause.
+        const timedOut = controller.signal.aborted;
+        const retryable = timedOut || isTransientNetworkError(cause);
+        if (!retryable || attempt === MAX_GRAPHQL_REQUEST_ATTEMPTS) {
+          throw new Error(
+            timedOut
+              ? `${apiLabel} request timed out after ${this.#requestTimeoutMs}ms (${attempt}/${MAX_GRAPHQL_REQUEST_ATTEMPTS})`
+              : `${apiLabel} network request failed (${attempt}/${MAX_GRAPHQL_REQUEST_ATTEMPTS})`,
+            { cause },
+          );
+        }
+        await retryDelay(this.#retryBaseDelayMs * 2 ** (attempt - 1));
+        continue;
+      } finally {
+        clearTimeout(timeout);
+      }
+      const retryableStatus =
+        GATEWAY_FAILURE_STATUSES.includes(response.status) ||
+        (restPath !== undefined &&
+          comparisonBuildTimedOut(response.status, responseBody));
+      if (retryableStatus && attempt < MAX_GRAPHQL_REQUEST_ATTEMPTS) {
+        // error-policy:J2 Narrow a timed-out GraphQL page before backing off.
+        // Comparison retries keep the exact immutable range and page; only
+        // the recognized server timeout joins the existing bounded retry.
+        // Other 422 responses remain non-retryable validation failures.
+        activeVariables = narrowedPageSize(activeVariables) ?? activeVariables;
+        await retryDelay(this.#retryBaseDelayMs * 2 ** (attempt - 1));
+        continue;
+      }
+      const secondaryLimitDelay = secondaryRateLimitDelayMs(
+        response,
+        responseBody,
+      );
+      if (
+        secondaryLimitDelay !== null &&
+        attempt < MAX_GRAPHQL_REQUEST_ATTEMPTS
+      ) {
+        await retryDelay(secondaryLimitDelay);
+        continue;
+      }
+
+      try {
+        payload = JSON.parse(responseBody);
+        parsedResponse = true;
+        break;
+      } catch (cause) {
+        const contentType = response.headers.get("content-type");
+        const retryableMalformedJson =
+          response.ok && isJsonContentType(contentType);
+        if (retryableMalformedJson && attempt < MAX_GRAPHQL_REQUEST_ATTEMPTS) {
+          await retryDelay(this.#retryBaseDelayMs * 2 ** (attempt - 1));
+          continue;
+        }
+        // error-policy:J2 Retain the HTTP boundary context for malformed or
+        // non-JSON API failures; exhausted malformed-JSON retries fail closed.
+        // An exhausted gateway failure keeps its status so a node batch
+        // caller can split the batch instead of failing the run.
+        const message = retryableMalformedJson
+          ? `${apiLabel} HTTP ${response.status} returned malformed JSON (${attempt}/${MAX_GRAPHQL_REQUEST_ATTEMPTS}; ${contentType ?? "unknown content type"})`
+          : `${apiLabel} HTTP ${response.status} returned a non-JSON response (${attempt}/${MAX_GRAPHQL_REQUEST_ATTEMPTS}; ${contentType ?? "unknown content type"}${describePageSize(activeVariables)})`;
+        if (
+          !retryableMalformedJson &&
+          GATEWAY_FAILURE_STATUSES.includes(response.status)
+        ) {
+          throw new GraphqlUpstreamError(message, response.status, { cause });
+        }
+        throw new Error(message, { cause });
+      }
+    }
+    if (!response || !parsedResponse) {
+      throw new Error("GitHub GraphQL request did not produce a response");
+    }
+    const envelope = asRecord(payload, "GitHub GraphQL response");
+    if (!response.ok) {
+      throw new Error(
+        `${apiLabel} HTTP ${response.status}: ${sanitizeGraphqlError(envelope.message)}`,
+      );
+    }
+    const unavailableSources = restPath
+      ? []
+      : unavailableRequestedSources(envelope, activeVariables);
+    const unavailableNode = unavailableSources.length > 0;
+    if (
+      Array.isArray(envelope.errors) &&
+      envelope.errors.length > 0 &&
+      !unavailableNode
+    ) {
+      const errors = envelope.errors.map(sanitizeGraphqlError).join("; ");
+      throw new Error(`${apiLabel} rejected the leaderboard query: ${errors}`);
+    }
+    if (restPath) return envelope;
+    const data = asRecord(envelope.data, "GitHub GraphQL response.data");
+    const rateLimit = parseRateLimit(data.rateLimit);
+    this.#startingRemaining =
+      this.#startingRemaining ?? rateLimit.remaining + rateLimit.cost;
+    this.#consumedCost += rateLimit.cost;
+    this.#windowConsumedCost = Math.max(
+      this.#windowConsumedCost + rateLimit.cost,
+      this.#startingRemaining - rateLimit.remaining,
+    );
+    this.#rateLimit = {
+      ...rateLimit,
+      consumedDuringRun: this.#consumedCost,
+    };
+    const effectiveMaxGenerationCost = this.#effectiveMaxGenerationCost();
+    if (
+      this.#windowConsumedCost > effectiveMaxGenerationCost ||
+      rateLimit.remaining < this.#minimumRateLimitReserve
+    ) {
+      throw new Error(
+        `${apiLabel} safety budget exceeded (${this.#windowConsumedCost}/${effectiveMaxGenerationCost} points consumed in the current window, ${rateLimit.remaining} remaining; reserve ${this.#minimumRateLimitReserve})`,
+      );
+    }
+    // Even an unavailable-node response spent GitHub budget. Retain that cost
+    // before discarding the entire attempt and recollecting its source census.
+    if (unavailableNode)
+      throw new SourceNodeUnavailableError(unavailableSources, {
+        cause: new Error(
+          (envelope.errors as unknown[]).map(sanitizeGraphqlError).join("; "),
+        ),
+      });
+    return data;
+  }
+
+  getRequestCount(): number {
+    return this.#requestCount;
+  }
+
+  getRateLimit(): RateLimitSnapshot {
+    if (!this.#rateLimit) {
+      throw new Error("GitHub rate-limit metadata was not loaded");
+    }
+    return this.#rateLimit;
+  }
+}
+
+function parseIsoDate(value: Date, path: string): Date {
+  if (!Number.isFinite(value.getTime())) {
+    throw new Error(`${path} must be a valid date`);
+  }
+  return new Date(Math.floor(value.getTime() / 1000) * 1000);
+}
+
+export function parseGenerationArguments(
+  values: string[],
+  currentTime = new Date(),
+): Pick<GenerateOptions, "now"> {
+  if (values.length === 0) return {};
+  if (values.length !== 2 || values[0] !== "--cutoff") {
+    throw new TypeError(
+      "Usage: generate-leaderboard.ts [--cutoff YYYY-MM-DDTHH:mm:ss.sssZ]",
+    );
+  }
+  const cutoffText = values[1];
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(cutoffText)) {
+    throw new TypeError("--cutoff must be an exact UTC timestamp");
+  }
+  const cutoff = new Date(cutoffText);
+  if (
+    !Number.isFinite(cutoff.getTime()) ||
+    cutoff.toISOString() !== cutoffText
+  ) {
+    throw new TypeError("--cutoff must be an exact UTC timestamp");
+  }
+  const validCurrentTime = parseIsoDate(currentTime, "currentTime");
+  if (cutoff.getTime() > validCurrentTime.getTime()) {
+    throw new RangeError("--cutoff cannot be in the future");
+  }
+  return { now: cutoff };
+}
+
+export function selectEvaluatedContributionsForWindow<
+  T extends Pick<ScoreEvent, "category" | "occurredAt">,
+>(
+  events: readonly T[],
+  windowFrom: Date,
+  windowTo: Date,
+  actualNow: Date,
+): T[] {
+  const from = parseIsoDate(windowFrom, "evaluationWindowFrom").getTime();
+  const to = parseIsoDate(windowTo, "evaluationWindowTo").getTime();
+  const observedAt = parseIsoDate(actualNow, "evaluationActualNow").getTime();
+  if (from >= to) {
+    throw new RangeError("evaluation window must have positive duration");
+  }
+  if (to > observedAt) {
+    throw new RangeError("evaluation window cannot end in the future");
+  }
+  return events.filter((event, index) => {
+    if (event.category !== "evaluated-contribution") {
+      throw new TypeError(
+        `evaluatedContributions[${index}] must use the evaluated-contribution category`,
+      );
+    }
+    const occurredAt = Date.parse(event.occurredAt);
+    if (
+      !Number.isFinite(occurredAt) ||
+      new Date(occurredAt).toISOString() !== event.occurredAt
+    ) {
+      throw new TypeError(
+        `evaluatedContributions[${index}].occurredAt must be an exact UTC timestamp`,
+      );
+    }
+    if (occurredAt > observedAt) {
+      throw new RangeError(
+        `evaluatedContributions[${index}].occurredAt cannot be in the future`,
+      );
+    }
+    return occurredAt >= from && occurredAt < to;
+  });
+}
+
+function searchRange(from: Date, to: Date): string {
+  const inclusiveEnd = new Date(to.getTime() - 1000);
+  return `${from.toISOString()}..${inclusiveEnd.toISOString()}`;
+}
+
+function midpoint(from: Date, to: Date): Date {
+  const seconds = Math.floor((to.getTime() - from.getTime()) / 2000);
+  return new Date(from.getTime() + Math.max(1, seconds) * 1000);
+}
+
+function parseSearchReference(
+  value: unknown,
+  path: string,
+  expectedKind: NodeReference["kind"],
+  merged = true,
+): NodeReference {
+  const node = asRecord(value, path);
+  const kind = asString(node.__typename, `${path}.__typename`);
+  if (kind !== expectedKind) {
+    throw new Error(`${path} must be a ${expectedKind}`);
+  }
+  return {
+    id: asString(node.id, `${path}.id`),
+    kind,
+    outcome:
+      kind === "PullRequest" && merged
+        ? parsePullRequestOutcome(node, path)
+        : null,
+    openVersion: null,
+    ...(kind === "PullRequest" && merged
+      ? {
+          commitPage: {
+            baseRefOid: asFullCommitSha(node.baseRefOid, `${path}.baseRefOid`),
+            headRefOid: asFullCommitSha(node.headRefOid, `${path}.headRefOid`),
+            totalCount: asNumber(
+              child(node, "commits", path).totalCount,
+              `${path}.commits.totalCount`,
+            ),
+            pageInfo: parsePageInfo(
+              child(node, "commits", path).pageInfo,
+              `${path}.commits.pageInfo`,
+            ),
+          },
+        }
+      : {}),
+  };
+}
+
+function parseOpenReference(
+  value: unknown,
+  path: string,
+  kind: NodeReference["kind"],
+): NodeReference {
+  const node = asRecord(value, path);
+  const updatedAt = asString(node.updatedAt, `${path}.updatedAt`);
+  const headRefOid =
+    kind === "PullRequest"
+      ? asFullCommitSha(node.headRefOid, `${path}.headRefOid`)
+      : null;
+  return {
+    id: asString(node.id, `${path}.id`),
+    kind,
+    outcome: null,
+    openVersion: `${updatedAt}:${headRefOid ?? ""}`,
+  };
+}
+
+function chunks<T>(values: T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    result.push(values.slice(index, index + size));
+  }
+  return result;
+}
+
+export interface ReviewCensusEntry {
+  reviewCount: number;
+  updatedAt: string;
+}
+
+function formalDecisionReviewCount(
+  reviews: ReadonlyArray<{ state: string }>,
+): number {
+  return reviews.filter((review) =>
+    ["APPROVED", "CHANGES_REQUESTED"].includes(review.state),
+  ).length;
+}
+
+export async function collectPullRequestReviewCounts(
+  client: GraphqlExecutor,
+  references: ReadonlyArray<{ id: string }>,
+  reservedPasses = 1,
+): Promise<Map<string, ReviewCensusEntry>> {
+  const batches = chunks([...references], REVIEW_DETAIL_BATCH_SIZE);
+  const rateLimit = client.getRateLimit();
+  const available = Math.min(
+    MAX_GENERATION_COST - rateLimit.consumedDuringRun,
+    rateLimit.remaining - MINIMUM_RATE_LIMIT_RESERVE,
+  );
+  const estimatedCost = batches.length * reservedPasses;
+  if (estimatedCost > available) {
+    if (client.ensureBudget) {
+      await client.ensureBudget(estimatedCost);
+    } else {
+      throw new Error(
+        `Review census cost ${estimatedCost} exceeds the safe GraphQL budget ${available}; no partial snapshot will be written`,
+      );
+    }
+  }
+  const reviewCounts = new Map<string, ReviewCensusEntry>();
+  for (const batch of batches) {
+    const data = await executeNodeBatch(
+      client,
+      REVIEWED_PULL_REQUEST_REFERENCES_QUERY,
+      batch.map((reference) => reference.id),
+    );
+    const nodes = asArray(data.nodes, "data.nodes");
+    if (nodes.length !== batch.length) {
+      throw new Error(
+        `GitHub returned ${nodes.length} review census nodes for ${batch.length} requested IDs`,
+      );
+    }
+    for (const [index, reference] of batch.entries()) {
+      const path = `data.nodes[${index}]`;
+      const node = asRecord(nodes[index], path);
+      if (
+        node.__typename !== "PullRequest" ||
+        asString(node.id, `${path}.id`) !== reference.id
+      ) {
+        throw new Error(`${path} did not match the requested pull request`);
+      }
+      const totalCount = asNumber(
+        child(node, "reviews", path).totalCount,
+        `${path}.reviews.totalCount`,
+      );
+      if (!Number.isSafeInteger(totalCount) || totalCount < 0) {
+        throw new Error(
+          `${path}.reviews.totalCount must be a non-negative integer`,
+        );
+      }
+      const updatedAt = asString(node.updatedAt, `${path}.updatedAt`);
+      if (!Number.isFinite(Date.parse(updatedAt))) {
+        throw new Error(`${path}.updatedAt must be an ISO timestamp`);
+      }
+      reviewCounts.set(reference.id, { reviewCount: totalCount, updatedAt });
+    }
+  }
+  return reviewCounts;
+}
+
+async function preflightRepository(
+  client: GraphqlExecutor,
+  targetRepository: TargetRepository,
+  options: { requireStartingBudget: boolean },
+): Promise<{ id: string; updatedAt: string }> {
+  const data = await client.execute(PREFLIGHT_QUERY, {
+    owner: targetRepository.owner,
+    name: targetRepository.name,
+  });
+  const repository = child(data, "repository", "data");
+  if (repository.isPrivate !== false)
+    throw new Error("Leaderboard ingestion requires a public repository");
+  const repositoryNodeId = asString(repository.id, "data.repository.id");
+  if (
+    targetRepository.expectedNodeId !== null &&
+    repositoryNodeId !== targetRepository.expectedNodeId
+  ) {
+    throw new Error(
+      `Repository alias ${targetRepository.owner}/${targetRepository.name} resolved to ${repositoryNodeId}, expected immutable node ${targetRepository.expectedNodeId}`,
+    );
+  }
+  if (options.requireStartingBudget) {
+    const rateLimit = client.getRateLimit();
+    const requiredRemaining = Math.min(
+      MINIMUM_STARTING_RATE_LIMIT,
+      rateLimit.limit - MINIMUM_RATE_LIMIT_RESERVE,
+    );
+    if (rateLimit.remaining < requiredRemaining) {
+      throw new Error(
+        `GitHub GraphQL has only ${rateLimit.remaining} points remaining; at least ${requiredRemaining} are required to start a complete snapshot`,
+      );
+    }
+  }
+  return {
+    id: repositoryNodeId,
+    updatedAt: asString(repository.updatedAt, "data.repository.updatedAt"),
+  };
+}
+
+export async function collectSearchReferences(
+  client: GraphqlExecutor,
+  repository: TargetRepository,
+  from: Date,
+  to: Date,
+  qualifier: "closed" | "merged",
+  kindQualifier:
+    | "is:issue is:closed"
+    | "is:pr is:merged"
+    | "is:pr is:closed is:unmerged",
+  expectedKind: NodeReference["kind"],
+  stats: { searchSliceCount: number },
+): Promise<NodeReference[]> {
+  const searchQuery = `repo:${repository.owner}/${repository.name} ${kindQualifier} ${qualifier}:${searchRange(from, to)}`;
+  stats.searchSliceCount += 1;
+  const firstData = await client.execute(SEARCH_REFERENCES_QUERY, {
+    searchQuery,
+    after: null,
+    pageSize: GRAPHQL_PAGE_SIZE,
+  });
+  const firstPage = parseSearchPage(firstData, (value, path) =>
+    parseSearchReference(value, path, expectedKind, qualifier === "merged"),
+  );
+  async function collectSplitRange() {
+    if (to.getTime() - from.getTime() <= MINIMUM_SEARCH_SLICE_MS) {
+      throw new Error(
+        `GitHub Search cannot reconcile ${firstPage.totalCount} results in a minimum-size range (${searchRange(from, to)}); refusing a snapshot with incomplete or capped results`,
+      );
+    }
+    const split = midpoint(from, to);
+    const left = await collectSearchReferences(
+      client,
+      repository,
+      from,
+      split,
+      qualifier,
+      kindQualifier,
+      expectedKind,
+      stats,
+    );
+    const right = await collectSearchReferences(
+      client,
+      repository,
+      split,
+      to,
+      qualifier,
+      kindQualifier,
+      expectedKind,
+      stats,
+    );
+    const combined = dedupeByNodeId([...left, ...right]);
+    if (combined.length !== firstPage.totalCount) {
+      throw new Error(
+        `Split GitHub Search returned ${combined.length} unique references but parent reported ${firstPage.totalCount} for ${searchRange(from, to)}`,
+      );
+    }
+    return combined;
+  }
+  if (firstPage.totalCount >= SEARCH_SAFE_RESULT_LIMIT) {
+    return collectSplitRange();
+  }
+
+  const references = [...firstPage.nodes];
+  const expectedCount = firstPage.totalCount;
+  let pageInfo = firstPage.pageInfo;
+  while (pageInfo.hasNextPage) {
+    if (!pageInfo.endCursor) {
+      throw new Error("GitHub Search reported another page without a cursor");
+    }
+    const data = await client.execute(SEARCH_REFERENCES_QUERY, {
+      searchQuery,
+      after: pageInfo.endCursor,
+      pageSize: GRAPHQL_PAGE_SIZE,
+    });
+    const page = parseSearchPage(data, (value, path) =>
+      parseSearchReference(value, path, expectedKind, qualifier === "merged"),
+    );
+    if (page.totalCount !== expectedCount) {
+      throw new Error(
+        `GitHub Search changed from ${expectedCount} to ${page.totalCount} results while collecting ${searchRange(from, to)}; rerun for a coherent snapshot`,
+      );
+    }
+    references.push(...page.nodes);
+    pageInfo = page.pageInfo;
+  }
+
+  const deduped = dedupeByNodeId(references);
+  if (deduped.length !== expectedCount) {
+    // Discard the incomplete cursor result and query narrower ranges. Each
+    // child and the deduplicated union must reconcile to the parent's count.
+    // The one-second split floor and client's request/rate budgets still bound
+    // recovery. No missing record can become a successful partial snapshot.
+    return collectSplitRange();
+  }
+  for (const reference of deduped) {
+    await completeOutcomeCommits(client, reference, repository);
+  }
+  return deduped;
+}
+
+// The pull-request connection stops at 250 commits. GitHub's comparison
+// endpoint can paginate the complete immutable base/head range beyond that.
+const GITHUB_PULL_REQUEST_COMMIT_LIST_LIMIT = 250;
+
+async function completeOutcomeCommits(
+  client: GraphqlExecutor,
+  reference: NodeReference,
+  repository: TargetRepository,
+): Promise<void> {
+  const outcome = reference.outcome;
+  const firstPage = reference.commitPage;
+  if (!outcome || !firstPage) return;
+  // Every base branch needs complete commit evidence to establish first credit.
+  // The scorer separately limits shared credit to the integration branch.
+  let commits = outcome.commits;
+  if (!commits) throw new Error(`PR #${outcome.number} has no commit evidence`);
+  if (firstPage.totalCount > GITHUB_PULL_REQUEST_COMMIT_LIST_LIMIT) {
+    if (!client.compareCommitPage)
+      throw new Error("Complete commit comparison is unavailable");
+    const compared: NonNullable<MergedPullRequestOutcome["commits"]> = [];
+    for (
+      let page = 1;
+      page <= Math.ceil(firstPage.totalCount / GRAPHQL_PAGE_SIZE);
+      page += 1
+    ) {
+      const data = await client.compareCommitPage(
+        repository,
+        firstPage.baseRefOid,
+        firstPage.headRefOid,
+        page,
+      );
+      if (
+        data.total_commits !== firstPage.totalCount ||
+        child(data, "base_commit", "comparison").sha !== firstPage.baseRefOid
+      ) {
+        throw new Error(
+          `PR #${outcome.number} comparison does not match its commit range`,
+        );
+      }
+      const nodes = asArray(data.commits, "comparison.commits").map(
+        (value, index) => {
+          const path = `comparison.commits[${index}]`;
+          const commit = asRecord(value, path);
+          const author =
+            commit.author === null
+              ? null
+              : asRecord(commit.author, `${path}.author`);
+          return {
+            commit: {
+              oid: commit.sha,
+              author: {
+                user:
+                  author === null
+                    ? null
+                    : {
+                        __typename: author.type,
+                        id: author.node_id,
+                        login: author.login,
+                        avatarUrl: author.avatar_url,
+                        url: author.html_url,
+                      },
+              },
+            },
+          };
+        },
+      );
+      compared.push(...parseOutcomeCommits({ nodes }, "comparison"));
+    }
+    const known = new Set(compared.map((commit) => commit.oid));
+    if (
+      !known.has(firstPage.headRefOid) ||
+      commits.some((commit) => !known.has(commit.oid))
+    ) {
+      throw new Error(`PR #${outcome.number} comparison omitted known commits`);
+    }
+    commits = compared;
+  }
+  let pageInfo =
+    firstPage.totalCount > GITHUB_PULL_REQUEST_COMMIT_LIST_LIMIT
+      ? { hasNextPage: false, endCursor: null }
+      : firstPage.pageInfo;
+  const cursors = new Set<string>();
+  while (pageInfo.hasNextPage) {
+    const cursor = pageInfo.endCursor;
+    if (!cursor || cursors.has(cursor)) {
+      throw new Error(
+        `PR #${outcome.number} commits cursor is missing or repeated`,
+      );
+    }
+    cursors.add(cursor);
+    const data = await client.execute(MORE_OUTCOME_COMMITS_QUERY, {
+      id: outcome.id,
+      after: cursor,
+    });
+    const node = child(data, "node", "data");
+    const connection = child(node, "commits", "data.node");
+    if (
+      node.id !== outcome.id ||
+      node.state !== "MERGED" ||
+      node.mergedAt !== outcome.mergedAt ||
+      node.baseRefName !== outcome.baseRefName ||
+      connection.totalCount !== firstPage.totalCount
+    ) {
+      throw new Error(`PR #${outcome.number} changed during commit collection`);
+    }
+    commits.push(...parseOutcomeCommits(connection, "data.node.commits"));
+    pageInfo = parsePageInfo(connection.pageInfo, "data.node.commits.pageInfo");
+  }
+  if (
+    commits.length !== firstPage.totalCount ||
+    new Set(commits.map((commit) => commit.oid)).size !== firstPage.totalCount
+  ) {
+    throw new Error(
+      `PR #${outcome.number} commit totals do not match complete unique evidence`,
+    );
+  }
+  outcome.commits = commits;
+  delete reference.commitPage;
+}
+
+async function countSearchResults(
+  client: GraphqlExecutor,
+  repository: TargetRepository,
+  from: Date,
+  to: Date,
+  qualifier: "closed" | "merged",
+  kindQualifier:
+    | "is:issue is:closed"
+    | "is:pr is:merged"
+    | "is:pr is:closed is:unmerged",
+  expectedKind: NodeReference["kind"],
+  stats: { searchSliceCount: number },
+): Promise<number> {
+  const searchQuery = `repo:${repository.owner}/${repository.name} ${kindQualifier} ${qualifier}:${searchRange(from, to)}`;
+  stats.searchSliceCount += 1;
+  const data = await client.execute(SEARCH_REFERENCES_QUERY, {
+    searchQuery,
+    after: null,
+    pageSize: 1,
+  });
+  return parseSearchPage(data, (value, path) =>
+    parseSearchReference(value, path, expectedKind, qualifier === "merged"),
+  ).totalCount;
+}
+
+async function collectOpenReferences(
+  client: GraphqlExecutor,
+  targetRepository: TargetRepository,
+  document: string,
+  field: "issues" | "pullRequests",
+  kind: NodeReference["kind"],
+): Promise<{ repositoryId: string; references: NodeReference[] }> {
+  const references: NodeReference[] = [];
+  let after: string | null = null;
+  let expectedCount: number | null = null;
+  let repositoryId: string | null = null;
+  do {
+    const data = await client.execute(document, {
+      owner: targetRepository.owner,
+      name: targetRepository.name,
+      after,
+      pageSize: GRAPHQL_PAGE_SIZE,
+    });
+    const result = parseRepositoryConnection(data, field, (value, path) =>
+      parseOpenReference(value, path, kind),
+    );
+    repositoryId = repositoryId ?? result.repositoryId;
+    if (repositoryId !== result.repositoryId) {
+      throw new Error("GitHub repository identity changed during collection");
+    }
+    expectedCount = expectedCount ?? result.page.totalCount;
+    if (result.page.totalCount !== expectedCount) {
+      throw new OpenSetChangedError(
+        `Open ${field} changed from ${expectedCount} to ${result.page.totalCount} while listing; rerun for a coherent snapshot`,
+      );
+    }
+    references.push(...result.page.nodes);
+    if (result.page.pageInfo.hasNextPage && !result.page.pageInfo.endCursor) {
+      throw new Error(`${field} reported another page without a cursor`);
+    }
+    after = result.page.pageInfo.hasNextPage
+      ? result.page.pageInfo.endCursor
+      : null;
+  } while (after);
+
+  if (!repositoryId || expectedCount === null) {
+    throw new Error(`GitHub did not return repository metadata for ${field}`);
+  }
+  const deduped = dedupeByNodeId(references);
+  if (deduped.length !== expectedCount) {
+    throw new Error(
+      `Open ${field} changed during listing: expected ${expectedCount}, received ${deduped.length} unique references`,
+    );
+  }
+  return { repositoryId, references: deduped };
+}
+
+function validateRecordState(
+  parsed: ParsedIssue | ParsedPullRequest | ParsedMergedPullRequestReview,
+  expectedState: ExpectedRecordState,
+): void {
+  if (
+    (expectedState === "merged" &&
+      ("mergedAt" in parsed.record ? parsed.record.mergedAt === null : true)) ||
+    (expectedState === "closed" &&
+      ("closedAt" in parsed.record ? parsed.record.closedAt === null : true))
+  ) {
+    throw new Error(
+      `GitHub node ${parsed.record.id} changed state during collection; expected ${expectedState}`,
+    );
+  }
+}
+
+/**
+ * GitHub reports that an open-queue record closed after the listing. It is no
+ * longer open work, and rehydrating its batch cannot make it open again.
+ */
+function leftOpenQueue(
+  parsed: ParsedIssue | ParsedPullRequest,
+  expectedState: ExpectedRecordState,
+): boolean {
+  return expectedState === "open" && parsed.state !== "OPEN";
+}
+
+function parsePullRequestOutcome(
+  value: unknown,
+  path: string,
+): MergedPullRequestOutcome {
+  const node = asRecord(value, path);
+  if (node.__typename !== "PullRequest") {
+    throw new Error(`${path} must be a PullRequest`);
+  }
+  if (asString(node.state, `${path}.state`) !== "MERGED") {
+    throw new Error(`${path} changed state during outcome collection`);
+  }
+  const mergedAt = asNullableString(node.mergedAt, `${path}.mergedAt`);
+  if (!mergedAt) {
+    throw new Error(`${path}.mergedAt must be present`);
+  }
+  return {
+    id: asString(node.id, `${path}.id`),
+    number: asNumber(node.number, `${path}.number`),
+    title: asString(node.title, `${path}.title`),
+    url: asString(node.url, `${path}.url`),
+    body: asString(node.body, `${path}.body`),
+    createdAt: asString(node.createdAt, `${path}.createdAt`),
+    updatedAt: asString(node.updatedAt, `${path}.updatedAt`),
+    mergedAt,
+    headRefOid: asFullCommitSha(node.headRefOid, `${path}.headRefOid`),
+    author: parseActor(node.author, `${path}.author`),
+    additions: asNumber(node.additions, `${path}.additions`),
+    deletions: asNumber(node.deletions, `${path}.deletions`),
+    baseRefName: asString(node.baseRefName, `${path}.baseRefName`),
+    commits: parseOutcomeCommits(node.commits, `${path}.commits`),
+  };
+}
+
+function parseOutcomeCommits(
+  value: unknown,
+  path: string,
+): NonNullable<MergedPullRequestOutcome["commits"]> {
+  const connection = asRecord(value, path);
+  const nodes = asArray(connection.nodes, `${path}.nodes`);
+  return nodes.map((nodeValue, index) => {
+    const nodePath = `${path}.nodes[${index}]`;
+    const commit = child(asRecord(nodeValue, nodePath), "commit", nodePath);
+    const commitPath = `${nodePath}.commit`;
+    const author =
+      commit.author === null
+        ? null
+        : parseActor(
+            child(commit, "author", commitPath).user,
+            `${commitPath}.author.user`,
+          );
+    return {
+      oid: asFullCommitSha(commit.oid, `${commitPath}.oid`),
+      // GitHub links app commits to a User whose reserved login ends in
+      // "[bot]" (for example dependabot[bot]); no person can hold that login.
+      author:
+        author?.login.endsWith("[bot]") === true
+          ? { ...author, kind: "Bot" }
+          : author,
+    };
+  });
+}
+
+function parseDetailBatch<
+  T extends ParsedIssue | ParsedPullRequest | ParsedMergedPullRequestReview,
+>(
+  data: JsonRecord,
+  ids: string[],
+  expectedKind: NodeReference["kind"],
+  parser: (value: unknown, path: string) => T,
+): T[] {
+  const nodes = asArray(data.nodes, "data.nodes");
+  if (nodes.length !== ids.length) {
+    throw new Error(
+      `GitHub details returned ${nodes.length} nodes for ${ids.length} requested IDs`,
+    );
+  }
+  return nodes.map((value, index) => {
+    const path = `data.nodes[${index}]`;
+    const node = asRecord(value, path);
+    if (node.__typename !== expectedKind) {
+      throw new Error(`${path} must be a ${expectedKind}`);
+    }
+    const parsed = parser(node, path);
+    if (parsed.record.id !== ids[index]) {
+      throw new Error(
+        `${path}.id did not match the requested immutable node ID`,
+      );
+    }
+    return parsed;
+  });
+}
+
+type PendingPullRequestTextRecord =
+  | PendingPullRequestRecord
+  | PendingMergedPullRequestReviewRecord;
+
+async function completePullRequestTextConnections<
+  T extends PendingPullRequestTextRecord,
+>(
+  client: GraphqlExecutor,
+  pullRequest: T,
+  pages: Pick<ParsedPullRequest["pages"], "comments" | "reviews">,
+  moreReviewsQuery: string,
+): Promise<T> {
+  let commentsState = pages.comments;
+  while (commentsState.pageInfo.hasNextPage) {
+    if (!commentsState.pageInfo.endCursor) {
+      throw new Error(`PR #${pullRequest.number} comments cursor is missing`);
+    }
+    const data = await client.execute(MORE_PULL_REQUEST_COMMENTS_QUERY, {
+      id: pullRequest.id,
+      after: commentsState.pageInfo.endCursor,
+    });
+    const page = parseComments(
+      child(data, "node", "data").comments,
+      "data.node.comments",
+      pullRequest.id,
+    );
+    pullRequest.comments.push(...page.nodes);
+    commentsState = pageState(page);
+  }
+
+  let reviewsState = pages.reviews;
+  while (reviewsState.pageInfo.hasNextPage) {
+    if (!reviewsState.pageInfo.endCursor) {
+      throw new Error(`PR #${pullRequest.number} reviews cursor is missing`);
+    }
+    const data = await client.execute(moreReviewsQuery, {
+      id: pullRequest.id,
+      after: reviewsState.pageInfo.endCursor,
+    });
+    const node = child(data, "node", "data");
+    if (asString(node.id, "data.node.id") !== pullRequest.id) {
+      throw new Error(
+        `PR #${pullRequest.number} changed identity during review pagination`,
+      );
+    }
+    if (
+      asFullCommitSha(node.headRefOid, "data.node.headRefOid") !==
+      pullRequest.headRefOid
+    ) {
+      throw new OpenSetChangedError(
+        `PR #${pullRequest.number} changed head during review pagination`,
+      );
+    }
+    const page = parseReviews(node.reviews, "data.node.reviews");
+    pullRequest.reviews.push(...page.nodes);
+    reviewsState = pageState(page);
+  }
+
+  pullRequest.comments = dedupeByNodeId(pullRequest.comments);
+  pullRequest.reviews = dedupeByNodeId(pullRequest.reviews);
+  if (
+    pullRequest.comments.length !== pages.comments.totalCount ||
+    pullRequest.reviews.length !== pages.reviews.totalCount
+  ) {
+    throw new Error(
+      `PR #${pullRequest.number} changed during collection; review connection totals no longer match`,
+    );
+  }
+  return pullRequest;
+}
+
+async function completePullRequestConnections(
+  client: GraphqlExecutor,
+  parsed: ParsedPullRequest,
+): Promise<PendingPullRequestRecord> {
+  const pullRequest = await completePullRequestTextConnections(
+    client,
+    parsed.record,
+    parsed.pages,
+    MORE_REVIEWS_QUERY,
+  );
+
+  let filesState = parsed.pages.files;
+  while (filesState?.pageInfo.hasNextPage) {
+    if (!filesState.pageInfo.endCursor) {
+      throw new Error(`PR #${pullRequest.number} files cursor is missing`);
+    }
+    const data = await client.execute(MORE_FILES_QUERY, {
+      id: pullRequest.id,
+      after: filesState.pageInfo.endCursor,
+    });
+    const node = child(data, "node", "data");
+    if (
+      node.files === null &&
+      parsed.state === "OPEN" &&
+      pullRequest.isDraft &&
+      node.state === "OPEN" &&
+      node.isDraft === true &&
+      node.headRefOid === pullRequest.headRefOid
+    ) {
+      // A later page can become unavailable too. Discard the partial diff.
+      pullRequest.files = null;
+      break;
+    }
+    const page = parseFiles(node.files, "data.node.files");
+    if (pullRequest.files === null) {
+      throw new Error(`PR #${pullRequest.number} file detail is unavailable`);
+    }
+    pullRequest.files.push(...page.nodes);
+    filesState = pageState(page);
+  }
+
+  let closingState = parsed.pages.closingIssues;
+  while (closingState.pageInfo.hasNextPage) {
+    if (!closingState.pageInfo.endCursor) {
+      throw new Error(
+        `PR #${pullRequest.number} closing-issues cursor is missing`,
+      );
+    }
+    const data = await client.execute(MORE_CLOSING_ISSUES_QUERY, {
+      id: pullRequest.id,
+      after: closingState.pageInfo.endCursor,
+    });
+    const page = parseClosingIssueIds(
+      child(data, "node", "data").closingIssuesReferences,
+      "data.node.closingIssuesReferences",
+    );
+    pullRequest.closingIssueIds.push(...page.nodes.map((issue) => issue.id));
+    closingState = pageState(page);
+  }
+
+  pullRequest.closingIssueIds = [...new Set(pullRequest.closingIssueIds)];
+  if (
+    (pullRequest.files !== null &&
+      pullRequest.files.length !== parsed.pages.files?.totalCount) ||
+    pullRequest.closingIssueIds.length !== parsed.pages.closingIssues.totalCount
+  ) {
+    throw new Error(
+      `PR #${pullRequest.number} changed during collection; nested connection totals no longer match`,
+    );
+  }
+  return pullRequest;
+}
+
+async function completeMergedPullRequestReviewConnections(
+  client: GraphqlExecutor,
+  parsed: ParsedMergedPullRequestReview,
+  allReviews: boolean,
+): Promise<PendingMergedPullRequestReviewRecord> {
+  return await completePullRequestTextConnections(
+    client,
+    parsed.record,
+    parsed.pages,
+    allReviews ? MORE_REVIEWS_QUERY : MORE_FORMAL_REVIEWS_QUERY,
+  );
+}
+
+async function completeIssueConnections(
+  client: GraphqlExecutor,
+  parsed: ParsedIssue,
+): Promise<IssueRecord> {
+  const issue = parsed.record;
+  if (parsed.references) {
+    const references = [...parsed.references.nodes];
+    let referenceState = pageState(parsed.references);
+    const cursors = new Set<string>();
+    while (referenceState.pageInfo.hasNextPage) {
+      const cursor = referenceState.pageInfo.endCursor;
+      if (!cursor || cursors.has(cursor))
+        throw new Error(
+          `Issue #${issue.number} reference cursor is missing or repeated`,
+        );
+      cursors.add(cursor);
+      const data = await client.execute(MORE_ISSUE_REFERENCES_QUERY, {
+        id: issue.id,
+        after: cursor,
+      });
+      const page = parseIssueReferences(
+        child(data, "node", "data").timelineItems,
+        "data.node.timelineItems",
+      );
+      if (page.totalCount !== parsed.references.totalCount)
+        throw new Error(
+          `Issue #${issue.number} references changed during collection`,
+        );
+      references.push(...page.nodes);
+      referenceState = pageState(page);
+    }
+    const uniqueReferences = dedupeByNodeId(references);
+    if (uniqueReferences.length !== parsed.references.totalCount)
+      throw new Error(`Issue #${issue.number} reference count is incomplete`);
+    issue.referencedPullRequestIds = [
+      ...new Set(
+        uniqueReferences.flatMap((reference) =>
+          reference.pullRequestId ? [reference.pullRequestId] : [],
+        ),
+      ),
+    ];
+  }
+  let commentsState = parsed.pages.comments;
+  while (commentsState.pageInfo.hasNextPage) {
+    if (!commentsState.pageInfo.endCursor) {
+      throw new Error(`Issue #${issue.number} comments cursor is missing`);
+    }
+    const data = await client.execute(MORE_ISSUE_COMMENTS_QUERY, {
+      id: issue.id,
+      after: commentsState.pageInfo.endCursor,
+    });
+    const page = parseComments(
+      child(data, "node", "data").comments,
+      "data.node.comments",
+      issue.id,
+    );
+    issue.comments.push(...page.nodes);
+    commentsState = pageState(page);
+  }
+
+  let closingState = parsed.pages.closedByPullRequests;
+  while (closingState.pageInfo.hasNextPage) {
+    if (!closingState.pageInfo.endCursor) {
+      throw new Error(
+        `Issue #${issue.number} closing-pull-requests cursor is missing`,
+      );
+    }
+    const data = await client.execute(MORE_CLOSING_PULL_REQUESTS_QUERY, {
+      id: issue.id,
+      after: closingState.pageInfo.endCursor,
+    });
+    const page = parseClosingPullRequests(
+      child(data, "node", "data").closedByPullRequestsReferences,
+      "data.node.closedByPullRequestsReferences",
+    );
+    issue.closedByPullRequests.push(...page.nodes);
+    closingState = pageState(page);
+  }
+
+  issue.comments = dedupeByNodeId(issue.comments);
+  issue.closedByPullRequests = dedupeByNodeId(issue.closedByPullRequests);
+  if (
+    issue.comments.length !== parsed.pages.comments.totalCount ||
+    issue.closedByPullRequests.length !==
+      parsed.pages.closedByPullRequests.totalCount
+  ) {
+    throw new Error(
+      `Issue #${issue.number} changed during collection; nested connection totals no longer match`,
+    );
+  }
+  return issue;
+}
+
+async function completeInlineReviewComments(
+  client: GraphqlExecutor,
+  reviewId: string,
+  artifactId: string,
+  firstPage: ConnectionPage<GitHubTextSource>,
+): Promise<GitHubTextSource[]> {
+  const comments = [...firstPage.nodes];
+  let pageInfo = firstPage.pageInfo;
+  while (pageInfo.hasNextPage) {
+    if (!pageInfo.endCursor) {
+      throw new Error(`Review ${reviewId} comments cursor is missing`);
+    }
+    const data = await client.execute(MORE_REVIEW_INLINE_COMMENTS_QUERY, {
+      id: reviewId,
+      after: pageInfo.endCursor,
+    });
+    const node = child(data, "node", "data");
+    if (asString(node.id, "data.node.id") !== reviewId) {
+      throw new Error(`Review ${reviewId} changed identity during pagination`);
+    }
+    const page = parseComments(node.comments, "data.node.comments", artifactId);
+    comments.push(...page.nodes);
+    pageInfo = page.pageInfo;
+  }
+  const deduped = dedupeByNodeId(comments);
+  if (deduped.length !== firstPage.totalCount) {
+    throw new Error(
+      `Review ${reviewId} changed during collection; expected ${firstPage.totalCount} inline comments, received ${deduped.length}`,
+    );
+  }
+  return deduped;
+}
+
+export function deriveCurrentHeadReviewDecision(
+  headRefOid: string,
+  pullRequestAuthor: GitHubActor | null,
+  reviews: Array<{
+    id: string;
+    state: string;
+    submittedAt: string | null;
+    commitId: string | null;
+    author: GitHubActor | null;
+  }>,
+): PullRequestRecord["reviewDecision"] {
+  const currentHead = asFullCommitSha(headRefOid, "Pull request headRefOid");
+  const latestReviewsByActor = new Map<
+    string,
+    { submittedAt: number; reviews: Array<(typeof reviews)[number]> }
+  >();
+  for (const review of reviews) {
+    const commitId =
+      review.commitId === null
+        ? null
+        : asFullCommitSha(review.commitId, `Review ${review.id} commitId`);
+    const isDecision = ["APPROVED", "CHANGES_REQUESTED"].includes(review.state);
+    const isSelfReview =
+      review.author !== null &&
+      pullRequestAuthor !== null &&
+      (review.author.id === pullRequestAuthor.id ||
+        review.author.login.toLowerCase() ===
+          pullRequestAuthor.login.toLowerCase());
+    if (isBotActor(review.author) || isSelfReview) {
+      continue;
+    }
+    if (isDecision && !review.submittedAt) {
+      throw new Error(
+        `Review ${review.id} cannot prove a timestamped ${review.state} decision`,
+      );
+    }
+    // GitHub returns a null commit after the reviewed revision becomes
+    // unreachable, including when a merged pull request's branch is deleted.
+    // Such a review is valid history but cannot prove a current-head decision.
+    if (
+      !["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state) ||
+      !review.submittedAt ||
+      commitId === null
+    ) {
+      continue;
+    }
+    const submittedAt = Date.parse(review.submittedAt);
+    if (!Number.isFinite(submittedAt)) {
+      throw new Error(`Review ${review.id} has an invalid submittedAt value`);
+    }
+    const actorKey = review.author
+      ? `actor:${review.author.id}`
+      : `ghost:${review.id}`;
+    const previous = latestReviewsByActor.get(actorKey);
+    if (!previous || submittedAt > previous.submittedAt) {
+      latestReviewsByActor.set(actorKey, {
+        submittedAt,
+        reviews: [{ ...review, commitId }],
+      });
+    } else if (submittedAt === previous.submittedAt) {
+      previous.reviews.push({ ...review, commitId });
+    }
+  }
+  const currentHeadStates = [...latestReviewsByActor.values()]
+    .flatMap((entry) => entry.reviews)
+    .filter((review) => review.commitId === currentHead)
+    .map((review) => review.state);
+  return currentHeadStates.includes("CHANGES_REQUESTED")
+    ? "CHANGES_REQUESTED"
+    : currentHeadStates.includes("APPROVED")
+      ? "APPROVED"
+      : null;
+}
+
+async function finalizePullRequests(
+  client: GraphqlExecutor,
+  pending: PendingPullRequestRecord[],
+): Promise<PullRequestRecord[]>;
+async function finalizePullRequests(
+  client: GraphqlExecutor,
+  pending: PendingMergedPullRequestReviewRecord[],
+): Promise<MergedPullRequestReviewRecord[]>;
+async function finalizePullRequests(
+  client: GraphqlExecutor,
+  pending: Array<
+    PendingPullRequestRecord | PendingMergedPullRequestReviewRecord
+  >,
+): Promise<Array<PullRequestRecord | MergedPullRequestReviewRecord>> {
+  const bindings = pending.flatMap((pullRequest) =>
+    pullRequest.reviews.map((review) => ({
+      artifactId: pullRequest.id,
+      pullRequest,
+      review,
+    })),
+  );
+  const seenReviewIds = new Set<string>();
+  for (const binding of bindings) {
+    if (seenReviewIds.has(binding.review.id)) {
+      throw new Error(
+        `Review ${binding.review.id} appeared under more than one pull request`,
+      );
+    }
+    seenReviewIds.add(binding.review.id);
+  }
+  const commentCounts = new Map<string, number>();
+  for (const batch of chunks(bindings, REVIEW_DETAIL_BATCH_SIZE)) {
+    const ids = batch.map((binding) => binding.review.id);
+    const data = await executeNodeBatch(
+      client,
+      REVIEW_INLINE_COMMENTS_QUERY,
+      ids,
+    );
+    const nodes = asArray(data.nodes, "data.nodes");
+    if (nodes.length !== batch.length) {
+      throw new Error(
+        `GitHub returned ${nodes.length} reviews for ${batch.length} requested IDs`,
+      );
+    }
+    for (const [index, binding] of batch.entries()) {
+      const path = `data.nodes[${index}]`;
+      const node = asRecord(nodes[index], path);
+      if (
+        node.__typename !== "PullRequestReview" ||
+        asString(node.id, `${path}.id`) !== binding.review.id
+      ) {
+        throw new Error(`${path} did not match the requested review`);
+      }
+      const firstPage = parseComments(
+        node.comments,
+        `${path}.comments`,
+        binding.artifactId,
+      );
+      const comments = await completeInlineReviewComments(
+        client,
+        binding.review.id,
+        binding.artifactId,
+        firstPage,
+      );
+      binding.pullRequest.comments.push(...comments);
+      commentCounts.set(binding.review.id, comments.length);
+    }
+  }
+
+  return pending.map((pendingPullRequest) => {
+    const {
+      headRefOid,
+      reviews: pendingReviews,
+      ...pullRequest
+    } = pendingPullRequest;
+    const reviewDecision = deriveCurrentHeadReviewDecision(
+      headRefOid,
+      pullRequest.author,
+      pendingReviews,
+    );
+    const reviews = pendingReviews.map((review) => {
+      const inlineCommentCount = commentCounts.get(review.id);
+      if (inlineCommentCount === undefined) {
+        throw new Error(`Review ${review.id} inline comments were not loaded`);
+      }
+      return {
+        id: review.id,
+        body: review.body,
+        state: review.state,
+        submittedAt: review.submittedAt,
+        url: review.url,
+        author: review.author,
+        commitId: review.commitId,
+        inlineCommentCount,
+      };
+    });
+    return {
+      ...pullRequest,
+      headRefOid,
+      reviewDecision,
+      comments: dedupeByNodeId(pullRequest.comments),
+      reviews,
+    };
+  });
+}
+
+async function hydratePullRequests(
+  client: GraphqlExecutor,
+  references: NodeReference[],
+  expectedState: ExpectedRecordState,
+  onProgress: (progress: GenerationProgress) => void,
+  phase: GenerationProgress["phase"],
+  repository: TargetRepository,
+  repositoryId: string,
+): Promise<PullRequestRecord[]> {
+  const pending: PendingPullRequestRecord[] = [];
+  for (const batch of chunks(references, DETAIL_BATCH_SIZE)) {
+    const hydratedBatch = await retryOpenBatch(expectedState, async () => {
+      const ids = batch.map((reference) => reference.id);
+      const data = await executeNodeBatch(
+        client,
+        PULL_REQUEST_DETAILS_QUERY,
+        ids,
+      );
+      if (expectedState === "merged") {
+        const nodes = asArray(data.nodes, "data.nodes");
+        for (const [index, value] of nodes.entries()) {
+          const node = asRecord(value, `data.nodes[${index}]`);
+          if (node.files !== null) continue;
+          if (
+            node.__typename !== "PullRequest" ||
+            node.id !== ids[index] ||
+            node.state !== "MERGED" ||
+            !client.recoverPullRequestFiles
+          )
+            throw new Error("Complete merged file evidence is unavailable");
+          const recovered = await client.recoverPullRequestFiles(
+            repository,
+            repositoryId,
+            node,
+          );
+          nodes[index] = {
+            ...node,
+            ...recovered,
+            files: {
+              totalCount: recovered.changedFiles,
+              nodes: recovered.files,
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          };
+        }
+      }
+      const parsed = parseDetailBatch(
+        data,
+        ids,
+        "PullRequest",
+        parsePullRequest,
+      );
+      const completed: PendingPullRequestRecord[] = [];
+      for (const value of parsed) {
+        if (leftOpenQueue(value, expectedState)) continue;
+        validateRecordState(value, expectedState);
+        completed.push(await completePullRequestConnections(client, value));
+      }
+      return completed;
+    });
+    pending.push(...hydratedBatch);
+    onProgress({ phase, completed: pending.length, total: references.length });
+  }
+  const pullRequests = await finalizePullRequests(client, pending);
+  onProgress({
+    phase,
+    completed: pullRequests.length,
+    total: references.length,
+  });
+  return pullRequests;
+}
+
+async function hydrateReviewedMergedPullRequests(
+  client: GraphqlExecutor,
+  references: NodeReference[],
+  onProgress: (progress: GenerationProgress) => void,
+  allReviews = false,
+  expectedState: "merged" | "closed" = "merged",
+): Promise<MergedPullRequestReviewRecord[]> {
+  const pending: PendingMergedPullRequestReviewRecord[] = [];
+  for (const batch of chunks(references, DETAIL_BATCH_SIZE)) {
+    const ids = batch.map((reference) => reference.id);
+    const data = await executeNodeBatch(
+      client,
+      MERGED_PULL_REQUEST_REVIEWS_QUERY,
+      ids,
+      { reviewStates: allReviews ? null : ["APPROVED", "CHANGES_REQUESTED"] },
+    );
+    const parsed = parseDetailBatch(
+      data,
+      ids,
+      "PullRequest",
+      parseMergedPullRequestReview,
+    );
+    for (const value of parsed) {
+      if (expectedState === "merged") validateRecordState(value, "merged");
+      else if (value.state !== "CLOSED" || value.record.mergedAt !== null)
+        throw new Error("Joint context source changed its closed state");
+      pending.push(
+        await completeMergedPullRequestReviewConnections(
+          client,
+          value,
+          allReviews,
+        ),
+      );
+      onProgress({
+        phase: "merged-pull-requests",
+        completed: pending.length,
+        total: references.length,
+      });
+    }
+  }
+  const pullRequests = await finalizePullRequests(client, pending);
+  onProgress({
+    phase: "merged-pull-requests",
+    completed: pullRequests.length,
+    total: references.length,
+  });
+  return pullRequests;
+}
+
+async function hydrateIssues(
+  client: GraphqlExecutor,
+  references: NodeReference[],
+  expectedState: ExpectedRecordState,
+  onProgress: (progress: GenerationProgress) => void,
+  phase: GenerationProgress["phase"],
+): Promise<IssueRecord[]> {
+  const issues: IssueRecord[] = [];
+  for (const batch of chunks(references, DETAIL_BATCH_SIZE)) {
+    const hydratedBatch = await retryOpenBatch(expectedState, async () => {
+      const ids = batch.map((reference) => reference.id);
+      const data = await executeNodeBatch(client, ISSUE_DETAILS_QUERY, ids, {
+        includeReferences: expectedState === "open",
+      });
+      const parsed = parseDetailBatch(data, ids, "Issue", parseIssue);
+      const completed: IssueRecord[] = [];
+      for (const value of parsed) {
+        if (leftOpenQueue(value, expectedState)) continue;
+        validateRecordState(value, expectedState);
+        completed.push(await completeIssueConnections(client, value));
+      }
+      return completed;
+    });
+    issues.push(...hydratedBatch);
+    onProgress({ phase, completed: issues.length, total: references.length });
+  }
+  return issues;
+}
+
+/**
+ * Rehydrates only a changing open-work batch. Open queues are intentionally
+ * live, so a global three-attempt freeze penalizes healthy contribution input.
+ */
+export async function retryOpenBatch<T>(
+  expectedState: ExpectedRecordState,
+  hydrate: () => Promise<T>,
+): Promise<T> {
+  let lastChange: OpenSetChangedError | null = null;
+  const attempts = expectedState === "open" ? MAX_TRANSIENT_ATTEMPTS : 1;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await hydrate();
+    } catch (error) {
+      if (expectedState !== "open" || !(error instanceof OpenSetChangedError)) {
+        throw error;
+      }
+      lastChange = error;
+    }
+  }
+  throw new OpenSetChangedError(
+    `Open work batch changed during ${MAX_TRANSIENT_ATTEMPTS} consecutive hydration attempts`,
+    { cause: lastChange },
+  );
+}
+
+/**
+ * Selects outcomes eligible for detail-dependent bonuses. Base merge scoring
+ * remains complete and uncapped; this bounds only expensive GitHub hydration.
+ */
+export function selectDetailedMergedPullRequestIds(
+  candidates: ReadonlyArray<{
+    outcome: MergedPullRequestOutcome;
+    projectId: string;
+  }>,
+  verificationWindowFrom: Date,
+  reviewedPullRequestIds: ReadonlySet<string> = new Set(),
+): Set<string> {
+  const from = verificationWindowFrom.getTime();
+  if (!Number.isFinite(from)) {
+    throw new TypeError("verificationWindowFrom must be a valid date");
+  }
+  const usage = new Map<string, number>();
+  const selected = new Set<string>();
+  for (const { outcome } of candidates) {
+    if (
+      reviewedPullRequestIds.has(outcome.id) &&
+      Date.parse(outcome.mergedAt) >= from
+    ) {
+      selected.add(outcome.id);
+    }
+  }
+  for (const candidate of [...candidates].sort(
+    (left, right) =>
+      right.outcome.mergedAt.localeCompare(left.outcome.mergedAt) ||
+      right.outcome.number - left.outcome.number ||
+      left.outcome.id.localeCompare(right.outcome.id),
+  )) {
+    const { outcome, projectId } = candidate;
+    if (
+      !outcome.author ||
+      isBotActor(outcome.author) ||
+      Date.parse(outcome.mergedAt) < from
+    ) {
+      continue;
+    }
+    const cycleId = outcome.mergedAt.slice(0, 7);
+    const key = `${projectId}\u0000${outcome.author.id}\u0000${cycleId}`;
+    const count = usage.get(key) ?? 0;
+    if (count >= DETAILED_MERGED_PULL_REQUESTS_PER_MONTH) continue;
+    usage.set(key, count + 1);
+    selected.add(outcome.id);
+  }
+  return selected;
+}
+
+export interface MergedPullRequestHydrationPlan {
+  detailEligibleIds: Set<string>;
+  hydratedIds: Set<string>;
+  reviewCounts: Map<string, ReviewCensusEntry>;
+}
+
+export async function planMergedPullRequestHydration(
+  client: GraphqlExecutor,
+  candidates: ReadonlyArray<{
+    outcome: MergedPullRequestOutcome;
+    projectId: string;
+  }>,
+  verificationWindowFrom: Date,
+): Promise<MergedPullRequestHydrationPlan> {
+  const detailEligibleIds = selectDetailedMergedPullRequestIds(
+    candidates,
+    verificationWindowFrom,
+  );
+  const reviewCounts = await collectPullRequestReviewCounts(
+    client,
+    candidates.map(({ outcome }) => ({ id: outcome.id })),
+    2,
+  );
+  const reviewedPullRequestIds = new Set(
+    [...reviewCounts].flatMap(([id, entry]) =>
+      entry.reviewCount > 0 ? [id] : [],
+    ),
+  );
+  const hydratedIds = selectDetailedMergedPullRequestIds(
+    candidates,
+    verificationWindowFrom,
+    reviewedPullRequestIds,
+  );
+  return { detailEligibleIds, hydratedIds, reviewCounts };
+}
+
+/** Only final census churn may restart a complete, unpublished collection. */
+export class ReviewCensusChangedError extends Error {
+  override readonly name = "ReviewCensusChangedError";
+}
+
+export function assertReviewCensusStable(
+  before: ReadonlyMap<string, ReviewCensusEntry>,
+  after: ReadonlyMap<string, ReviewCensusEntry>,
+): void {
+  if (before.size !== after.size) {
+    throw new ReviewCensusChangedError(
+      "Review census changed identity before snapshot assembly",
+    );
+  }
+  for (const [id, entry] of before) {
+    const current = after.get(id);
+    if (
+      !current ||
+      current.reviewCount !== entry.reviewCount ||
+      current.updatedAt !== entry.updatedAt
+    ) {
+      throw new ReviewCensusChangedError(
+        `Review census changed for ${id} before snapshot assembly`,
+      );
+    }
+  }
+}
+
+/**
+ * Re-checks only pull requests that changed between the scalar census and
+ * detail hydration. A comment or other unrelated PR update advances
+ * `updatedAt`; when the freshly hydrated formal-review set and an immediate
+ * scalar re-read agree, the detail is a complete current snapshot and the
+ * global closing census can safely use the refreshed checkpoint.
+ */
+export async function reconcileHydratedReviewCensus(
+  client: GraphqlExecutor,
+  reviewCounts: Map<string, ReviewCensusEntry>,
+  pullRequests: ReadonlyArray<
+    Pick<MergedPullRequestReviewRecord, "id" | "reviews" | "updatedAt">
+  >,
+): Promise<void> {
+  const changed = pullRequests.filter((pullRequest) => {
+    const census = reviewCounts.get(pullRequest.id);
+    if (census === undefined) {
+      throw new Error(
+        `Review census missing ${pullRequest.id} before detail reconciliation`,
+      );
+    }
+    return (
+      formalDecisionReviewCount(pullRequest.reviews) !== census.reviewCount ||
+      pullRequest.updatedAt !== census.updatedAt
+    );
+  });
+  if (changed.length === 0) return;
+
+  const refreshed = await collectPullRequestReviewCounts(
+    client,
+    changed.map(({ id }) => ({ id })),
+  );
+  for (const pullRequest of changed) {
+    const current = refreshed.get(pullRequest.id);
+    if (
+      current === undefined ||
+      formalDecisionReviewCount(pullRequest.reviews) !== current.reviewCount ||
+      pullRequest.updatedAt !== current.updatedAt
+    ) {
+      throw new Error(
+        `Review census changed for ${pullRequest.id} during detail hydration`,
+      );
+    }
+    reviewCounts.set(pullRequest.id, current);
+  }
+}
+
+async function collectOpenIssues(
+  client: GraphqlExecutor,
+  targetRepository: TargetRepository,
+  repositoryId: string,
+  onProgress: (progress: GenerationProgress) => void,
+  reservedCost = 0,
+): Promise<IssueRecord[]> {
+  const before = await retryOpenReferenceListing(() =>
+    collectOpenReferences(
+      client,
+      targetRepository,
+      OPEN_ISSUE_REFERENCES_QUERY,
+      "issues",
+      "Issue",
+    ),
+  );
+  if (before.repositoryId !== repositoryId) {
+    throw new Error("GitHub returned an inconsistent repository node ID");
+  }
+  await ensureEstimatedBudget(
+    client,
+    0,
+    before.references.length,
+    reservedCost,
+  );
+  return await hydrateIssues(
+    client,
+    before.references,
+    "open",
+    onProgress,
+    "open-issues",
+  );
+}
+
+async function collectOpenPullRequests(
+  client: GraphqlExecutor,
+  targetRepository: TargetRepository,
+  repositoryId: string,
+  onProgress: (progress: GenerationProgress) => void,
+  reservedCost = 0,
+): Promise<PullRequestRecord[]> {
+  const before = await retryOpenReferenceListing(() =>
+    collectOpenReferences(
+      client,
+      targetRepository,
+      OPEN_PULL_REQUEST_REFERENCES_QUERY,
+      "pullRequests",
+      "PullRequest",
+    ),
+  );
+  if (before.repositoryId !== repositoryId) {
+    throw new Error("GitHub returned an inconsistent repository node ID");
+  }
+  await ensureEstimatedBudget(
+    client,
+    before.references.length,
+    0,
+    reservedCost,
+  );
+  return await hydratePullRequests(
+    client,
+    before.references,
+    "open",
+    onProgress,
+    "open-pull-requests",
+    targetRepository,
+    repositoryId,
+  );
+}
+
+export async function assertOpenEvidenceReferencesCurrent(
+  client: GraphqlExecutor,
+  targetRepository: TargetRepository,
+  repositoryId: string,
+  pullRequests: PullRequestRecord[],
+): Promise<void> {
+  if (pullRequests.length === 0) return;
+  const current = await collectOpenReferences(
+    client,
+    targetRepository,
+    OPEN_PULL_REQUEST_REFERENCES_QUERY,
+    "pullRequests",
+    "PullRequest",
+  );
+  const expected: NodeReference[] = pullRequests.map((pullRequest) => ({
+    id: pullRequest.id,
+    kind: "PullRequest",
+    outcome: null,
+    openVersion: `${pullRequest.updatedAt}:${pullRequest.headRefOid}`,
+  }));
+  const currentById = new Map(
+    current.references.map((reference) => [reference.id, reference]),
+  );
+  if (
+    current.repositoryId !== repositoryId ||
+    expected.some((reference) => {
+      const live = currentById.get(reference.id);
+      return !live || live.openVersion !== reference.openVersion;
+    })
+  ) {
+    throw new OpenSetChangedError(
+      "An open pull request with evidence changed during verification",
+    );
+  }
+}
+
+function estimateBatchedConnectionCost(
+  count: number,
+  connectionsPerNode: number,
+): number {
+  return chunks(
+    Array.from({ length: count }, (_, index) => index),
+    DETAIL_BATCH_SIZE,
+  ).reduce(
+    (total, batch) =>
+      total +
+      Math.max(1, Math.round((batch.length * connectionsPerNode) / 100)),
+    0,
+  );
+}
+
+export function estimateFirstPageDetailCost(
+  pullRequestCount: number,
+  issueCount: number,
+): number {
+  if (
+    !Number.isInteger(pullRequestCount) ||
+    pullRequestCount < 0 ||
+    !Number.isInteger(issueCount) ||
+    issueCount < 0
+  ) {
+    throw new Error("Detail-cost counts must be non-negative integers");
+  }
+  return (
+    estimateBatchedConnectionCost(pullRequestCount, 6) +
+    estimateBatchedConnectionCost(issueCount, 4)
+  );
+}
+
+export function estimateReviewFirstPageDetailCost(
+  pullRequestCount: number,
+): number {
+  if (!Number.isInteger(pullRequestCount) || pullRequestCount < 0) {
+    throw new Error("Review-detail count must be a non-negative integer");
+  }
+  return estimateBatchedConnectionCost(pullRequestCount, 2);
+}
+
+async function ensureEstimatedBudget(
+  client: GraphqlExecutor,
+  pullRequestCount: number,
+  issueCount: number,
+  reservedCost = 0,
+  reviewPullRequestCount = 0,
+): Promise<void> {
+  const rateLimit = client.getRateLimit();
+  const estimate =
+    estimateFirstPageDetailCost(pullRequestCount, issueCount) +
+    estimateReviewFirstPageDetailCost(reviewPullRequestCount);
+  const available = Math.min(
+    MAX_GENERATION_COST - rateLimit.consumedDuringRun,
+    rateLimit.remaining - MINIMUM_RATE_LIMIT_RESERVE,
+  );
+  if (estimate + reservedCost > available) {
+    if (client.ensureBudget) {
+      await client.ensureBudget(estimate + reservedCost);
+      return;
+    }
+    throw new Error(
+      `Estimated first-page detail cost ${estimate} plus reserved cost ${reservedCost} exceeds the safe GraphQL budget ${available}; no partial snapshot will be written`,
+    );
+  }
+}
+
+export function deriveSourceUpdatedAt(
+  records: Array<{ updatedAt: string }>,
+  emptyFallback: string,
+): string {
+  if (records.length === 0) {
+    return emptyFallback;
+  }
+  return records
+    .slice(1)
+    .reduce(
+      (latest, record) =>
+        Date.parse(record.updatedAt) > Date.parse(latest)
+          ? record.updatedAt
+          : latest,
+      records[0].updatedAt,
+    );
+}
+
+const SCORE_EVIDENCE_ROWS: ReadonlyArray<{
+  id: string;
+  label: string;
+  category: EvidenceCategory;
+}> = [
+  {
+    id: "before-screenshots",
+    label: "Before screenshots",
+    category: "screenshot",
+  },
+  {
+    id: "after-screenshots",
+    label: "After screenshots",
+    category: "screenshot",
+  },
+  {
+    id: "walkthrough-video",
+    label: "Walkthrough video",
+    category: "video",
+  },
+  { id: "backend-logs", label: "Backend logs", category: "logs" },
+  { id: "frontend-logs", label: "Frontend logs", category: "logs" },
+  {
+    id: "llm-trajectory",
+    label: "Real-LLM trajectory",
+    category: "trajectory",
+  },
+  {
+    id: "domain-artifacts",
+    label: "Domain artifacts",
+    category: "domain-artifact",
+  },
+];
+
+const SCORE_EVIDENCE_CATEGORY = new Map(
+  SCORE_EVIDENCE_ROWS.map(({ category, id }) => [id, category]),
+);
+
+interface EvidenceVerificationCandidate {
+  pullRequest: PullRequestRecord;
+  source: GitHubTextSource;
+  artifactCount: number;
+}
+
+function evidenceHeadOid(body: string): string | null {
+  const matches = [
+    ...body.matchAll(/<!--\s*evidence-head:([a-f0-9]{40})\s*-->/gi),
+  ];
+  return matches.length === 1 ? matches[0][1].toLowerCase() : null;
+}
+
+function evidenceVerificationCandidates(
+  pullRequests: PullRequestRecord[],
+): EvidenceVerificationCandidate[] {
+  const candidates: EvidenceVerificationCandidate[] = [];
+  for (const pullRequest of pullRequests) {
+    const mergedAt = pullRequest.mergedAt
+      ? Date.parse(pullRequest.mergedAt)
+      : Number.POSITIVE_INFINITY;
+    for (const source of pullRequestTextSources(pullRequest)) {
+      if (
+        source.kind !== "body" ||
+        !source.author ||
+        isBotActor(source.author) ||
+        Date.parse(source.createdAt) > mergedAt
+      ) {
+        continue;
+      }
+      // Open PRs still require the live body to be no newer than "now"
+      // (mergedAt is +Infinity when open). Merged PRs may keep a body that was
+      // last edited after merge only when the editor is not the author and the
+      // evidence-head still pins the merged OID (maintainer drive-by edits).
+      if (pullRequest.mergedAt) {
+        if (!isMergedPullRequestBodyEligibleForEvidence(pullRequest, source)) {
+          continue;
+        }
+      } else if (Date.parse(source.updatedAt) > mergedAt) {
+        continue;
+      }
+      if (evidenceHeadOid(source.body) !== pullRequest.headRefOid) continue;
+      const artifactCount = planReferencedArtifacts(
+        source.body,
+        SCORE_EVIDENCE_ROWS,
+        { allowedArtifactKinds: ["opaque-upload"] },
+      ).uniqueArtifactCount;
+      if (artifactCount > 0) {
+        candidates.push({ pullRequest, source, artifactCount });
+      }
+    }
+  }
+  return candidates.sort(
+    (left, right) =>
+      left.pullRequest.id.localeCompare(right.pullRequest.id) ||
+      left.source.id.localeCompare(right.source.id),
+  );
+}
+
+async function mapWithFixedConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workers = Array.from(
+    { length: Math.min(concurrency, items.length) },
+    async () => {
+      while (nextIndex < items.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        results[index] = await mapper(items[index]);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return results;
+}
+
+interface UnavailableEvidenceArtifact {
+  pullRequestUrl: string;
+  artifactUrl: string;
+  status: string;
+  detail: string | null;
+}
+
+interface CandidateEvidenceVerdict {
+  artifacts: VerifiedEvidenceArtifact[];
+  failedCategories: EvidenceCategory[];
+  unavailable: UnavailableEvidenceArtifact[];
+}
+
+/**
+ * A score-bearing artifact stayed unavailable after its transport retries.
+ * Missing data is unavailable, never a fabricated zero (protocol/points-v1.md),
+ * and incomplete evidence must fail snapshot collection
+ * (protocol/scoring-v2.md), so no scored snapshot is returned or written.
+ */
+export class EvidenceUnavailableError extends Error {
+  readonly unavailable: readonly UnavailableEvidenceArtifact[];
+
+  constructor(unavailable: UnavailableEvidenceArtifact[]) {
+    const first = unavailable[0];
+    super(
+      `Evidence collection is incomplete: ${unavailable.length} score-bearing artifact(s) stayed unavailable after ${EVIDENCE_TRANSIENT_RETRIES + 1} attempts (first: ${first.artifactUrl} in ${first.pullRequestUrl}, ${first.status}${first.detail ? ` ${first.detail}` : ""})`,
+    );
+    this.name = "EvidenceUnavailableError";
+    this.unavailable = unavailable;
+  }
+}
+
+export interface PullRequestEvidenceVerificationResult {
+  artifacts: VerifiedEvidenceArtifact[];
+  status: "complete" | "suppressed-limit";
+  sourceCount: number;
+  artifactCount: number;
+}
+
+/**
+ * Resolves score-bearing proof from eligible contributor-authored body sources.
+ * Merged PRs use bodies last edited at or before merge, or a non-author
+ * post-merge body edit that still pins the merged head via a single
+ * evidence-head marker. Open PRs use the stable live body snapshot. The root
+ * evidence verifier owns URL trust, redirects, byte limits, and structure.
+ */
+export async function verifyPullRequestEvidence(
+  pullRequests: PullRequestRecord[],
+  options: Pick<
+    GenerateOptions,
+    | "evidenceFetch"
+    | "evidenceTimeoutMs"
+    | "evidenceToken"
+    | "evidenceRetryDelayMs"
+  > = {},
+): Promise<PullRequestEvidenceVerificationResult> {
+  const candidates = evidenceVerificationCandidates(pullRequests);
+  const artifactCount = candidates.reduce(
+    (total, candidate) => total + candidate.artifactCount,
+    0,
+  );
+
+  const selectedCandidates: EvidenceVerificationCandidate[] = [];
+  let selectedArtifactCount = 0;
+  const candidatesByTrust = [...candidates].sort(
+    (left, right) =>
+      Number(left.pullRequest.mergedAt === null) -
+        Number(right.pullRequest.mergedAt === null) ||
+      left.artifactCount - right.artifactCount ||
+      left.pullRequest.id.localeCompare(right.pullRequest.id) ||
+      left.source.id.localeCompare(right.source.id),
+  );
+  for (const candidate of candidatesByTrust) {
+    if (
+      candidate.artifactCount > MAX_EVIDENCE_ARTIFACTS_PER_SOURCE ||
+      selectedCandidates.length >= MAX_EVIDENCE_SOURCES_PER_SNAPSHOT ||
+      selectedArtifactCount + candidate.artifactCount >
+        MAX_EVIDENCE_ARTIFACTS_PER_SNAPSHOT
+    ) {
+      continue;
+    }
+    selectedCandidates.push(candidate);
+    selectedArtifactCount += candidate.artifactCount;
+  }
+  const status =
+    selectedCandidates.length === candidates.length
+      ? "complete"
+      : "suppressed-limit";
+
+  const verdicts = await mapWithFixedConcurrency(
+    selectedCandidates,
+    EVIDENCE_VERIFICATION_CONCURRENCY,
+    async ({ pullRequest, source }): Promise<CandidateEvidenceVerdict> => {
+      // The verifier retries only the artifact that failed in transport. A
+      // terminal finding such as HTTP 404 keeps its first verdict.
+      const verification = await verifyReferencedArtifacts(
+        source.body,
+        SCORE_EVIDENCE_ROWS,
+        {
+          allowedArtifactKinds: ["opaque-upload"],
+          concurrency: 1,
+          contentDigestLimitBytes: EVIDENCE_CONTENT_DIGEST_LIMIT_BYTES,
+          fetchImpl: options.evidenceFetch,
+          timeoutMs: options.evidenceTimeoutMs ?? EVIDENCE_ARTIFACT_TIMEOUT_MS,
+          token: options.evidenceToken,
+          transientRetries: EVIDENCE_TRANSIENT_RETRIES,
+          transientRetryDelayMs:
+            options.evidenceRetryDelayMs ?? EVIDENCE_TRANSIENT_RETRY_DELAY_MS,
+        },
+      );
+      const unavailable = verification.findings
+        .filter(
+          (finding) =>
+            SCORE_EVIDENCE_CATEGORY.has(finding.id) &&
+            isTransientArtifactFailure(finding),
+        )
+        .map((finding) => ({
+          pullRequestUrl: pullRequest.url,
+          artifactUrl: finding.url,
+          status: finding.status,
+          detail: finding.detail ?? null,
+        }));
+      const failedCategories = new Set<EvidenceCategory>();
+      for (const finding of verification.findings) {
+        const category = SCORE_EVIDENCE_CATEGORY.get(finding.id);
+        if (category && finding.status !== "ok") {
+          failedCategories.add(category);
+        }
+      }
+      const artifacts = verification.findings.flatMap((finding) => {
+        const category = SCORE_EVIDENCE_CATEGORY.get(finding.id);
+        if (
+          finding.status !== "ok" ||
+          !category ||
+          failedCategories.has(category) ||
+          finding.artifactKind !== "opaque-upload" ||
+          !finding.contentSha256
+        ) {
+          return [];
+        }
+        let artifactUrl: URL;
+        try {
+          artifactUrl = new URL(finding.url);
+        } catch {
+          // error-policy:J3 verifier output is treated as untrusted boundary
+          // data; a malformed URL cannot become a score-bearing identity.
+          return [];
+        }
+        return [
+          {
+            pullRequestId: pullRequest.id,
+            pullRequestMergedAt: pullRequest.mergedAt,
+            pullRequestHeadOid: pullRequest.headRefOid,
+            pullRequestUpdatedAt: pullRequest.updatedAt,
+            sourceId: source.id,
+            sourceBody: source.body,
+            sourceUpdatedAt: source.updatedAt,
+            category,
+            artifactIdentity: `${artifactUrl.protocol}//${artifactUrl.hostname.toLowerCase()}${artifactUrl.pathname}`,
+            contentSha256: finding.contentSha256,
+          } satisfies VerifiedEvidenceArtifact,
+        ];
+      });
+      return {
+        artifacts,
+        failedCategories: [...failedCategories],
+        unavailable,
+      };
+    },
+  );
+  // Fail closed before any artifact list is returned for scoring.
+  const unavailable = verdicts.flatMap((verdict) => verdict.unavailable);
+  if (unavailable.length > 0) throw new EvidenceUnavailableError(unavailable);
+  const failedByPullRequest = new Set<string>();
+  for (const [index, verdict] of verdicts.entries()) {
+    const pullRequestId = selectedCandidates[index].pullRequest.id;
+    for (const category of verdict.failedCategories) {
+      failedByPullRequest.add(`${pullRequestId}\u0000${category}`);
+    }
+  }
+  const remotelyVerified = verdicts
+    .flatMap(({ artifacts }) => artifacts)
+    .filter(
+      (artifact) =>
+        !failedByPullRequest.has(
+          `${artifact.pullRequestId}\u0000${artifact.category}`,
+        ),
+    )
+    .sort(
+      (left, right) =>
+        left.pullRequestId.localeCompare(right.pullRequestId) ||
+        left.sourceId.localeCompare(right.sourceId) ||
+        left.category.localeCompare(right.category) ||
+        left.artifactIdentity.localeCompare(right.artifactIdentity),
+    );
+  const artifacts = selectUniqueVerifiedEvidence(
+    remotelyVerified,
+    pullRequests,
+  );
+  return {
+    artifacts,
+    status,
+    sourceCount: candidates.length,
+    artifactCount,
+  };
+}
+
+export async function generateLeaderboardFromGitHub(
+  client: GraphqlExecutor,
+  options: GenerateOptions = {},
+): Promise<LeaderboardSnapshot> {
+  const now = parseIsoDate(options.now ?? new Date(), "now");
+  const actualNow = parseIsoDate(options.actualNow ?? new Date(), "actualNow");
+  const windowFrom = new Date(
+    now.getTime() - SCORE_WINDOW_DAYS * 24 * 60 * 60 * 1000,
+  );
+  const verificationWindowFrom = new Date(
+    now.getTime() - VERIFICATION_WINDOW_DAYS * 24 * 60 * 60 * 1000,
+  );
+  const onProgress = options.onProgress ?? (() => undefined);
+  const stats = { searchSliceCount: 0 };
+  const probeUnavailableSources = async (ids: readonly string[]) => {
+    const unavailable: string[] = [];
+    for (const batch of chunks([...ids], REVIEW_DETAIL_BATCH_SIZE)) {
+      try {
+        const data = await client.execute(
+          "query LeaderboardSourceAvailability($ids:[ID!]!){nodes(ids:$ids){__typename id} rateLimit{cost limit remaining resetAt}}",
+          { ids: batch },
+        );
+        const nodes = asArray(data.nodes, "source availability.nodes");
+        if (
+          nodes.length !== batch.length ||
+          nodes.some((node, index) => {
+            const value = asRecord(node, `source availability.nodes[${index}]`);
+            return (
+              value.__typename !== "PullRequest" || value.id !== batch[index]
+            );
+          })
+        )
+          throw new Error(
+            "Joint source availability did not match the requested identities",
+          );
+      } catch (error) {
+        if (
+          !(error instanceof SourceNodeUnavailableError) ||
+          !options.sourceRecovery?.allowJointHolds
+        )
+          throw error;
+        options.sourceRecovery.unavailableSources.push(...error.sources);
+        unavailable.push(...error.sources.map((source) => source.nodeId));
+      }
+    }
+    return unavailable;
+  };
+  // Select the policy before any collection; it binds every accepted source.
+  const scoringPolicy = assertValueScoringPolicy(
+    options.scoringPolicy ?? valueScoringPolicy(),
+  );
+  const valuePolicyFrom = new Date(scoringPolicy.effectiveAt);
+  const underValuePolicy = (acceptedAt: string | null | undefined) =>
+    typeof acceptedAt === "string" &&
+    Date.parse(acceptedAt) >= valuePolicyFrom.getTime();
+  // Closed, unmerged work can earn review value only under the value policy.
+  const closedCensusFrom =
+    valuePolicyFrom.getTime() > windowFrom.getTime()
+      ? valuePolicyFrom
+      : windowFrom;
+
+  interface RepositoryCollection {
+    closedIssueReferences: NodeReference[];
+    mergedPullRequestOutcomes: MergedPullRequestOutcome[];
+    mergedPullRequestReferences: NodeReference[];
+    repository: TargetRepository;
+    preflight: { id: string; updatedAt: string };
+    openIssues: IssueRecord[];
+    openPullRequests: PullRequestRecord[];
+  }
+  const collections: RepositoryCollection[] = [];
+  const mergedPullRequestOutcomes: MergedPullRequestOutcome[] = [];
+  const mergedPullRequests: PullRequestRecord[] = [];
+  const reviewedMergedPullRequests: MergedPullRequestReviewRecord[] = [];
+  const closedUnmergedPullRequests: PullRequestRecord[] = [];
+  const closedIssues: IssueRecord[] = [];
+  let closedIssueCount = 0;
+
+  // An empty registry is a complete, valid state with nothing to collect.
+  if (TARGET_REPOSITORIES.length === 0)
+    await client.execute(RATE_LIMIT_QUERY, {});
+  for (const [index, repository] of TARGET_REPOSITORIES.entries()) {
+    const preflight = await preflightRepository(client, repository, {
+      requireStartingBudget: index === 0,
+    });
+    for (const collected of collections) {
+      if (collected.preflight.id === preflight.id) {
+        throw new Error(
+          `Registry repositories ${collected.repository.id} and ${repository.id} resolved to one GitHub node`,
+        );
+      }
+    }
+    const mergedPullRequestReferences = await collectSearchReferences(
+      client,
+      repository,
+      windowFrom,
+      now,
+      "merged",
+      "is:pr is:merged",
+      "PullRequest",
+      stats,
+    );
+    if (closedCensusFrom.getTime() < now.getTime()) {
+      const closedReferences = await collectSearchReferences(
+        client,
+        repository,
+        closedCensusFrom,
+        now,
+        "closed",
+        "is:pr is:closed is:unmerged",
+        "PullRequest",
+        stats,
+      );
+      await ensureEstimatedBudget(client, closedReferences.length, 0, 0);
+      const closed = await hydratePullRequests(
+        client,
+        closedReferences,
+        "closed",
+        onProgress,
+        "merged-pull-requests",
+        repository,
+        preflight.id,
+      );
+      if (closed.some((pull) => pull.mergedAt !== null || !pull.closedAt))
+        throw new Error("Closed unmerged census changed during hydration");
+      closedUnmergedPullRequests.push(...closed);
+    }
+    closedIssueCount += await countSearchResults(
+      client,
+      repository,
+      windowFrom,
+      now,
+      "closed",
+      "is:issue is:closed",
+      "Issue",
+      stats,
+    );
+    const closedIssueReferences = await collectSearchReferences(
+      client,
+      repository,
+      verificationWindowFrom,
+      now,
+      "closed",
+      "is:issue is:closed",
+      "Issue",
+      stats,
+    );
+    const repositoryOutcomes = mergedPullRequestReferences.map((reference) => {
+      if (!reference.outcome) {
+        throw new Error(
+          `Merged pull request ${reference.id} is missing scalar outcome metadata`,
+        );
+      }
+      return reference.outcome;
+    });
+    mergedPullRequestOutcomes.push(...repositoryOutcomes);
+    collections.push({
+      closedIssueReferences,
+      mergedPullRequestOutcomes: repositoryOutcomes,
+      mergedPullRequestReferences,
+      repository,
+      preflight,
+      openIssues: [],
+      openPullRequests: [],
+    });
+  }
+
+  // A stale GitHub connection can still enumerate a now-unavailable PR.
+  // Re-probe only the identities that failed in the discarded first attempt.
+  // Account for them explicitly rather than inventing hydration or credit.
+  if (options.sourceRecovery?.allowJointHolds) {
+    const priorUnavailable = new Set(
+      options.sourceRecovery.unavailableSources.map((source) => source.nodeId),
+    );
+    const listed = mergedPullRequestOutcomes
+      .filter((source) => priorUnavailable.has(source.id))
+      .map((source) => source.id);
+    const unavailable = new Set(
+      listed.length ? await probeUnavailableSources(listed) : [],
+    );
+    for (const nodeId of unavailable)
+      options.sourceRecovery.unavailableSources.push({
+        nodeId,
+        reason: "NOT_FOUND",
+        unavailableInMergedCensus: true,
+      });
+    for (const collection of collections) {
+      collection.mergedPullRequestReferences =
+        collection.mergedPullRequestReferences.filter(
+          (source) => !unavailable.has(source.id),
+        );
+      collection.mergedPullRequestOutcomes =
+        collection.mergedPullRequestOutcomes.filter(
+          (source) => !unavailable.has(source.id),
+        );
+    }
+    for (let index = mergedPullRequestOutcomes.length - 1; index >= 0; index--)
+      if (unavailable.has(mergedPullRequestOutcomes[index].id))
+        mergedPullRequestOutcomes.splice(index, 1);
+  }
+
+  const hydrationCandidates = collections.flatMap((collection) =>
+    collection.mergedPullRequestOutcomes.map((outcome) => ({
+      outcome,
+      projectId: collection.repository.projectId,
+    })),
+  );
+  const hydrationPlan = await planMergedPullRequestHydration(
+    client,
+    hydrationCandidates,
+    verificationWindowFrom,
+  );
+  const evaluatedReviewArtifactKeys = collectEvaluatedReviewArtifactKeys(
+    options.evaluatedContributions ?? [],
+  );
+  const finalReviewCensusCost = Math.ceil(
+    hydrationCandidates.length / REVIEW_DETAIL_BATCH_SIZE,
+  );
+  for (const collection of collections) {
+    const detailedReferences = collection.mergedPullRequestReferences.filter(
+      (reference) =>
+        hydrationPlan.detailEligibleIds.has(reference.id) ||
+        (reference.outcome !== null &&
+          evaluatedReviewArtifactKeys.has(
+            `${collection.repository.id.toLowerCase()}\u0000${reference.outcome.number}`,
+          )),
+    );
+    const detailedReferenceIds = new Set(
+      detailedReferences.map((reference) => reference.id),
+    );
+    // Value-policy outcomes need every review state and every human decision;
+    // earlier outcomes keep the legacy review census unchanged.
+    const reviewOnlyReferences = collection.mergedPullRequestReferences.filter(
+      (reference) => !detailedReferenceIds.has(reference.id),
+    );
+    const valueReviewedReferences = reviewOnlyReferences.filter((reference) =>
+      underValuePolicy(reference.outcome?.mergedAt),
+    );
+    const legacyReviewedReferences = reviewOnlyReferences.filter(
+      (reference) =>
+        !underValuePolicy(reference.outcome?.mergedAt) &&
+        hydrationPlan.hydratedIds.has(reference.id),
+    );
+    const reviewedReferences = [
+      ...valueReviewedReferences,
+      ...legacyReviewedReferences,
+    ];
+    await ensureEstimatedBudget(
+      client,
+      detailedReferences.length,
+      0,
+      finalReviewCensusCost,
+      reviewedReferences.length,
+    );
+    const detailedPullRequests = await hydratePullRequests(
+      client,
+      detailedReferences,
+      "merged",
+      onProgress,
+      "merged-pull-requests",
+      collection.repository,
+      collection.preflight.id,
+    );
+    const reviewedPullRequests = [
+      ...(await hydrateReviewedMergedPullRequests(
+        client,
+        valueReviewedReferences,
+        onProgress,
+        true,
+      )),
+      ...(await hydrateReviewedMergedPullRequests(
+        client,
+        legacyReviewedReferences,
+        onProgress,
+      )),
+    ];
+    await reconcileHydratedReviewCensus(client, hydrationPlan.reviewCounts, [
+      ...detailedPullRequests,
+      ...reviewedPullRequests,
+    ]);
+    mergedPullRequests.push(...detailedPullRequests);
+    reviewedMergedPullRequests.push(...reviewedPullRequests);
+
+    const linkedIssueIds = new Set(
+      detailedPullRequests.flatMap(
+        (pullRequest) => pullRequest.closingIssueIds,
+      ),
+    );
+    const linkedClosedIssueReferences = collection.closedIssueReferences.filter(
+      (reference) => linkedIssueIds.has(reference.id),
+    );
+    await ensureEstimatedBudget(
+      client,
+      0,
+      linkedClosedIssueReferences.length,
+      finalReviewCensusCost,
+    );
+    closedIssues.push(
+      ...(await hydrateIssues(
+        client,
+        linkedClosedIssueReferences,
+        "closed",
+        onProgress,
+        "resolved-issues",
+      )),
+    );
+    collection.openIssues = await collectOpenIssues(
+      client,
+      collection.repository,
+      collection.preflight.id,
+      onProgress,
+      finalReviewCensusCost,
+    );
+    collection.openPullRequests = await collectOpenPullRequests(
+      client,
+      collection.repository,
+      collection.preflight.id,
+      onProgress,
+      finalReviewCensusCost,
+    );
+  }
+
+  const dedupedOutcomes = dedupeByNodeId(mergedPullRequestOutcomes);
+  const dedupedMergedPullRequests = dedupeByNodeId(mergedPullRequests);
+  const dedupedReviewedMergedPullRequests = dedupeByNodeId(
+    reviewedMergedPullRequests,
+  );
+  const detailEligibleMergedPullRequests = dedupedMergedPullRequests.filter(
+    (pullRequest) => hydrationPlan.detailEligibleIds.has(pullRequest.id),
+  );
+  const dedupedClosedIssues = dedupeByNodeId(closedIssues);
+  const { evidenceVerification, openIssues, openPullRequests } =
+    await retrySlopSnapshot(async (attempt) => {
+      if (attempt > 1) {
+        for (const collection of collections) {
+          collection.openPullRequests = await collectOpenPullRequests(
+            client,
+            collection.repository,
+            collection.preflight.id,
+            onProgress,
+            finalReviewCensusCost,
+          );
+        }
+      }
+      const currentOpenIssues = dedupeByNodeId(
+        collections.flatMap((collection) => collection.openIssues),
+      );
+      const currentOpenPullRequests = dedupeByNodeId(
+        collections.flatMap((collection) => collection.openPullRequests),
+      );
+      const currentEvidenceVerification = await verifyPullRequestEvidence(
+        [...detailEligibleMergedPullRequests, ...currentOpenPullRequests],
+        options,
+      );
+      for (const collection of collections) {
+        const evidenceCandidateIds = new Set(
+          evidenceVerificationCandidates(collection.openPullRequests).map(
+            ({ pullRequest }) => pullRequest.id,
+          ),
+        );
+        await assertOpenEvidenceReferencesCurrent(
+          client,
+          collection.repository,
+          collection.preflight.id,
+          collection.openPullRequests.filter((pullRequest) =>
+            evidenceCandidateIds.has(pullRequest.id),
+          ),
+        );
+      }
+      return {
+        evidenceVerification: currentEvidenceVerification,
+        openIssues: currentOpenIssues,
+        openPullRequests: currentOpenPullRequests,
+      };
+    });
+
+  const finalReviewCounts = await collectPullRequestReviewCounts(
+    client,
+    hydrationCandidates.map(({ outcome }) => ({ id: outcome.id })),
+  );
+  assertReviewCensusStable(hydrationPlan.reviewCounts, finalReviewCounts);
+  if (closedUnmergedPullRequests.length) {
+    const closedCounts = new Map(
+      closedUnmergedPullRequests.map((pull) => [
+        pull.id,
+        {
+          reviewCount: formalDecisionReviewCount(pull.reviews),
+          updatedAt: pull.updatedAt,
+        },
+      ]),
+    );
+    const finalClosedCounts = await collectPullRequestReviewCounts(
+      client,
+      closedUnmergedPullRequests,
+    );
+    assertReviewCensusStable(closedCounts, finalClosedCounts);
+  }
+
+  const allRecords = [
+    ...dedupedOutcomes,
+    ...dedupedMergedPullRequests,
+    ...dedupedReviewedMergedPullRequests,
+    ...closedUnmergedPullRequests,
+    ...dedupedClosedIssues,
+    ...openIssues,
+    ...openPullRequests,
+  ];
+  const latestPreflightUpdate =
+    collections.length === 0
+      ? now.toISOString()
+      : collections
+          .map((collection) => collection.preflight.updatedAt)
+          .reduce((latest, current) =>
+            Date.parse(current) > Date.parse(latest) ? current : latest,
+          );
+  let valueRestRequests = 0;
+  const github = GitHubClient.forToken(options.evidenceToken ?? "");
+  const { heldWorkUnits, ...valueInputs } = await loadValueInputs(
+    {
+      get: <T>(path: string) => {
+        valueRestRequests += 1;
+        return github.get<T>(path);
+      },
+      fileText: (...args: Parameters<GitHubClient["fileText"]>) => {
+        valueRestRequests += 1;
+        return github.fileText(...args);
+      },
+      graphql: async <T>(query: string, variables: Record<string, unknown>) =>
+        (await client.execute(query, variables as GraphqlVariables)) as T,
+    },
+    [...dedupedOutcomes, ...closedUnmergedPullRequests].filter((source) =>
+      underValuePolicy(
+        source.mergedAt ?? ("closedAt" in source ? source.closedAt : null),
+      ),
+    ),
+    undefined,
+    probeUnavailableSources,
+  );
+  const censusIds = new Set(
+    [...dedupedOutcomes, ...closedUnmergedPullRequests].map(
+      (source) => source.id,
+    ),
+  );
+  const contexts = new Map<string, "merged" | "closed">();
+  for (const decision of valueInputs.jointValueDecisions?.values() ?? []) {
+    if (decision.status !== "assessed") continue;
+    for (const { evidence } of decision.evidence.sources)
+      if (!censusIds.has(evidence.pull.node_id))
+        contexts.set(
+          evidence.pull.node_id,
+          evidence.pull.merged_at ? "merged" : "closed",
+        );
+  }
+  await ensureEstimatedBudget(client, 0, 0, 0, contexts.size);
+  const valueContextPullRequests: MergedPullRequestReviewRecord[] = [];
+  for (const state of ["merged", "closed"] as const) {
+    const references: NodeReference[] = [...contexts]
+      .filter(([, expected]) => expected === state)
+      .map(([id]) => ({
+        id,
+        kind: "PullRequest",
+        outcome: null,
+        openVersion: null,
+      }));
+    valueContextPullRequests.push(
+      ...(await hydrateReviewedMergedPullRequests(
+        client,
+        references,
+        onProgress,
+        true,
+        state,
+      )),
+    );
+  }
+  const participationBans = await loadParticipationBans({
+    get: <T>(path: string) => {
+      valueRestRequests += 1;
+      return github.get<T>(path);
+    },
+  });
+  // History is a retained read, not GitHub collection. Keep reversals after
+  // a PR leaves the rolling census or its project is paused/retired.
+  const penalties: NonNullable<LeaderboardInput["penalties"]>[number][] = [];
+  const penaltyHistory: NonNullable<LeaderboardInput["penaltyHistory"]> = [];
+  let hasPenaltyHistory = false;
+  const feedProjects = await penaltyFeedProjects(
+    options.deploymentTier ?? "production",
+  );
+  for (const projectId of [
+    ...new Set(
+      REGISTERED_REPOSITORIES.map((repository) => repository.projectId),
+    ),
+  ].sort()) {
+    if (feedProjects !== null && !feedProjects.has(projectId)) {
+      console.warn(
+        `[penalties] ${projectId}: staging-only project; the production penalty feed has no record of it`,
+      );
+      continue;
+    }
+    // Reconstruct state at the GitHub cutoff when a close/reversal happens
+    // during collection. Later evidence belongs to the next publication.
+    const state = await fetchProjectPenaltyState(projectId);
+    if (state.history === null) {
+      console.warn(
+        `[penalties] ${projectId}: retained history unavailable on the deployed Worker; active debits only`,
+      );
+      penalties.push(...state.penalties);
+      continue;
+    }
+    hasPenaltyHistory = true;
+    const history = state.history
+      .filter((row) => row.recordedAt <= now.toISOString())
+      .map((row) =>
+        row.reversedAt !== null && row.reversedAt > now.toISOString()
+          ? { ...row, reversedAt: null, reversal: null }
+          : row,
+      );
+    penaltyHistory.push(...history);
+    penalties.push(...history.filter((row) => row.reversedAt === null));
+  }
+  const fetchedAt = new Date().toISOString();
+  const rateLimit = client.getRateLimit();
+  const observedUnavailable = new Map<string, UnavailableSource>();
+  for (const source of options.sourceRecovery?.unavailableSources ?? [])
+    observedUnavailable.set(source.nodeId, {
+      ...observedUnavailable.get(source.nodeId),
+      ...source,
+    });
+  const unavailableSources = [...observedUnavailable.values()].sort((a, b) =>
+    a.nodeId.localeCompare(b.nodeId),
+  );
+  const source: LeaderboardSourceMetadata = {
+    provider: "github-graphql",
+    fetchedAt,
+    cutoffAt: now.toISOString(),
+    repositoryId: collections[0]?.preflight.id ?? null,
+    repositories: collections.map((collection) => ({
+      id: collection.repository.id,
+      repositoryId: collection.preflight.id,
+    })),
+    requestCount: client.getRequestCount() + valueRestRequests,
+    searchSliceCount: stats.searchSliceCount,
+    unavailableSources,
+    heldWorkUnits,
+    rateLimit,
+    counts: {
+      unavailableSources: unavailableSources.length,
+      unavailableMergedPullRequests: unavailableSources.filter(
+        (source) => source.unavailableInMergedCensus,
+      ).length,
+      heldWorkUnits: heldWorkUnits.length,
+      mergedPullRequests: dedupedOutcomes.length,
+      detailedMergedPullRequests: detailEligibleMergedPullRequests.length,
+      closedIssues: closedIssueCount,
+      detailedClosedIssues: dedupedClosedIssues.length,
+      resolvedIssues: 0,
+      openIssues: openIssues.length,
+      openPullRequests: openPullRequests.length,
+    },
+    verificationWindow: {
+      days: VERIFICATION_WINDOW_DAYS,
+      from: verificationWindowFrom.toISOString(),
+      to: now.toISOString(),
+    },
+    evidenceVerification: {
+      status: evidenceVerification.status,
+      sourceCount: evidenceVerification.sourceCount,
+      artifactCount: evidenceVerification.artifactCount,
+      maxSources: MAX_EVIDENCE_SOURCES_PER_SNAPSHOT,
+      maxArtifacts: MAX_EVIDENCE_ARTIFACTS_PER_SNAPSHOT,
+    },
+  };
+  const snapshot = createLeaderboardSnapshot({
+    ...valueInputs,
+    valueContextPullRequests,
+    valuePolicy: scoringPolicy,
+    generatedAt: fetchedAt,
+    windowFrom: windowFrom.toISOString(),
+    windowTo: now.toISOString(),
+    sourceUpdatedAt: deriveSourceUpdatedAt(allRecords, latestPreflightUpdate),
+    source,
+    mergedPullRequestOutcomes: dedupedOutcomes,
+    mergedPullRequests: dedupedMergedPullRequests,
+    reviewedMergedPullRequests: dedupedReviewedMergedPullRequests,
+    closedUnmergedPullRequests,
+    penalties,
+    ...(hasPenaltyHistory ? { penaltyHistory } : {}),
+    detailEligibleMergedPullRequestIds: [...hydrationPlan.detailEligibleIds],
+    closedIssueCount,
+    resolvedIssues: dedupedClosedIssues,
+    openIssues,
+    openPullRequests,
+    verificationWindowFrom: verificationWindowFrom.toISOString(),
+    verifiedEvidence: evidenceVerification.artifacts,
+    evaluatedContributions: selectEvaluatedContributionsForWindow(
+      options.evaluatedContributions ?? [],
+      windowFrom,
+      now,
+      actualNow,
+    ),
+    retainedReviewEvents: options.retainedReviewEvents,
+    retainedReviewAttributions: options.retainedReviewAttributions,
+    verifyRunReceipt: verifyRunReceiptSignature,
+    participationBans,
+  });
+  return snapshot;
+}
+
+export async function writeLeaderboardAtomically(
+  snapshot: LeaderboardSnapshot,
+  outputPath = DEFAULT_OUTPUT_PATH,
+): Promise<void> {
+  assertPublishableLeaderboardSnapshot(snapshot);
+  await mkdir(dirname(outputPath), { recursive: true });
+  const temporaryPath = `${outputPath}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    // The two review bases must fit Pages' 25 MiB per-file limit. Whitespace
+    // alone adds over 5 MiB to the complete October publication.
+    await Bun.write(temporaryPath, `${JSON.stringify(snapshot)}\n`);
+    await rename(temporaryPath, outputPath);
+  } finally {
+    // error-policy:J6 a failed atomic write may leave only its unique temporary file.
+    await rm(temporaryPath, { force: true });
+  }
+}
+
+export async function runGenerator(
+  outputPath = DEFAULT_OUTPUT_PATH,
+  dependencies: GeneratorDependencies = {
+    getToken: resolveGitHubToken,
+    createClient: (token) => new GitHubGraphqlClient(token),
+    generate: generateLeaderboardFromGitHub,
+    write: writeLeaderboardAtomically,
+    onCensusRetry: () => {
+      process.stderr.write(
+        "[slop.cash] source census changed or a node became unavailable; recollecting once with the existing GraphQL budget\n",
+      );
+    },
+  },
+  options: GenerateOptions = {},
+): Promise<LeaderboardSnapshot> {
+  const token = await dependencies.getToken();
+  const client = dependencies.createClient(token);
+  const generationOptions = {
+    ...options,
+    evidenceToken: options.evidenceToken ?? token,
+    sourceRecovery: {
+      unavailableSources: [] as UnavailableSource[],
+      allowJointHolds: false,
+    },
+  };
+  let snapshot: LeaderboardSnapshot;
+  try {
+    snapshot = await dependencies.generate(client, generationOptions);
+  } catch (error) {
+    // error-policy:J2 recover only classified census churn or unavailable
+    // enumerated nodes, once, with no budget reset. NOT_FOUND does not prove
+    // deletion: fresh enumeration and all ordinary checks must still succeed.
+    if (
+      !(error instanceof ReviewCensusChangedError) &&
+      !(error instanceof SourceNodeUnavailableError)
+    )
+      throw error;
+    if (error instanceof SourceNodeUnavailableError)
+      generationOptions.sourceRecovery.unavailableSources.push(
+        ...error.sources,
+      );
+    generationOptions.sourceRecovery.allowJointHolds = true;
+    dependencies.onCensusRetry?.();
+    // Recollect every source; never reuse a partially assembled first attempt.
+    // The same client retains consumed cost, request counts, reserve and reset state.
+    snapshot = await dependencies.generate(client, generationOptions);
+  }
+  // Publication is outside the retry boundary: a write failure never regenerates.
+  await dependencies.write(snapshot, outputPath);
+  return snapshot;
+}
+
+function progressLine(progress: GenerationProgress): string {
+  const label = progress.phase.replaceAll("-", " ");
+  return `[slop.cash] ${label}: ${progress.completed}/${progress.total}\n`;
+}
+
+if (import.meta.main) {
+  const arguments_ = parseGenerationArguments(process.argv.slice(2));
+  const acceptedReviewHistory = loadAcceptedReviewHistory();
+  let lastProgressPhase: GenerationProgress["phase"] | null = null;
+  const snapshot = await runGenerator(DEFAULT_OUTPUT_PATH, undefined, {
+    ...arguments_,
+    deploymentTier: deploymentTier(process.env.VITE_SLOP_ENVIRONMENT),
+    evaluatedContributions: loadEvaluatorAwardEvents(),
+    retainedReviewEvents: acceptedReviewHistory.events,
+    retainedReviewAttributions: acceptedReviewHistory.attributions,
+    onProgress: (progress) => {
+      const phaseChanged = progress.phase !== lastProgressPhase;
+      lastProgressPhase = progress.phase;
+      if (
+        phaseChanged ||
+        progress.completed === progress.total ||
+        progress.completed % 100 === 0
+      ) {
+        process.stderr.write(progressLine(progress));
+      }
+    },
+  }).catch((error: unknown) => {
+    // error-policy:J2 a feed outage writes nothing; the caller keeps the last published snapshot.
+    if (!(error instanceof ValueFeedUnavailableError)) throw error;
+    process.stderr.write(
+      `[slop.cash] ${error.message} (${String(error.cause)}); no snapshot written\n`,
+    );
+    process.exit(VALUE_FEED_UNAVAILABLE_EXIT_CODE);
+  });
+  process.stdout.write(
+    `[slop.cash] wrote ${DEFAULT_OUTPUT_PATH} (${snapshot.leaders.length} leaders, ${snapshot.ledger.length} score events, ${snapshot.source.requestCount} GitHub requests, ${snapshot.source.rateLimit.remaining}/${snapshot.source.rateLimit.limit} GraphQL points remaining)\n`,
+  );
+}

@@ -1,0 +1,1897 @@
+name: slop.cash
+
+# Builds the contribution site from live elizaOS/eliza data, verifies the
+# canonical skill and browser surface, and publishes only trusted main
+# revisions to Cloudflare Pages.
+
+on:
+  pull_request:
+    branches: [develop, development, main]
+  push:
+    branches: [develop, development, main]
+  # Run this workflow by hand to publish registry changes and new GitHub
+  # activity without a commit.
+  workflow_dispatch:
+    inputs:
+      bootstrap_staging_profiles:
+        description: "First staging publication only: use the reviewed profile seed after verifying no staging Pages deployment exists"
+        type: boolean
+        default: false
+      use_published_data:
+        description: "Manual main release only: retain the last published production leaderboard and profiles with their original timestamps"
+        type: boolean
+        default: false
+
+concurrency:
+  # PR supersessions cancel. Development pushes share one lane: a running
+  # staging check finishes, and a newer push replaces only the pending run.
+  # Other trusted runs keep independent lanes.
+  group: slop-${{ github.event.pull_request.number || (github.event_name == 'push' && github.ref == 'refs/heads/development' && 'development-push') || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+env:
+  CI: "true"
+  # Keep the setup action aligned with packageManager so CI and local installs
+  # resolve the same lockfile format.
+  BUN_VERSION: "1.3.14"
+  NODE_VERSION: "24.15.0"
+
+jobs:
+  prepare:
+    name: Prepare checked browser bundle
+    outputs:
+      browser_matrix: ${{ steps.scope.outputs.browser_matrix }}
+      sandbox: ${{ steps.scope.outputs.sandbox }}
+      installer: ${{ steps.scope.outputs.installer }}
+      registry_sha256: ${{ steps.registry.outputs.registry_sha256 }}
+      revisions_sha256: ${{ steps.registry.outputs.revisions_sha256 }}
+    env:
+      RELEASE_SHA: ${{ github.sha }}
+      VITE_SLOP_ENVIRONMENT: ${{ (github.ref == 'refs/heads/development' || github.base_ref == 'development') && 'staging' || 'production' }}
+    runs-on: ubuntu-24.04
+    concurrency:
+      # Let trusted branch preparation finish. Newer runs replace only the
+      # pending revision; only superseded pull requests cancel a running check.
+      group: slop-quality-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    # The public elizaOS ledger can contain several thousand accepted outcomes.
+    # Leave room for complete fail-closed hydration.
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: false
+
+      - name: Select affected CI coverage
+        id: scope
+        run: node scripts/ci-scope.mjs
+
+      - name: Verify quality checkout
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse HEAD)"
+          if [ "$checked_out_sha" != "$RELEASE_SHA" ]; then
+            echo "::error::Quality checkout $checked_out_sha does not match the event SHA $GITHUB_SHA."
+            exit 1
+          fi
+
+      - name: Require manual main release for published data
+        if: inputs.use_published_data == true
+        env:
+          BOOTSTRAP_STAGING_PROFILES: ${{ inputs.bootstrap_staging_profiles || false }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$BOOTSTRAP_STAGING_PROFILES" = "false"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.13"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install frozen workspace dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Reject known production dependency vulnerabilities
+        run: bun run audit:dependencies
+
+      - name: Install pinned skill validator dependency
+        run: |
+          printf '%s\n' \
+            'PyYAML==6.0.3 --hash=sha256:0f29edc409a6392443abf94b9cf89ce99889a1dd5376d94316ae5145dfedd5d6' \
+            > "$RUNNER_TEMP/slop-python-requirements.txt"
+          python -m pip install \
+            --disable-pip-version-check \
+            --require-hashes \
+            --requirement "$RUNNER_TEMP/slop-python-requirements.txt"
+
+      - name: Snapshot the D1 project registry for ingestion
+        # Projects are applied for and approved on slop.cash; D1 is the only
+        # registry and its API enforces every policy transition. The site
+        # reads projects and generated skills from D1 at runtime, so a newly
+        # approved project appears without this step. Every trusted run
+        # snapshots it so build-time ingestion collects the active
+        # repositories. Pull-request validation also needs this public,
+        # read-only inventory to validate awards for registered projects.
+        # Use the same public environment as the PR ledger. The PR adapter
+        # retains collected source records when new projects become active.
+        # No repository or deployment credential is passed to this read.
+        # Before an environment first serves the API, the sync keeps the
+        # committed snapshot and says so.
+        env:
+          SLOP_API_ORIGIN: ${{ github.event_name == 'pull_request' && 'https://slop.cash' || env.VITE_SLOP_ENVIRONMENT == 'staging' && 'https://staging.slop.cash' || 'https://slop.cash' }}
+        run: bun run projects:sync
+
+      - name: Validate project registry and every skill
+        run: |
+          set -euo pipefail
+          bun run verify:contracts
+
+      - name: Install the pinned merge collector for trusted Points ingestion
+        if: github.event_name != 'pull_request' && inputs.use_published_data != true
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential libcurl4-openssl-dev libssl-dev libexpat1-dev zlib1g-dev xz-utils
+          bun --no-env-file scripts/install-value-merge-git.ts "$RUNNER_TEMP/value-merge-git"
+          printf '%s\n' "$RUNNER_TEMP/value-merge-git/bin" >> "$GITHUB_PATH"
+
+      - name: Generate live contribution data
+        # Pull-request code is untrusted, so this step never explicitly injects
+        # a repository-scoped token into it. Trusted main runs refresh the
+        # ledger before producing a deployable build.
+        if: github.event_name != 'pull_request' && inputs.use_published_data != true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          BOOTSTRAP_STAGING_PROFILES: ${{ inputs.bootstrap_staging_profiles || false }}
+        run: |
+          set -euo pipefail
+          profile_origin="https://slop.cash"
+          if [ "$VITE_SLOP_ENVIRONMENT" = "staging" ]; then
+            profile_origin="https://staging.slop.cash"
+          fi
+          # Match the PR snapshot transport: compressed responses, bounded retries,
+          # and enough time for the multi-megabyte published history.
+          previous_profiles="$RUNNER_TEMP/slop-previous-profiles.json"
+          if [ "$BOOTSTRAP_STAGING_PROFILES" = "true" ]; then
+            test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+            test "$GITHUB_REF" = "refs/heads/development"
+            test "$VITE_SLOP_ENVIRONMENT" = "staging"
+            cp data/profiles/seed.json "$previous_profiles"
+            echo "First staging publication: start from the reviewed profile census."
+          else
+            curl --fail --silent --show-error --compressed --proto '=https' --tlsv1.2 \
+              --connect-timeout 10 --max-time 180 --max-filesize 8388608 \
+              --retry 2 --retry-all-errors --retry-delay 2 --retry-max-time 600 \
+              "$profile_origin/data/profiles.json" --output "$previous_profiles"
+          fi
+          # Selects the versioned value scoring policy for new work. Exit 75
+          # means the hosted value feed is unavailable (owner decision D2):
+          # retry once, then keep the last published snapshot, which shows its
+          # stale label, and let the next release retry. There is no
+          # legacy fallback. Every other failure stops the release.
+          feed_status=0
+          for attempt in 1 2; do
+            feed_status=0
+            bun run leaderboard:generate || feed_status=$?
+            if [ "$feed_status" -ne 75 ]; then
+              break
+            fi
+            if [ "$attempt" -eq 1 ]; then
+              echo "::warning::Hosted value feed unavailable; retrying in 60 seconds."
+              sleep 60
+            fi
+          done
+          if [ "$feed_status" -eq 75 ]; then
+            echo "::warning::Hosted value feed still unavailable; keeping the last published leaderboard snapshot."
+            mkdir -p public/data
+            bun scripts/download-leaderboard.ts \
+              "$profile_origin/data/leaderboard.json" public/data/leaderboard.json
+            test -s public/data/leaderboard.json
+          elif [ "$feed_status" -ne 0 ]; then
+            exit "$feed_status"
+          fi
+          # Preserve previously observed issue history, including records
+          # no longer accessible. Both source inventories must reconcile.
+          for attempt in 1 2; do
+            if bun run profiles:generate --previous "$previous_profiles"; then
+              break
+            fi
+            if [ "$attempt" -eq 2 ]; then
+              echo "::error::Profile census failed twice; not publishing partial counts."
+              exit 1
+            fi
+            echo "::warning::Profile census did not reconcile; retrying once."
+          done
+
+      - name: Load validated published data for manual production release
+        if: inputs.use_published_data == true
+        run: |
+          set -euo pipefail
+          mkdir -p public/data
+          ledger_file="$(mktemp "$RUNNER_TEMP/slop-release-ledger.XXXXXX")"
+          profiles_file="$(mktemp "$RUNNER_TEMP/slop-release-profiles.XXXXXX")"
+          trap 'rm -f "$ledger_file" "$profiles_file"' EXIT
+          bun scripts/download-leaderboard.ts \
+            https://slop.cash/data/leaderboard.json "$ledger_file"
+          curl --fail --silent --show-error --compressed --proto '=https' --tlsv1.2 \
+            --connect-timeout 10 --max-time 180 --max-filesize 8388608 \
+            --retry 2 --retry-all-errors --retry-delay 2 --retry-max-time 600 \
+            https://slop.cash/data/profiles.json --output "$profiles_file"
+          bun --no-env-file -e '
+            import { assertLeaderboardSnapshot } from "./src/lib/leaderboard";
+            const snapshot = await Bun.file(process.argv[1]).json();
+            assertLeaderboardSnapshot(snapshot);
+            console.log(`Using published leaderboard generated at ${snapshot.generatedAt}`);
+          ' "$ledger_file"
+          bun scripts/generate-profiles.ts --input "$profiles_file" --current
+          cp "$ledger_file" public/data/leaderboard.json
+          bun --no-env-file -e '
+            const snapshot = await Bun.file("public/data/profiles.json").json();
+            console.log(`Using published profiles generated at ${snapshot.generatedAt}`);
+          '
+
+      - name: Load deployed public ledger for pull-request checks
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          mkdir -p public/data
+          ledger_file="$(mktemp "$RUNNER_TEMP/slop-ledger.XXXXXX")"
+          trap 'rm -f "$ledger_file"' EXIT
+          bun scripts/download-leaderboard.ts \
+            https://slop.cash/data/leaderboard.json "$ledger_file"
+          test -s "$ledger_file"
+          bun scripts/prepare-pr-ledger.ts \
+            "$ledger_file" public/data/leaderboard.json
+
+      - name: Validate reward lifecycle
+        run: bun run cycles:check
+
+      - name: Build production site
+        env:
+          # Trusted refreshes use the census produced above; PR builds use the captured seed.
+          SLOP_PROFILES_INPUT: ${{ github.event_name == 'pull_request' && 'data/profiles/seed.json' || 'public/data/profiles.json' }}
+          SLOP_POINTS_ONLINE: ${{ github.event_name != 'pull_request' && '1' || '0' }}
+          SLOP_POINTS_BOOTSTRAP: "1"
+        run: bun run build
+
+      - name: Bind the checked registry snapshot
+        id: registry
+        run: |
+          set -euo pipefail
+          bun run projects:check
+          node --input-type=module <<'NODE'
+          import { createHash } from "node:crypto";
+          import { appendFileSync, readFileSync } from "node:fs";
+          for (const [name, file] of [
+            ["registry_sha256", "src/lib/project-registry.generated.mjs"],
+            ["revisions_sha256", "src/lib/project-revisions.generated.json"],
+          ]) {
+            const digest = createHash("sha256").update(readFileSync(file)).digest("hex");
+            appendFileSync(process.env.GITHUB_OUTPUT, `${name}=${digest}\n`);
+          }
+          NODE
+
+      - name: Upload checked registry snapshot
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: slop-registry-${{ github.sha }}
+          path: |
+            src/lib/project-registry.generated.mjs
+            src/lib/project-revisions.generated.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Cloudflare Pages bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: slop-source-${{ github.sha }}
+          path: dist
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  # Integration and installer checks run beside the build, so the browser
+  # lanes start as soon as the bundle exists. The quality gate needs both.
+  check:
+    name: Integration and installer checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RELEASE_SHA: ${{ github.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: false
+
+      - name: Select affected CI coverage
+        id: scope
+        run: node scripts/ci-scope.mjs
+
+      - name: Verify check checkout
+        run: test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.13"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Restore Bun dependency cache
+        # CI check cache only (owner decision, 29 October 2026, #1467 3.10(d)).
+        # Jobs that build the release bundle, deploy or hold secrets never use it.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+
+      - name: Install frozen workspace dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Check code
+        run: bun run verify:code
+
+      - name: Run installer lifecycle end-to-end checks
+        if: steps.scope.outputs.installer == 'true'
+        run: bun run test:installer:e2e
+
+  browsers:
+    name: Browser ${{ matrix.lane }}
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.browser_matrix) }}
+    env:
+      VITE_SLOP_ENVIRONMENT: ${{ (github.ref == 'refs/heads/development' || github.base_ref == 'development') && 'staging' || 'production' }}
+      SLOP_E2E_PREBUILT: '1'
+      SLOP_E2E_VIDEO: '1'
+      SLOP_E2E_LANE: ${{ matrix.server }}
+    steps:
+      - name: Checkout exact checked source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: false
+      - name: Verify browser checkout
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      # The fixture workspace rebuilds the site, and its build packages skills.
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.13"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      # CI check cache only (owner decision, 29 October 2026, #1467 3.10(d)).
+      # Jobs that build the release bundle, deploy or hold secrets never use it.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Install pinned skill validator dependency
+        run: |
+          printf '%s\n' \
+            'PyYAML==6.0.3 --hash=sha256:0f29edc409a6392443abf94b9cf89ce99889a1dd5376d94316ae5145dfedd5d6' \
+            > "$RUNNER_TEMP/slop-python-requirements.txt"
+          python -m pip install \
+            --disable-pip-version-check \
+            --require-hashes \
+            --requirement "$RUNNER_TEMP/slop-python-requirements.txt"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: slop-source-${{ github.sha }}
+          path: dist
+      - name: Install Playwright system dependencies
+        run: |
+          # The Azure mirror stalled across release and PR runners. Use Ubuntu's
+          # primary archive; the runner's URI normally points to apt-mirrors.txt.
+          # Keep its suites, components and signing keys unchanged.
+          sudo sed -i 's|^URIs:.*|URIs: https://archive.ubuntu.com/ubuntu/|' \
+            /etc/apt/sources.list.d/ubuntu.sources
+          grep -Fx 'URIs: https://archive.ubuntu.com/ubuntu/' \
+            /etc/apt/sources.list.d/ubuntu.sources
+          # Run the timeout as root so it can terminate apt and its children.
+          # Do not retry an interrupted package transaction on the same runner.
+          # Hosted package downloads exceeded ten minutes in two release runs.
+          sudo timeout --signal=TERM --kill-after=15s 20m \
+            "$(command -v node)" ./node_modules/playwright/cli.js install-deps ${{ matrix.browsers }}
+      - name: Install assigned Playwright browsers
+        run: |
+          set -euo pipefail
+          for attempt in 1 2; do
+            if timeout --signal=TERM --kill-after=15s 10m ./node_modules/.bin/playwright install ${{ matrix.browsers }}; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 2 ]; then
+              echo "::error::Playwright browser installation failed twice."
+              exit 1
+            fi
+            echo "::warning::Playwright browser installation stalled or failed; retrying once."
+          done
+
+      - name: Install pinned Chromium streaming fix
+        if: contains(matrix.browsers, 'chromium')
+        run: |
+          bash scripts/install-ci-chromium.sh "$RUNNER_TEMP/slop-ci-chromium"
+          echo "SLOP_E2E_CHROMIUM_EXECUTABLE_PATH=$RUNNER_TEMP/slop-ci-chromium/chrome-headless-shell-linux64/chrome-headless-shell" >> "$GITHUB_ENV"
+
+      # run-e2e.mjs verifies the exact bundle, then runs only the lane's phase.
+      # Preview and Pages lanes run in the frozen-registry fixture workspace.
+      - name: Run complete assigned browser coverage
+        env:
+          BROWSER_SHARD: ${{ matrix.shard }}
+          BROWSER_GREP: ${{ matrix.grep }}
+        run: |
+          args=(--shard="$BROWSER_SHARD")
+          if [ -n "$BROWSER_GREP" ]; then args+=(--grep "$BROWSER_GREP"); fi
+          node scripts/run-e2e.mjs "${args[@]}"
+      - name: Verify local sign-in return paths
+        if: matrix.lane == 'preview-1'
+        # This DEV-mode flow needs Vite, not the production preview bundle.
+        # Chromium and the pinned Python dependency are installed above.
+        run: bun run test:local-signin
+      - name: Verify automatic private intake
+        if: matrix.lane == 'registry-1'
+        env:
+          SLOP_E2E_PRIVATE_INTAKE: "1"
+        # This fixture seeds D1 through a second local Wrangler process.
+        # Keep its browser projects sequentially to avoid competing SQLite writers.
+        run: node scripts/run-e2e.mjs --grep '@private-intake' --workers=1
+      - name: Upload browser diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: slop-browser-diagnostics-${{ github.run_id }}-${{ matrix.lane }}
+          path: |
+            playwright-report
+            test-results
+          if-no-files-found: ignore
+          retention-days: 14
+
+  isolated-artifact:
+    needs: prepare
+    if: needs.prepare.outputs.sandbox == 'true'
+    uses: ./.github/workflows/vetting-sandbox.yml
+    permissions:
+      contents: read
+
+  quality:
+    name: Skill, data, build, and browser checks
+    if: ${{ always() && !cancelled() && !contains(needs.*.result, 'cancelled') }}
+    needs: [prepare, check, browsers, isolated-artifact]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require the checked bundle, code checks and every browser lane
+        env:
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          CHECK_RESULT: ${{ needs.check.result }}
+          BROWSER_RESULT: ${{ needs.browsers.result }}
+          SANDBOX_RESULT: ${{ needs.isolated-artifact.result }}
+          SANDBOX_REQUIRED: ${{ needs.prepare.outputs.sandbox }}
+        run: |
+          test "$PREPARE_RESULT" = success
+          test "$CHECK_RESULT" = success
+          test "$BROWSER_RESULT" = success
+          if [ "$SANDBOX_REQUIRED" = true ]; then test "$SANDBOX_RESULT" = success; fi
+
+  staging:
+    name: Deploy verified development to staging
+    # Evaluate after optional upstream jobs are skipped; still require both gates.
+    if: >-
+      always() && !cancelled() &&
+      needs.prepare.result == 'success' && needs.quality.result == 'success' &&
+      github.ref == 'refs/heads/development' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: [prepare, quality]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      deployments: read
+    concurrency:
+      group: slop-staging
+      cancel-in-progress: false
+    environment:
+      name: slop-staging
+      url: https://staging.slop.cash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: slop-source-${{ github.sha }}
+          path: dist
+      - name: Download checked staging registry snapshot
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: slop-registry-${{ github.sha }}
+          path: src/lib
+      - name: Verify downloaded staging registry snapshot
+        env:
+          REGISTRY_SHA256: ${{ needs.prepare.outputs.registry_sha256 }}
+          REVISIONS_SHA256: ${{ needs.prepare.outputs.revisions_sha256 }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { createHash } from "node:crypto";
+          import { readFileSync } from "node:fs";
+          for (const [expected, file] of [
+            [process.env.REGISTRY_SHA256, "src/lib/project-registry.generated.mjs"],
+            [process.env.REVISIONS_SHA256, "src/lib/project-revisions.generated.json"],
+          ]) {
+            const actual = createHash("sha256").update(readFileSync(file)).digest("hex");
+            if (!/^[a-f0-9]{64}$/.test(expected ?? "") || actual !== expected)
+              throw new Error(`The checked registry snapshot changed: ${file}`);
+          }
+          NODE
+          bun run projects:check
+      - name: Require staging credentials
+        env:
+          HAS_CLOUDFLARE: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+          HAS_CLIENT: ${{ secrets.SLOP_GITHUB_CLIENT_ID != '' && secrets.SLOP_GITHUB_CLIENT_SECRET != '' }}
+          HAS_KEYS: ${{ secrets.IDENTITY_STATE_KEY != '' && secrets.IDENTITY_ASSERTION_KEY != '' && secrets.TRACE_AUTH_SECRET != '' }}
+          HAS_APP: ${{ secrets.SLOPBOT_APP_ID != '' && secrets.SLOPBOT_APP_PRIVATE_KEY != '' }}
+        run: |
+          test "$HAS_CLOUDFLARE" = true
+          test "$HAS_CLIENT" = true
+          test "$HAS_KEYS" = true
+          test "$HAS_APP" = true
+      - name: Derive staging scanner public key
+        env:
+          SLOP_VETTING_SIGNING_JWK: ${{ secrets.SLOP_VETTING_SIGNING_JWK }}
+        run: bun scripts/prepare-vetting-public-key.ts derive staging "$RUNNER_TEMP/scanner-public-key.json"
+      - name: Publish and verify isolated staging
+        env:
+          SLOP_VETTING_BACKUP_RELEASE: ${{ vars.SLOP_VETTING_BACKUP_STAGING_RELEASE }}
+          SLOP_VETTING_RETENTION_RELEASE: ${{ vars.SLOP_VETTING_RETENTION_STAGING_RELEASE }}
+          SLOP_NOTIFY_RELEASE: ${{ vars.SLOP_NOTIFY_STAGING_RELEASE }}
+          SLOP_STAGING_BINDING_NONCE_LIMIT: ${{ vars.SLOP_STAGING_BINDING_NONCE_LIMIT }}
+          SLOP_NOTIFY_MAIL_PILOTS: ${{ vars.SLOP_NOTIFY_STAGING_MAIL_PILOTS }}
+          SLOP_NOTIFY_GENERAL_EMAIL: ${{ vars.SLOP_NOTIFY_STAGING_GENERAL_EMAIL }}
+          SLOP_NOTIFY_EMAIL_SENDING_READY: ${{ vars.SLOP_NOTIFY_STAGING_EMAIL_SENDING_READY }}
+          GH_TOKEN: ${{ github.token }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          GITHUB_APP_CLIENT_ID: ${{ secrets.SLOP_GITHUB_CLIENT_ID }}
+          GITHUB_APP_CLIENT_SECRET: ${{ secrets.SLOP_GITHUB_CLIENT_SECRET }}
+          IDENTITY_STATE_KEY: ${{ secrets.IDENTITY_STATE_KEY }}
+          IDENTITY_ASSERTION_KEY: ${{ secrets.IDENTITY_ASSERTION_KEY }}
+          TRACE_AUTH_SECRET: ${{ secrets.TRACE_AUTH_SECRET }}
+          SLOPBOT_APP_ID: ${{ secrets.SLOPBOT_APP_ID }}
+          SLOPBOT_APP_PRIVATE_KEY: ${{ secrets.SLOPBOT_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/development
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          node scripts/check-staging-order.mjs
+          node scripts/dist-manifest.mjs verify-local dist
+          started_at="$(node -e 'process.stdout.write(String(Date.now()))')"
+          ./node_modules/.bin/wrangler d1 migrations apply slop-staging --remote --config wrangler.staging.toml
+          bun scripts/prepare-payments-import.ts "$RUNNER_TEMP/payments-import.sql"
+          if [ -s "$RUNNER_TEMP/payments-import.sql" ]; then
+            ./node_modules/.bin/wrangler d1 execute slop-staging --remote --config wrangler.staging.toml \
+              --file "$RUNNER_TEMP/payments-import.sql"
+          else
+            echo "No repository payment records to import."
+          fi
+          bun scripts/release-vetting-sandbox.mjs staging
+          ./node_modules/.bin/wrangler deploy --config workers/slopbot/wrangler.repository-access-staging.toml \
+            --var="SLOPBOT_PRODUCER_REVISION:$GITHUB_SHA"
+          # Publish the named refresher before its existing hourly caller.
+          ./node_modules/.bin/wrangler deploy --config workers/identity/wrangler.staging.toml
+          node scripts/configure-staging-secrets.mjs
+          # Qualify fee receipts and quotes in isolated D1 without loading keys.
+          # A second live signer must never compete for the production wallets.
+          bun -e '
+            const config = Bun.TOML.parse(await Bun.file("workers/fee-converter/wrangler.staging.toml").text());
+            if (config.vars.FEE_CONVERTER_MODE !== "dry_run" ||
+                config.name !== "slop-fee-converter-staging" ||
+                config.d1_databases.length !== 1 ||
+                config.d1_databases[0].binding !== "FEE_DB" ||
+                config.d1_databases[0].database_id !== "6fcddcc1-f3d7-4175-bdde-09afddd53a8a") {
+              throw new Error("Staging fee conversion requires dry_run and isolated staging D1");
+            }
+          '
+          ./node_modules/.bin/wrangler deploy --config workers/fee-converter/wrangler.staging.toml \
+            --tag="$GITHUB_SHA" --message="slop.cash staging $GITHUB_SHA"
+          if [ "$SLOP_NOTIFY_RELEASE" = "enabled" ]; then
+            bun scripts/release-notify.mjs deploy staging "$RUNNER_TEMP/slop-notify-staging-release"
+          else
+            test -z "$SLOP_NOTIFY_MAIL_PILOTS"
+            test -z "$SLOP_NOTIFY_GENERAL_EMAIL"
+          fi
+          if [ "$SLOP_VETTING_BACKUP_RELEASE" = "enabled" ]; then
+            node scripts/release-vetting-backup.mjs staging
+          fi
+          # Pages requires the standard config filename in its working directory.
+          # Keep the production config untouched and publish the verified bundle
+          # with the staging config from this exact source revision.
+          publish_dir="$(mktemp -d "$RUNNER_TEMP/slop-staging-pages.XXXXXX")"
+          git archive "$GITHUB_SHA" | tar -x -C "$publish_dir"
+          cp wrangler.staging.toml "$publish_dir/wrangler.toml"
+          if [ "$SLOP_NOTIFY_RELEASE" = "enabled" ]; then
+            cp "$RUNNER_TEMP/slop-notify-staging-release/pages.toml" "$publish_dir/wrangler.toml"
+          fi
+          bun scripts/prepare-vetting-public-key.ts assemble staging "$RUNNER_TEMP/scanner-public-key.json" "$publish_dir/wrangler.toml"
+          # Publish registry-pinned test attesters before their named owner
+          # release bindings enter Pages. No production keys or mainnets.
+          bun workers/payment-executor/release-staging.mjs "$RUNNER_TEMP/slop-staging-payment-attesters" "$publish_dir/wrangler.jsonc"
+          cp -R dist "$publish_dir/dist"
+          ln -s "$GITHUB_WORKSPACE/node_modules" "$publish_dir/node_modules"
+          (
+            cd "$publish_dir"
+            WRANGLER_LOG=error WRANGLER_WRITE_LOGS=false ./node_modules/.bin/wrangler pages deploy \
+              --project-name=slop-staging \
+              --branch=development \
+              --commit-hash="$GITHUB_SHA" \
+              --commit-dirty=false
+          )
+          node scripts/verify-staging-deployment.mjs "$GITHUB_SHA" "$started_at"
+          node scripts/verify-staging-backend.mjs
+          bun scripts/prepare-vetting-public-key.ts verify staging "$RUNNER_TEMP/scanner-public-key.json" "$publish_dir/wrangler.jsonc"
+
+      - name: Retain notification release evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: slop-notify-staging-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/slop-notify-staging-release/profile.json
+            ${{ runner.temp }}/slop-notify-staging-release/release.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Retain staging attester publication evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: slop-staging-payment-attesters-${{ github.run_id }}
+          path: ${{ runner.temp }}/slop-staging-payment-attesters/release.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  deploy:
+    name: Deploy trusted production bundle
+    # Evaluate after optional upstream jobs are skipped; still require both gates.
+    if: >-
+      always() && !cancelled() &&
+      needs.prepare.result == 'success' && needs.quality.result == 'success' &&
+      ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    needs: [prepare, quality]
+    env:
+      RELEASE_SHA: ${{ github.sha }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    concurrency:
+      # Only publication holds this lock. Neither environment requires a
+      # manual reviewer: the reviewed main merge is the release decision.
+      group: slop-production
+      cancel-in-progress: false
+    environment:
+      # Every release, scheduled or not, publishes the tested main head and
+      # needs the Workers-scoped production credentials for the identity Worker.
+      name: slop-production
+      url: https://slop.cash
+    steps:
+      - name: Checkout exact deployment tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: false
+
+      - name: Verify deployment checkout
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse HEAD)"
+          if [ "$checked_out_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::Deployment checkout $checked_out_sha does not match the verified workflow SHA $GITHUB_SHA."
+            exit 1
+          fi
+
+      - name: Verify trusted release authority
+        run: |
+          set -euo pipefail
+          case "$GITHUB_EVENT_NAME" in
+            push|workflow_dispatch) ;;
+            *)
+              echo "::error::$GITHUB_EVENT_NAME is not authorized to deploy slop.cash."
+              exit 1
+              ;;
+          esac
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::$GITHUB_EVENT_NAME production releases are restricted to refs/heads/main."
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install locked release tooling
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Download verified Pages bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: slop-source-${{ github.sha }}
+          path: dist
+
+      - name: Verify downloaded Pages bundle
+        run: node scripts/dist-manifest.mjs verify-local dist
+
+      - name: Download checked registry snapshot
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: slop-registry-${{ github.sha }}
+          path: src/lib
+
+      - name: Verify downloaded registry snapshot
+        env:
+          REGISTRY_SHA256: ${{ needs.prepare.outputs.registry_sha256 }}
+          REVISIONS_SHA256: ${{ needs.prepare.outputs.revisions_sha256 }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { createHash } from "node:crypto";
+          import { readFileSync } from "node:fs";
+          for (const [expected, file] of [
+            [process.env.REGISTRY_SHA256, "src/lib/project-registry.generated.mjs"],
+            [process.env.REVISIONS_SHA256, "src/lib/project-revisions.generated.json"],
+          ]) {
+            const actual = createHash("sha256").update(readFileSync(file)).digest("hex");
+            if (!/^[a-f0-9]{64}$/.test(expected ?? "") || actual !== expected)
+              throw new Error(`The checked registry snapshot changed: ${file}`);
+          }
+          NODE
+          bun run projects:check
+
+      - name: Require live release-input equivalence
+        id: release-input
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          live_main="$(
+            git -C "$GITHUB_WORKSPACE" ls-remote --exit-code --refs \
+              https://github.com/SlopDotCash/slopdotcash.git refs/heads/main |
+              awk 'NR == 1 { print $1 }'
+          )"
+          if ! [[ "$live_main" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::GitHub did not return a valid live main SHA."
+            exit 1
+          fi
+          git -C "$GITHUB_WORKSPACE" fetch --force --no-tags --depth=1 origin \
+            "$live_main:refs/remotes/origin/slop-live-main"
+          if ! git -C "$GITHUB_WORKSPACE" diff --quiet "$GITHUB_SHA" "$live_main" -- .; then
+            # A newer main push owns publication: its run queues behind this
+            # job in slop-production. Stop without publishing stale input.
+            # Anything but a fast-forward of the tested commit fails closed.
+            advance="$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...$live_main" --jq .status)"
+            if [ "$advance" != "ahead" ]; then
+              echo "::error::Live main $live_main is not a fast-forward of tested $GITHUB_SHA ($advance)."
+              exit 1
+            fi
+            echo "::notice::Live main advanced to $live_main after testing; superseded $GITHUB_SHA is not published by this run."
+            printf 'Superseded: main advanced to %s after testing; this run did not publish %s.\n' "$live_main" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+            printf 'superseded=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+      - name: Require scoped Cloudflare credentials
+        if: steps.release-input.outputs.superseded != 'true'
+        env:
+          HAS_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+          HAS_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$HAS_TOKEN" != "true" ] || [ "$HAS_ACCOUNT" != "true" ]; then
+            echo "::error::The selected release environment requires CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID."
+            exit 1
+          fi
+
+      - name: Qualify Slopbot review and value models with the real provider
+        if: steps.release-input.outputs.superseded != 'true' && vars.SLOPBOT_RELEASE == 'enabled'
+        timeout-minutes: 11
+        env:
+          SURPLUS_API_KEY: ${{ secrets.SURPLUS_API_KEY }}
+        # This main-only environment supplies the key only to this step.
+        # Synthetic source and local SQLite; no production bindings or output artifacts.
+        run: bun --no-env-file scripts/qualify-value-models.ts
+
+      - name: Qualify private report screening with the real provider
+        if: steps.release-input.outputs.superseded != 'true'
+        timeout-minutes: 4
+        env:
+          SURPLUS_API_KEY: ${{ secrets.SURPLUS_API_KEY }}
+        # Up to three bounded synthetic calls (1 USD each, 3 USD total) that
+        # retry only transient failures; no private reports or delivery side
+        # effects. A wrong classification fails at once, and every failure
+        # logs only its category. This protected main-only job fails before
+        # any publication on failure.
+        run: bun --no-env-file scripts/qualify-security-screening.ts
+
+      - name: Require reviewed Pages project
+        if: steps.release-input.outputs.superseded != 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          response="$RUNNER_TEMP/eliza-computer-pages-project.json"
+          status="$(
+            curl --silent --show-error \
+              --connect-timeout 10 \
+              --max-time 30 \
+              --max-filesize 1048576 \
+              --output "$response" \
+              --write-out "%{http_code}" \
+              --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/eliza-computer"
+          )"
+          if [ "$status" != "200" ]; then
+            echo "::error::The reviewed eliza-computer Pages project is unavailable (HTTP $status); routine release code will not create or reconfigure it."
+            exit 1
+          fi
+          node - "$response" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const value = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          if (
+            value?.success !== true ||
+            value?.result?.name !== "eliza-computer" ||
+            value?.result?.production_branch !== "main"
+          ) {
+            throw new TypeError("the reviewed eliza-computer Pages project contract drifted");
+          }
+          NODE
+
+      - name: Validate optional Slopbot value scoring settings
+        if: steps.release-input.outputs.superseded != 'true'
+        env:
+          SLOPBOT_VALUE_MONTHLY_BUDGET_MICRO_USD: ${{ vars.SLOPBOT_VALUE_MONTHLY_BUDGET_MICRO_USD }}
+          SLOPBOT_VALUE_ATTEMPT_RESERVE_MICRO_USD: ${{ vars.SLOPBOT_VALUE_ATTEMPT_RESERVE_MICRO_USD }}
+          SLOPBOT_VALUE_START_AT: ${{ vars.SLOPBOT_VALUE_START_AT }}
+        run: |
+          node - "$RUNNER_TEMP/slopbot-value-args" <<'NODE'
+          const { writeFileSync } = require("node:fs");
+          const { valueSettings } = require("./workers/slopbot/value-settings.ts");
+          const names = [
+            "SLOPBOT_VALUE_MONTHLY_BUDGET_MICRO_USD",
+            "SLOPBOT_VALUE_ATTEMPT_RESERVE_MICRO_USD",
+            "SLOPBOT_VALUE_START_AT",
+          ];
+          const values = names.map((name) => process.env[name] ?? "");
+          if (values.every((value) => value === "")) {
+            writeFileSync(process.argv[2], "");
+            process.exit(0);
+          }
+          const settings = valueSettings(process.env);
+          if (!settings) {
+            throw new Error("Select alerts-only (November API cutoff), or supply a positive monthly allowance, a positive route reserve and a canonical UTC start. September and October cannot enter API assessment.");
+          }
+          const bindings = [
+            [names[0], settings.monthly === null ? "alerts-only" : String(settings.monthly)],
+            [names[2], new Date(settings.start).toISOString()],
+          ];
+          if (settings.maximum !== null) bindings.push([names[1], String(settings.maximum)]);
+          writeFileSync(process.argv[2], bindings.map(([name, value]) => `--var=${name}:${value}`).join("\n") + "\n");
+          NODE
+
+      - name: Derive production scanner public key
+        if: steps.release-input.outputs.superseded != 'true'
+        env:
+          SLOP_VETTING_SIGNING_JWK: ${{ secrets.SLOP_VETTING_SIGNING_JWK }}
+        run: bun scripts/prepare-vetting-public-key.ts derive production "$RUNNER_TEMP/scanner-public-key.json"
+      - name: Deploy private identity and Cloudflare Pages
+        if: steps.release-input.outputs.superseded != 'true'
+        id: pages-deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          X_CLIENT_ID: ${{ secrets.X_CLIENT_ID }}
+          X_CLIENT_SECRET: ${{ secrets.X_CLIENT_SECRET }}
+          SLOPBOT_RELEASE: ${{ vars.SLOPBOT_RELEASE }}
+          SLOP_NOTIFY_RELEASE: ${{ vars.SLOP_NOTIFY_RELEASE }}
+          SLOP_NOTIFY_MAIL_PILOTS: ${{ vars.SLOP_NOTIFY_MAIL_PILOTS }}
+          SLOP_NOTIFY_GENERAL_EMAIL: ${{ vars.SLOP_NOTIFY_GENERAL_EMAIL }}
+          SLOP_NOTIFY_EMAIL_SENDING_READY: ${{ vars.SLOP_NOTIFY_EMAIL_SENDING_READY }}
+          SLOP_FEE_CONVERTER_RELEASE: ${{ vars.SLOP_FEE_CONVERTER_RELEASE }}
+          SLOP_VETTING_BACKUP_RELEASE: ${{ vars.SLOP_VETTING_BACKUP_RELEASE }}
+          SLOP_VETTING_RETENTION_RELEASE: ${{ vars.SLOP_VETTING_RETENTION_RELEASE }}
+        # wrangler.toml owns pages_build_output_dir. A positional directory
+        # bypasses that deployment contract and must not be added here.
+        run: |
+          set -euo pipefail
+          live_main="$(
+            git -C "$GITHUB_WORKSPACE" ls-remote --exit-code --refs \
+              https://github.com/SlopDotCash/slopdotcash.git refs/heads/main |
+              awk 'NR == 1 { print $1 }'
+          )"
+          if ! [[ "$live_main" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::GitHub did not return a valid live main SHA before deployment."
+            exit 1
+          fi
+          git -C "$GITHUB_WORKSPACE" fetch --force --no-tags --depth=1 origin \
+            "$live_main:refs/remotes/origin/slop-live-main"
+          if ! git -C "$GITHUB_WORKSPACE" diff --quiet "$GITHUB_SHA" "$live_main" -- .; then
+            # A newer main push owns publication: its run queues behind this
+            # job in slop-production. Stop without publishing stale input.
+            # Anything but a fast-forward of the tested commit fails closed.
+            advance="$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...$live_main" --jq .status)"
+            if [ "$advance" != "ahead" ]; then
+              echo "::error::Live main $live_main is not a fast-forward of tested $GITHUB_SHA ($advance)."
+              exit 1
+            fi
+            echo "::notice::Live main advanced to $live_main before deployment; superseded $GITHUB_SHA is not published by this run."
+            printf 'Superseded: main advanced to %s before deployment; this run did not publish %s.\n' "$live_main" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+            printf 'superseded=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Prepare every enabled attester from the checked registry. This reads
+          # secret names only. A disabled network with retained vaults updates
+          # its existing attester to stop execution; it never creates one.
+          attester_dir="$RUNNER_TEMP/slop-payment-attester"
+          bun workers/payment-executor/release-mainnets.mjs prepare "$attester_dir"
+
+          # Restore only absent cleanup triggers; reject nonempty provisioning drift.
+          bun scripts/verify-identity-schedules.mjs --restore-missing
+
+          identity_secrets="$RUNNER_TEMP/slop-identity-secrets.json"
+          ./node_modules/.bin/wrangler secret list \
+            --config workers/identity/wrangler.toml > "$identity_secrets"
+          node - "$identity_secrets" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const value = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          const expected = [
+            "GITHUB_APP_CLIENT_ID",
+            "GITHUB_APP_CLIENT_SECRET",
+            "GITHUB_INTAKE_STATUS_TOKEN",
+            "IDENTITY_ASSERTION_KEY",
+            "IDENTITY_STATE_KEY",
+          ];
+          if (!Array.isArray(value)) throw new TypeError("identity secret inventory must be an array");
+          const actual = value.map((entry) => entry?.name).sort();
+          if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+            throw new TypeError("identity Worker secret inventory is incomplete or contains unexpected entries");
+          }
+          NODE
+
+          # Optional X credentials are installed only by this protected code release.
+          if [ -n "$X_CLIENT_ID" ] || [ -n "$X_CLIENT_SECRET" ]; then
+            x_secrets="$RUNNER_TEMP/slop-x-secrets.json"
+            node - "$x_secrets" <<'NODE'
+          const { writeFileSync } = require("node:fs");
+          const { X_CLIENT_ID, X_CLIENT_SECRET } = process.env;
+          if (!X_CLIENT_ID || !X_CLIENT_SECRET) throw new Error("X OAuth credentials must be configured together");
+          writeFileSync(process.argv[2], JSON.stringify({ X_CLIENT_ID, X_CLIENT_SECRET }), { mode: 0o600 });
+          NODE
+            ./node_modules/.bin/wrangler pages secret bulk "$x_secrets" --project-name eliza-computer
+            rm -f "$x_secrets"
+          fi
+
+          pages_secrets="$RUNNER_TEMP/slop-pages-secrets.txt"
+          ./node_modules/.bin/wrangler pages secret list \
+            --project-name eliza-computer > "$pages_secrets"
+          node - "$pages_secrets" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const contents = readFileSync(process.argv[2], "utf8");
+          const expected = [
+            "OPERATOR_GITHUB_IDS",
+            "TRACE_AUTH_SECRET",
+          ];
+          const actual = [...contents.matchAll(/^\s*-\s+([A-Z][A-Z0-9_]*):\s+Value Encrypted\s*$/gmu)]
+            .map((match) => match[1])
+            .sort();
+          const xKeys = actual.filter((name) => name === "X_CLIENT_ID" || name === "X_CLIENT_SECRET");
+          if (xKeys.length === 1) throw new TypeError("X OAuth credentials must be configured together");
+          // Optional owner-provisioned payment RPC, private-report intake,
+          // private analysis and public GitHub read secrets (PRD sections 4, 6,
+          // 8 and 11). They stay inert until their feature is enabled or set;
+          // any other name still fails closed.
+          const optional = [
+            "PAYMENT_RPC_URLS",
+            "REWARD_RPC_SOLANA",
+            "SLOP_GITHUB_READ_TOKEN",
+            "GITHUB_INTAKE_APP_CLIENT_ID",
+            "GITHUB_INTAKE_APP_CLIENT_SECRET",
+            "GITHUB_INTAKE_APP_ID",
+            "GITHUB_INTAKE_APP_PRIVATE_KEY",
+            "SLOP_INTAKE_GRANT_KEY",
+            "SURPLUS_API_KEY",
+          ];
+          const required = actual.filter(
+            (name) => !xKeys.includes(name) && !optional.includes(name),
+          );
+          if (JSON.stringify(required) !== JSON.stringify(expected)) {
+            throw new TypeError("Pages secret inventory is incomplete or contains unexpected entries");
+          }
+          NODE
+
+          bun scripts/release-vetting-sandbox.mjs production
+
+          ./node_modules/.bin/wrangler d1 migrations apply slop-private \
+            --remote \
+            --config workers/identity/wrangler.toml
+          bun scripts/prepare-points-import.ts dist "$RUNNER_TEMP/points-import.sql"
+          # D1's import API can time out on upload (504) or apply every
+          # statement and then answer the final poll with "Not currently
+          # importing anything". A failed import rolls back, and every
+          # statement is idempotent and keyed by the batch digest, so retry
+          # and accept a failed attempt only when the batch is recorded.
+          points_digest="$(sed -n "s/^INSERT INTO points_batches(digest,[^)]*) SELECT '\([0-9a-f]\{64\}\)'.*/\1/p" "$RUNNER_TEMP/points-import.sql")"
+          points_revisions="$(grep -c '^INSERT INTO points_staging(' "$RUNNER_TEMP/points-import.sql")"
+          [ "${#points_digest}" -eq 64 ] || exit 1
+          points_recorded() {
+            ./node_modules/.bin/wrangler d1 execute slop-private \
+              --remote --json --config workers/identity/wrangler.toml \
+              --command "SELECT revision_count, (SELECT COUNT(*) FROM points_staging WHERE batch_id='$points_digest') AS staged FROM points_batches WHERE digest='$points_digest'" \
+              > "$RUNNER_TEMP/points-batch.json" || return 1
+            POINTS_CHECK="$RUNNER_TEMP/points-batch.json" POINTS_REVISIONS="$points_revisions" node <<'NODE'
+          const fs = require("node:fs");
+          const rows = JSON.parse(fs.readFileSync(process.env.POINTS_CHECK, "utf8"))[0]?.results ?? [];
+          const expected = Number(process.env.POINTS_REVISIONS);
+          if (rows.length !== 1 || rows[0].revision_count !== expected || rows[0].staged !== 0) process.exit(1);
+          NODE
+          }
+          points_imported=false
+          for points_attempt in 1 2 3; do
+            if ./node_modules/.bin/wrangler d1 execute slop-private \
+              --remote --config workers/identity/wrangler.toml \
+              --file "$RUNNER_TEMP/points-import.sql"; then
+              points_imported=true
+              break
+            fi
+            if points_recorded; then
+              echo "points batch recorded with $points_revisions revisions after import attempt $points_attempt reported an error"
+              points_imported=true
+              break
+            fi
+            sleep $((points_attempt * 30))
+          done
+          [ "$points_imported" = true ] || { echo "::error::Points import failed after 3 attempts."; exit 1; }
+          bun scripts/prepare-payments-import.ts "$RUNNER_TEMP/payments-import.sql"
+          if [ -s "$RUNNER_TEMP/payments-import.sql" ]; then
+            ./node_modules/.bin/wrangler d1 execute slop-private \
+              --remote --config workers/identity/wrangler.toml \
+              --file "$RUNNER_TEMP/payments-import.sql"
+          else
+            echo "No repository payment records to import."
+          fi
+          node scripts/renew-private-intake.mjs || echo "::warning::Optional trace intake renewal failed; ordinary contribution remains available."
+          schema_response="$RUNNER_TEMP/slop-private-schema.json"
+          ./node_modules/.bin/wrangler d1 execute slop-private \
+            --remote \
+            --json \
+            --config workers/identity/wrangler.toml \
+            --command "SELECT type, name FROM sqlite_schema WHERE name IN ('identity_assertions','identity_oauth_flows','identity_oauth_flows_failed_terminal','identity_rate_limits','private_audit_events','project_applications','project_applications_one_pending_project','project_applications_one_pending_repository','project_repositories','project_revisions','project_revisions_no_delete','project_revisions_no_update','projects','projects_match_revision_insert','projects_match_revision_update','projects_no_delete','run_progress_events','trace_attachment_commit_validate','trace_attachment_commits','trace_attachment_commits_no_delete','trace_attachment_commits_no_update','trace_objects','trace_read_grants','trace_runs','trace_upload_intents','trace_uploads','wallet_claims','wallet_claims_no_delete','wallet_claims_no_update','wallet_claims_one_root_per_actor','wallet_claims_one_successor') ORDER BY type, name" \
+            > "$schema_response"
+          node - "$schema_response" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const value = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          const expected = [
+            "index:project_applications_one_pending_project",
+            "index:project_applications_one_pending_repository",
+            "index:wallet_claims_one_root_per_actor",
+            "index:wallet_claims_one_successor",
+            "table:identity_assertions",
+            "table:identity_oauth_flows",
+            "table:identity_rate_limits",
+            "table:private_audit_events",
+            "table:project_applications",
+            "table:project_repositories",
+            "table:project_revisions",
+            "table:projects",
+            "table:run_progress_events",
+            "table:trace_attachment_commits",
+            "table:trace_objects",
+            "table:trace_read_grants",
+            "table:trace_runs",
+            "table:trace_upload_intents",
+            "table:trace_uploads",
+            "table:wallet_claims",
+            "trigger:identity_oauth_flows_failed_terminal",
+            "trigger:project_revisions_no_delete",
+            "trigger:project_revisions_no_update",
+            "trigger:projects_match_revision_insert",
+            "trigger:projects_match_revision_update",
+            "trigger:projects_no_delete",
+            "trigger:trace_attachment_commit_validate",
+            "trigger:trace_attachment_commits_no_delete",
+            "trigger:trace_attachment_commits_no_update",
+            "trigger:wallet_claims_no_delete",
+            "trigger:wallet_claims_no_update",
+          ];
+          if (!Array.isArray(value) || value.length !== 1 || value[0]?.success !== true) {
+            throw new TypeError("private D1 schema query failed");
+          }
+          const actual = (value[0].results ?? [])
+            .map((entry) => `${entry?.type}:${entry?.name}`)
+            .sort();
+          if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+            throw new TypeError("private D1 schema is incomplete or unexpected");
+          }
+          NODE
+
+          # The selected profile is prepared from the checked-in Pages D1 contract.
+          # No pilot is selected unless the protected environment opts in.
+          if [ "$SLOP_NOTIFY_RELEASE" = "enabled" ]; then
+            bun scripts/release-notify.mjs deploy production "$RUNNER_TEMP/slop-notify-release"
+          else
+            test -z "$SLOP_NOTIFY_MAIL_PILOTS"
+            test -z "$SLOP_NOTIFY_GENERAL_EMAIL"
+            echo "::notice::Notification release is disabled."
+          fi
+
+          # Slopbot (workers/slopbot, protocol/slopbot-v2.md). The owner creates
+          # the Worker shell, its custom domain and its secrets once, then sets
+          # the SLOPBOT_RELEASE repository variable to "enabled". Releases only
+          # upload and promote versions. Its D1 tables come from the shared
+          # slop-private migration apply above.
+          if [ "$SLOPBOT_RELEASE" = "enabled" ]; then
+          test "$SLOP_NOTIFY_RELEASE" = "enabled"
+          slopbot_secrets="$RUNNER_TEMP/slopbot-secrets.json"
+          ./node_modules/.bin/wrangler secret list \
+            --config workers/slopbot/wrangler.toml > "$slopbot_secrets"
+          node - "$slopbot_secrets" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const value = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          if (!Array.isArray(value)) throw new TypeError("slopbot secret inventory must be an array");
+          const names = value.map((entry) => entry?.name).sort();
+          const required = [
+            "SLOPBOT_APP_ID",
+            "SLOPBOT_APP_PRIVATE_KEY",
+            "SLOPBOT_APP_USER_ID",
+            "SLOPBOT_WEBHOOK_SECRET",
+            "SURPLUS_API_KEY",
+          ];
+          const allowed = new Set([...required, "SURPLUS_BASE_URL"]);
+          if (!required.every((name) => names.includes(name)) || !names.every((name) => allowed.has(name))) {
+            throw new TypeError("slopbot Worker secret inventory is incomplete or contains unexpected entries");
+          }
+          NODE
+
+          slopbot_upload="$RUNNER_TEMP/slopbot-upload.log"
+          mapfile -t slopbot_value_args < "$RUNNER_TEMP/slopbot-value-args"
+          ./node_modules/.bin/wrangler versions upload \
+            --config workers/slopbot/wrangler.toml \
+            --var="SLOPBOT_PRODUCER_REVISION:$GITHUB_SHA" \
+            "${slopbot_value_args[@]}" \
+            --minify \
+            --tag="$GITHUB_SHA" \
+            --message="slop.cash release $GITHUB_SHA" 2>&1 | tee "$slopbot_upload"
+          slopbot_version_id="$(node - "$slopbot_upload" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const contents = readFileSync(process.argv[2], "utf8");
+          const matches = [...contents.matchAll(/^Worker Version ID:\s*([0-9a-f-]+)\s*$/gmu)];
+          if (matches.length !== 1 || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u.test(matches[0][1])) {
+            throw new TypeError("slopbot upload did not return exactly one Worker version id");
+          }
+          process.stdout.write(matches[0][1]);
+          NODE
+          )"
+          ./node_modules/.bin/wrangler versions deploy \
+            --name slop-slopbot \
+            --version-id="$slopbot_version_id" \
+            --percentage=100 \
+            --message="slop.cash release $GITHUB_SHA" \
+            --yes
+
+          # Version deployments do not apply the scheduler or queue triggers.
+          ./node_modules/.bin/wrangler triggers deploy \
+            --config workers/slopbot/wrangler.toml
+
+          slopbot_versions="$RUNNER_TEMP/slopbot-versions.json"
+          slopbot_deployment="$RUNNER_TEMP/slopbot-deployment.json"
+          ./node_modules/.bin/wrangler versions list --name slop-slopbot --json > "$slopbot_versions"
+          ./node_modules/.bin/wrangler deployments status --name slop-slopbot --json > "$slopbot_deployment"
+          node - "$slopbot_versions" "$slopbot_deployment" "$GITHUB_SHA" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const versions = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          const deployment = JSON.parse(readFileSync(process.argv[3], "utf8"));
+          const sha = process.argv[4];
+          const active = Array.isArray(deployment?.versions) && deployment.versions.length === 1 ? deployment.versions[0] : null;
+          if (active?.percentage !== 100 || typeof active?.version_id !== "string") {
+            throw new TypeError("slopbot Worker deployment is not pinned 100% to one version");
+          }
+          const version = Array.isArray(versions) ? versions.find((candidate) => candidate?.id === active.version_id) : undefined;
+          if (version?.annotations?.["workers/tag"] !== sha) {
+            throw new TypeError("slopbot Worker deployment is not bound to the tested commit");
+          }
+          NODE
+
+          slopbot_health="$RUNNER_TEMP/slopbot-health.json"
+          slopbot_status="$(
+            curl --silent --show-error \
+              --connect-timeout 10 \
+              --max-time 30 \
+              --max-filesize 4096 \
+              --output "$slopbot_health" \
+              --write-out "%{http_code}" \
+              https://slopbot.slop.cash/health
+          )"
+          if [ "$slopbot_status" != "200" ]; then
+            echo "::error::Slopbot health returned HTTP $slopbot_status; expected 200."
+            exit 1
+          fi
+          node -e 'const v=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")); if (v.service!=="slopbot"||v.ok!==true) throw new TypeError("unexpected slopbot health body")' "$slopbot_health"
+          else
+            echo "::notice::Slopbot release is not enabled (SLOPBOT_RELEASE repository variable)."
+          fi
+
+          # Bind the identity schedule only to the named refresher released above.
+          # With Slopbot disabled, leave its existing version untouched and omit
+          # only this optional binding from the identity publication copy.
+          identity_config="workers/identity/wrangler.toml"
+          if [ "$SLOPBOT_RELEASE" != "enabled" ]; then
+            identity_config="$(mktemp "$GITHUB_WORKSPACE/workers/identity/.wrangler-release.XXXXXX.json")"
+            trap 'rm -f "$identity_config"' EXIT
+            bun --no-env-file - "$identity_config" <<'BUN'
+          const config = Bun.TOML.parse(await Bun.file("workers/identity/wrangler.toml").text());
+          config.services = config.services.filter((service) => service.binding !== "REPORTING_READINESS");
+          await Bun.write(process.argv[2], `${JSON.stringify(config, null, 2)}\n`);
+          BUN
+          fi
+          # Upload and promote a version without rewriting the existing custom
+          # domain or cron configuration. The production token intentionally
+          # has no zone-level Workers Routes permission.
+          identity_upload="$RUNNER_TEMP/slop-identity-upload.log"
+          ./node_modules/.bin/wrangler versions upload \
+            --config "$identity_config" \
+            --minify \
+            --tag="$GITHUB_SHA" \
+            --message="slop.cash release $GITHUB_SHA" 2>&1 | tee "$identity_upload"
+          if [ "$SLOPBOT_RELEASE" != "enabled" ]; then
+            rm -f "$identity_config"
+            trap - EXIT
+          fi
+          identity_version_id="$(node - "$identity_upload" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const contents = readFileSync(process.argv[2], "utf8");
+          const matches = [...contents.matchAll(/^Worker Version ID:\s*([0-9a-f-]+)\s*$/gmu)];
+          if (matches.length !== 1 || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u.test(matches[0][1])) {
+            throw new TypeError("identity upload did not return exactly one Worker version id");
+          }
+          process.stdout.write(matches[0][1]);
+          NODE
+          )"
+          ./node_modules/.bin/wrangler versions deploy \
+            --name slop-identity \
+            --version-id="$identity_version_id" \
+            --percentage=100 \
+            --message="slop.cash release $GITHUB_SHA" \
+            --yes
+
+          identity_versions="$RUNNER_TEMP/slop-identity-versions.json"
+          identity_deployment="$RUNNER_TEMP/slop-identity-deployment.json"
+          ./node_modules/.bin/wrangler versions list \
+            --name slop-identity \
+            --json > "$identity_versions"
+          ./node_modules/.bin/wrangler deployments status \
+            --name slop-identity \
+            --json > "$identity_deployment"
+          node - "$identity_versions" "$identity_deployment" "$GITHUB_SHA" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const versions = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          const deployment = JSON.parse(readFileSync(process.argv[3], "utf8"));
+          const sha = process.argv[4];
+          if (!Array.isArray(deployment?.versions) || deployment.versions.length !== 1) {
+            throw new TypeError("identity Worker deployment must contain exactly one version");
+          }
+          const active = deployment.versions[0];
+          if (active?.percentage !== 100 || typeof active?.version_id !== "string") {
+            throw new TypeError("identity Worker deployment is not pinned 100% to one version");
+          }
+          const version = Array.isArray(versions)
+            ? versions.find((candidate) => candidate?.id === active.version_id)
+            : undefined;
+          if (
+            version?.annotations?.["workers/tag"] !== sha ||
+            version?.annotations?.["workers/message"] !== `slop.cash release ${sha}`
+          ) {
+            throw new TypeError("identity Worker deployment is not bound to the tested commit");
+          }
+          NODE
+
+          bun scripts/verify-identity-schedules.mjs
+
+          identity_rate_probe_started_at="$(date +%s)"
+          if ! [[ "$identity_rate_probe_started_at" =~ ^[0-9]{10}$ ]]; then
+            echo "::error::Identity rate-limit probe start time is invalid."
+            exit 1
+          fi
+          identity_response="$RUNNER_TEMP/slop-identity-start.json"
+          identity_status="$(
+            curl --silent --show-error \
+              --connect-timeout 10 \
+              --max-time 30 \
+              --max-filesize 65536 \
+              --output "$identity_response" \
+              --write-out "%{http_code}" \
+              --header "Content-Type: application/json" \
+              --data '{"audience":"private-trace-api"}' \
+              https://identity.slop.cash/v1/oauth/start
+          )"
+          if [ "$identity_status" != "201" ]; then
+            echo "::error::Identity start returned HTTP $identity_status; expected 201."
+            exit 1
+          fi
+          authorization_url="$(node - "$identity_response" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const value = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          const expected = ["authorizationUrl", "expiresAt", "flowId", "pollAfterSeconds", "pollCapability"];
+          if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(expected)) {
+            throw new TypeError("identity start response has an unexpected shape");
+          }
+          if (!/^flow_[A-Za-z0-9_-]{24}$/u.test(value.flowId)) throw new TypeError("invalid identity flow id");
+          if (!/^[A-Za-z0-9_-]{43}$/u.test(value.pollCapability)) throw new TypeError("invalid poll capability");
+          if (value.pollAfterSeconds !== 2 || !Number.isFinite(Date.parse(value.expiresAt))) {
+            throw new TypeError("invalid identity expiry contract");
+          }
+          const authorization = new URL(value.authorizationUrl);
+          if (authorization.origin !== "https://identity.slop.cash" || authorization.pathname !== "/v1/oauth/authorize") {
+            throw new TypeError("invalid identity authorization URL");
+          }
+          process.stdout.write(authorization.toString());
+          NODE
+          )"
+          authorization_headers="$RUNNER_TEMP/slop-identity-authorization.headers"
+          authorization_status="$(
+            curl --silent --show-error \
+              --connect-timeout 10 \
+              --max-time 30 \
+              --max-filesize 65536 \
+              --output /dev/null \
+              --dump-header "$authorization_headers" \
+              --write-out "%{http_code}" \
+              "$authorization_url"
+          )"
+          if [ "$authorization_status" != "302" ]; then
+            echo "::error::Identity authorization returned HTTP $authorization_status; expected 302."
+            exit 1
+          fi
+          github_client_id="$(node - "$authorization_headers" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const headers = readFileSync(process.argv[2], "utf8");
+          const match = headers.match(/^location:\s*(\S+)\s*$/imu);
+          if (!match) throw new TypeError("identity authorization omitted its redirect");
+          const location = new URL(match[1]);
+          if (location.origin !== "https://github.com" || location.pathname !== "/login/oauth/authorize") {
+            throw new TypeError("identity authorization did not target GitHub");
+          }
+          if (location.searchParams.get("redirect_uri") !== "https://identity.slop.cash/v1/oauth/callback") {
+            throw new TypeError("identity authorization callback drifted");
+          }
+          if (location.searchParams.get("code_challenge_method") !== "S256") {
+            throw new TypeError("identity authorization did not require PKCE S256");
+          }
+          const clientId = location.searchParams.get("client_id") ?? "";
+          if (clientId.length === 0 || clientId.length > 128 || !/^[A-Za-z0-9._-]+$/u.test(clientId)) {
+            throw new TypeError("identity authorization omitted the GitHub App client id");
+          }
+          process.stdout.write(clientId);
+          NODE
+          )"
+          printf '%s\n' "github_client_id=$github_client_id" >> "$GITHUB_OUTPUT"
+
+          for request_number in $(seq 2 12); do
+            repeated_response="$RUNNER_TEMP/slop-identity-start-$request_number.json"
+            repeated_status="$(
+              curl --silent --show-error \
+                --connect-timeout 10 \
+                --max-time 30 \
+                --max-filesize 65536 \
+                --output "$repeated_response" \
+                --write-out "%{http_code}" \
+                --header "Content-Type: application/json" \
+                --data '{"audience":"private-trace-api"}' \
+                https://identity.slop.cash/v1/oauth/start
+            )"
+            if [ "$repeated_status" != "201" ]; then
+              echo "::error::Identity start request $request_number returned HTTP $repeated_status; expected 201."
+              exit 1
+            fi
+          done
+          limited_response="$RUNNER_TEMP/slop-identity-rate-limited.json"
+          limited_headers="$RUNNER_TEMP/slop-identity-rate-limited.headers"
+          limited_status="$(
+            curl --silent --show-error \
+              --connect-timeout 10 \
+              --max-time 30 \
+              --max-filesize 65536 \
+              --output "$limited_response" \
+              --dump-header "$limited_headers" \
+              --write-out "%{http_code}" \
+              --header "Content-Type: application/json" \
+              --data '{"audience":"private-trace-api"}' \
+              https://identity.slop.cash/v1/oauth/start
+          )"
+          if [ "$limited_status" != "429" ]; then
+            echo "::error::Identity start request 13 returned HTTP $limited_status; expected 429."
+            exit 1
+          fi
+          node - "$limited_response" "$limited_headers" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const value = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          const headers = readFileSync(process.argv[3], "utf8");
+          if (JSON.stringify(value) !== JSON.stringify({
+            error: "rate_limited",
+            message: "Too many requests. Try again later.",
+          })) {
+            throw new TypeError("identity rate-limit response has an unexpected shape");
+          }
+          const retryAfter = headers.match(/^retry-after:\s*(\d+)\s*$/imu)?.[1];
+          if (retryAfter === undefined || Number(retryAfter) < 1 || Number(retryAfter) > 60) {
+            throw new TypeError("identity rate-limit response omitted a bounded retry-after");
+          }
+          NODE
+
+          exact_rate_limit_response="$RUNNER_TEMP/slop-identity-exact-rate-limit.json"
+          ./node_modules/.bin/wrangler d1 execute slop-private \
+            --remote \
+            --json \
+            --config workers/identity/wrangler.toml \
+            --command "SELECT request_count, window_started_at, expires_at FROM identity_rate_limits WHERE window_started_at >= $identity_rate_probe_started_at AND request_count = 13 ORDER BY window_started_at DESC" \
+            > "$exact_rate_limit_response"
+          node - "$exact_rate_limit_response" "$identity_rate_probe_started_at" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const value = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          const probeStartedAt = Number(process.argv[3]);
+          if (!Array.isArray(value) || value.length !== 1 || value[0]?.success !== true) {
+            throw new TypeError("identity exact rate-limit query failed");
+          }
+          const rows = value[0].results ?? [];
+          if (rows.length !== 1) {
+            throw new TypeError("identity exact rate-limit probe did not produce one authoritative bucket");
+          }
+          const row = rows[0];
+          if (
+            row?.request_count !== 13 ||
+            !Number.isSafeInteger(row?.window_started_at) ||
+            row.window_started_at < probeStartedAt ||
+            !Number.isSafeInteger(row?.expires_at) ||
+            row.expires_at <= row.window_started_at
+          ) {
+            throw new TypeError("identity exact rate-limit bucket has an unexpected state");
+          }
+          NODE
+
+          if [ "$SLOP_VETTING_BACKUP_RELEASE" = "enabled" ]; then
+            node scripts/release-vetting-backup.mjs production
+          fi
+
+          # The approved referral service follows the same checked main release.
+          # Its reviewed mode starts Off; deployment does not activate posting.
+          # No additional rollout flag or manual Worker shell is required.
+          bun scripts/release-referral.ts
+
+          # Fee-wallet converter (workers/fee-converter, PRD MVP-07c). The owner
+          # creates the Worker shell and its secrets once, then sets the
+          # SLOP_FEE_CONVERTER_RELEASE repository variable to "enabled". The
+          # mode, networks and caps come only from the reviewed wrangler.toml;
+          # live mode is refused unless every enabled network has its key.
+          # Its D1 tables come from the shared slop-private migration apply above.
+          if [ "$SLOP_FEE_CONVERTER_RELEASE" = "enabled" ]; then
+          converter_secrets="$RUNNER_TEMP/slop-fee-converter-secrets.json"
+          ./node_modules/.bin/wrangler secret list \
+            --config workers/fee-converter/wrangler.toml > "$converter_secrets"
+          # Bun 1.3.14 exits 0 and prints no error when a CommonJS script read
+          # from stdin throws. Require the final summary line as well, so any
+          # refused check stops the release before the upload.
+          converter_preflight="$(bun - "$converter_secrets" workers/fee-converter/wrangler.toml <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const value = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          if (!Array.isArray(value)) throw new TypeError("fee-converter secret inventory must be an array");
+          const networks = ["BASE", "ETHEREUM", "ROBINHOOD", "SOLANA"];
+          const allowed = new Set([
+            ...networks.map((n) => `FEE_WALLET_KEY_${n}`),
+            ...networks.map((n) => `RPC_URL_${n}`),
+            "JUPITER_API_KEY",
+            "SOLANA_RECOVERY_RPC_URL",
+          ]);
+          const names = value.map((entry) => entry?.name);
+          if (names.some((name) => !allowed.has(name))) {
+            throw new TypeError("fee-converter Worker secret inventory contains unexpected entries");
+          }
+          const toml = readFileSync(process.argv[3], "utf8");
+          const read = (key) => {
+            const match = new RegExp(`^${key} = "([^"]*)"$`, "mu").exec(toml);
+            if (!match) throw new TypeError(`fee-converter wrangler.toml lacks ${key}`);
+            return match[1];
+          };
+          const mode = read("FEE_CONVERTER_MODE");
+          if (!["off", "dry_run", "live"].includes(mode)) throw new TypeError("invalid FEE_CONVERTER_MODE");
+          const enabled = read("FEE_CONVERTER_NETWORKS").split(",").map((n) => n.trim()).filter(Boolean);
+          // Use the Worker's actual parser: live signing on every converting
+          // network requires that network's own approved native limits.
+          const { parseConfig } = require("./workers/fee-converter/config.ts");
+          parseConfig(Bun.TOML.parse(toml).vars);
+          if (mode === "live") {
+            const missing = enabled.filter((n) => !names.includes(`FEE_WALLET_KEY_${n.toUpperCase()}`));
+            if (missing.length > 0) throw new TypeError(`live fee conversion lacks keys for: ${missing.join(", ")}`);
+          }
+          console.log(`fee-converter mode ${mode}; networks ${enabled.join(",") || "none"}`);
+          NODE
+          )"
+          printf '%s\n' "$converter_preflight"
+          converter_preflight_complete='^fee-converter mode (off|dry_run|live); networks [a-z,]+$'
+          if ! [[ "$converter_preflight" =~ $converter_preflight_complete ]]; then
+            echo "::error::The fee-converter release preflight did not complete."
+            exit 1
+          fi
+
+          converter_upload="$RUNNER_TEMP/slop-fee-converter-upload.log"
+          ./node_modules/.bin/wrangler versions upload \
+            --config workers/fee-converter/wrangler.toml \
+            --tag="$GITHUB_SHA" \
+            --message="slop.cash release $GITHUB_SHA" 2>&1 | tee "$converter_upload"
+          converter_version_id="$(node - "$converter_upload" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const contents = readFileSync(process.argv[2], "utf8");
+          const matches = [...contents.matchAll(/^Worker Version ID:\s*([0-9a-f-]+)\s*$/gmu)];
+          if (matches.length !== 1 || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u.test(matches[0][1])) {
+            throw new TypeError("fee-converter upload did not return exactly one Worker version id");
+          }
+          process.stdout.write(matches[0][1]);
+          NODE
+          )"
+          ./node_modules/.bin/wrangler versions deploy \
+            --name slop-fee-converter \
+            --version-id="$converter_version_id" \
+            --percentage=100 \
+            --message="slop.cash release $GITHUB_SHA" \
+            --yes
+          # Version deploys do not change cron triggers; apply the reviewed schedule.
+          ./node_modules/.bin/wrangler triggers deploy \
+            --config workers/fee-converter/wrangler.toml
+
+          converter_versions="$RUNNER_TEMP/slop-fee-converter-versions.json"
+          converter_deployment="$RUNNER_TEMP/slop-fee-converter-deployment.json"
+          ./node_modules/.bin/wrangler versions list --name slop-fee-converter --json > "$converter_versions"
+          ./node_modules/.bin/wrangler deployments status --name slop-fee-converter --json > "$converter_deployment"
+          node - "$converter_versions" "$converter_deployment" "$GITHUB_SHA" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const versions = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          const deployment = JSON.parse(readFileSync(process.argv[3], "utf8"));
+          const sha = process.argv[4];
+          const active = Array.isArray(deployment?.versions) && deployment.versions.length === 1 ? deployment.versions[0] : null;
+          if (active?.percentage !== 100 || typeof active?.version_id !== "string") {
+            throw new TypeError("fee-converter Worker deployment is not pinned 100% to one version");
+          }
+          const version = Array.isArray(versions) ? versions.find((candidate) => candidate?.id === active.version_id) : undefined;
+          if (version?.annotations?.["workers/tag"] !== sha) {
+            throw new TypeError("fee-converter Worker deployment is not bound to the tested commit");
+          }
+          NODE
+          else
+            echo "::notice::Fee-converter Worker release is not enabled (SLOP_FEE_CONVERTER_RELEASE repository variable)."
+          fi
+
+          # Publish after migrations, retaining journals and verifying exact tags.
+          bun workers/payment-executor/release-mainnets.mjs publish "$attester_dir"
+
+          printf 'Worker/service publication completed for %s; Pages publication is pending the final live-main check.\n' "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          live_main="$(
+            git -C "$GITHUB_WORKSPACE" ls-remote --exit-code --refs \
+              https://github.com/SlopDotCash/slopdotcash.git refs/heads/main |
+              awk 'NR == 1 { print $1 }'
+          )"
+          if ! [[ "$live_main" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::GitHub did not return a valid live main SHA immediately before the Pages deployment."
+            exit 1
+          fi
+          git -C "$GITHUB_WORKSPACE" fetch --force --no-tags --depth=1 origin \
+            "$live_main:refs/remotes/origin/slop-live-main"
+          if ! git -C "$GITHUB_WORKSPACE" diff --quiet "$GITHUB_SHA" "$live_main" -- .; then
+            # Worker/service writes have happened. A changed main is now a
+            # partial rollout failure, never a successful superseded no-op.
+            echo "::error::Partial publication: live main changed to $live_main after Worker/service publication of $GITHUB_SHA; Pages was not published."
+            printf 'Partial publication: Worker/services from %s were published, but main changed to %s. Pages was not published; this release failed and requires reconciliation.\n' "$GITHUB_SHA" "$live_main" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          # Use the same immutable-source publication directory as staging.
+          # Only public configuration is added; the signing key is not in this step.
+          publish_dir="$(mktemp -d "$RUNNER_TEMP/slop-production-pages.XXXXXX")"
+          git archive "$GITHUB_SHA" | tar -x -C "$publish_dir"
+          bun scripts/prepare-vetting-public-key.ts assemble production "$RUNNER_TEMP/scanner-public-key.json" "$publish_dir/wrangler.toml"
+          # Only verified named entrypoints are added to the Pages artifact.
+          bun workers/payment-executor/release-mainnets.mjs assemble "$attester_dir" "$publish_dir/wrangler.jsonc"
+          cp -R dist "$publish_dir/dist"
+          ln -s "$GITHUB_WORKSPACE/node_modules" "$publish_dir/node_modules"
+          printf '%s\n' "started_at=$(node -e 'process.stdout.write(Date.now().toString())')" >> "$GITHUB_OUTPUT"
+          for attempt in 1 2 3; do
+            if WRANGLER_LOG=error WRANGLER_WRITE_LOGS=false ./node_modules/.bin/wrangler pages deploy --cwd "$publish_dir" \
+              --project-name=eliza-computer \
+              --branch=main \
+              --commit-hash="$RELEASE_SHA" \
+              --commit-dirty=false; then
+              bun scripts/prepare-vetting-public-key.ts verify production "$RUNNER_TEMP/scanner-public-key.json" "$publish_dir/wrangler.jsonc"
+              exit 0
+            fi
+            if [ "$attempt" = "3" ]; then
+              echo "::error::Cloudflare Pages deploy failed after ${attempt} attempts."
+              exit 1
+            fi
+            echo "::warning::Cloudflare Pages deploy attempt ${attempt} failed; retrying."
+            sleep $((attempt * 10))
+          done
+
+      - name: Retain notification release evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: slop-notify-production-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/slop-notify-release/profile.json
+            ${{ runner.temp }}/slop-notify-release/release.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Verify Cloudflare deployment commit metadata
+        if: steps.release-input.outputs.superseded != 'true' && steps.pages-deploy.outputs.superseded != 'true'
+        id: deployment-metadata
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          DEPLOYMENT_NOT_BEFORE: ${{ steps.pages-deploy.outputs.started_at }}
+        run: |
+          set -euo pipefail
+          response="$RUNNER_TEMP/eliza-computer-production-deployments.json"
+          for attempt in $(seq 1 18); do
+            status="$(
+              curl --silent --show-error \
+                --connect-timeout 10 \
+                --max-time 30 \
+                --max-filesize 1048576 \
+                --output "$response" \
+                --write-out "%{http_code}" \
+                --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                --header "Cache-Control: no-cache" \
+                "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/eliza-computer/deployments?env=production&per_page=25"
+            )"
+            if [ "$status" = "200" ]; then
+              if deployment="$(
+                node scripts/select-pages-deployment.mjs \
+                  "$response" "$RELEASE_SHA" "$DEPLOYMENT_NOT_BEFORE"
+              )"; then
+                IFS=$'\t' read -r deployment_id deployment_url deployment_created_on <<< "$deployment"
+                printf '%s\n' "deployment_id=$deployment_id" >> "$GITHUB_OUTPUT"
+                printf '%s\n' "deployment_url=$deployment_url" >> "$GITHUB_OUTPUT"
+                echo "::notice::Cloudflare production deployment $deployment_id for $GITHUB_SHA is successful at $deployment_url"
+                {
+                  echo "Cloudflare deployment: \`$deployment_id\`"
+                  echo
+                  echo "URL: $deployment_url"
+                  echo
+                  echo "Created: $deployment_created_on"
+                } >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+              else
+                selector_status="$?"
+                if [ "$selector_status" != "2" ]; then
+                  echo "::error::Cloudflare deployment metadata response was malformed."
+                  exit "$selector_status"
+                fi
+              fi
+            else
+              echo "::warning::Cloudflare deployment metadata lookup returned HTTP $status."
+            fi
+            echo "::warning::Successful production metadata for $GITHUB_SHA is not visible yet (attempt $attempt/18)."
+            sleep 5
+          done
+          echo "::error::Cloudflare did not report a new, successful, clean production deployment for commit $GITHUB_SHA."
+          exit 1
+
+      - name: Verify published skill and leaderboard
+        if: steps.release-input.outputs.superseded != 'true' && steps.pages-deploy.outputs.superseded != 'true'
+        run: |
+          set -euo pipefail
+          verify_download() {
+            local remote_path="$1"
+            local expected="$2"
+            local artifact="$3"
+            local received
+            local expected_bytes
+            local attempt=1
+            received="$RUNNER_TEMP/slop-${artifact//\//-}"
+            expected_bytes="$(wc -c < "$expected")"
+            while [ "$attempt" -le 3 ]; do
+              if curl --fail --silent --show-error \
+                --connect-timeout 10 \
+                --max-time 30 \
+                --max-filesize "$expected_bytes" \
+                --header "Cache-Control: no-cache" \
+                --header "Pragma: no-cache" \
+                "https://slop.cash${remote_path}?verify=$GITHUB_SHA-$GITHUB_RUN_ATTEMPT-$attempt" \
+                --output "$received" &&
+                cmp --silent "$expected" "$received"; then
+                return 0
+              fi
+              echo "::warning::$artifact verification attempt $attempt did not match the verified build."
+              attempt=$((attempt + 1))
+              sleep 5
+            done
+            echo "::error::Published $artifact did not match the verified build."
+            return 1
+          }
+          manifest_verified=false
+          # Custom-domain propagation has exceeded two minutes in production.
+          # Keep retrying the exact byte inventory rather than accepting stale content.
+          for manifest_attempt in $(seq 1 72); do
+            if node scripts/dist-manifest.mjs verify \
+              dist \
+              https://slop.cash \
+              "$GITHUB_SHA-$GITHUB_RUN_ATTEMPT-$manifest_attempt"; then
+              manifest_verified=true
+              break
+            fi
+            echo "::warning::Deployment manifest verification attempt $manifest_attempt did not match the verified build."
+            sleep 5
+          done
+          if [ "$manifest_verified" != true ]; then
+            echo "::error::Published deployment manifest did not match the verified build."
+            exit 1
+          fi
+          # The inventory checks /index.html; this additional request proves the
+          # public root route resolves to those same tested bytes.
+          verify_download / dist/index.html index.html
+
+      - name: Verify active private trace API boundary
+        if: steps.release-input.outputs.superseded != 'true' && steps.pages-deploy.outputs.superseded != 'true'
+        run: |
+          set -euo pipefail
+          response="$RUNNER_TEMP/slop-active-private-api-response.json"
+          headers="$RUNNER_TEMP/slop-active-private-api-response.headers"
+          for attempt in $(seq 1 18); do
+            status="$(
+              curl --silent --show-error \
+                --connect-timeout 10 \
+                --max-time 30 \
+                --max-filesize 65536 \
+                --output "$response" \
+                --dump-header "$headers" \
+                --write-out "%{http_code}" \
+                --header "Cache-Control: no-cache" \
+                --header "Content-Type: application/json" \
+                --data '{}' \
+                "https://api.slop.cash/api/v1/runs?verify=$GITHUB_SHA-$GITHUB_RUN_ATTEMPT-active-$attempt"
+            )"
+            if [ "$status" = "401" ] && node - "$response" "$headers" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const value = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          const headers = readFileSync(process.argv[3], "utf8");
+          const contract = headers.match(/^x-slop-trace-api-contract:\s*([^\r\n]+)$/imu)?.[1]?.trim();
+          if (
+            value?.error !== "unauthorized" ||
+            contract !== "private-trace-v1-opaque-hmac-v1"
+          ) process.exit(1);
+          NODE
+            then
+              exit 0
+            fi
+            echo "::warning::Active private trace boundary returned HTTP $status (attempt $attempt/18)."
+            sleep 5
+          done
+          echo "::error::Active private trace API did not reach its fail-closed unauthenticated boundary."
+          exit 1
+
+      - name: Report optional intake health
+        if: steps.release-input.outputs.superseded != 'true' && steps.pages-deploy.outputs.superseded != 'true'
+        run: |
+          status="$(curl --silent --show-error --max-time 30 --max-filesize 65536 --output /dev/null --write-out '%{http_code}' https://api.slop.cash/api/v1/private-request-intake)"
+          if [ "$status" != "200" ]; then
+            echo "::warning::Optional trace intake unavailable (HTTP $status); GitHub contribution remains open. Check the independent health renewal workflow."
+          fi
+
+      - name: Require public identity OAuth app
+        if: steps.release-input.outputs.superseded != 'true' && steps.pages-deploy.outputs.superseded != 'true'
+        env:
+          GITHUB_CLIENT_ID: ${{ steps.pages-deploy.outputs.github_client_id }}
+        run: |
+          set -euo pipefail
+          # Query without GitHub credentials. A private App is visible to this
+          # repository's organization token but returns 404 to contributors.
+          # Run this after Pages verification so an identity configuration
+          # failure cannot suppress an unrelated, already-verified site fix.
+          github_app_response="$RUNNER_TEMP/slop-identity-github-app.json"
+          github_app_status="$(
+            curl --silent --show-error \
+              --connect-timeout 10 \
+              --max-time 30 \
+              --max-filesize 65536 \
+              --output "$github_app_response" \
+              --write-out "%{http_code}" \
+              --header "Accept: application/vnd.github+json" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              https://api.github.com/apps/slop-identity
+          )"
+          if [ "$github_app_status" != "200" ]; then
+            echo "::error::The Slop Identity GitHub App is not publicly discoverable (HTTP $github_app_status)."
+            exit 1
+          fi
+          node - "$github_app_response" "$GITHUB_CLIENT_ID" <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const value = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          const clientId = process.argv[3];
+          if (
+            value?.slug !== "slop-identity" ||
+            value?.name !== "Slop Identity" ||
+            value?.client_id !== clientId ||
+            value?.owner?.login !== "elizaOS" ||
+            JSON.stringify(value?.permissions) !== "{}" ||
+            JSON.stringify(value?.events) !== "[]"
+          ) {
+            throw new TypeError("the public Slop Identity GitHub App contract drifted");
+          }
+          NODE

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "1",
+  "projectId": "eliza",
+  "repositoryId": "elizaOS/eliza",
+  "skillName": "contribute-to-eliza",
+  "skillSourcePath": "skills/contribute-to-eliza",
+  "publicOrigin": "https://slop.cash/projects/eliza",
+  "policyAuthority": "https://slop.cash",
+  "selection": {
+    "eligibleIssueLabels": ["mission-ready"]
+  },
+  "usageAdapters": {
+    "codex": "codex",
+    "claude-code": "claude",
+    "grok-build": "grok"
+  }
+}

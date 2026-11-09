@@ -1,0 +1,227 @@
+import type { WalletChain } from "../../src/lib/wallets";
+export const TRACE_CONTENT_TYPES = [
+  "text/plain",
+  "application/x-ndjson",
+] as const;
+
+export const MAX_TRACE_BYTES = 8 * 1024 * 1024;
+export const MAX_JSON_BYTES = 64 * 1024;
+
+export type TraceContentType = (typeof TRACE_CONTENT_TYPES)[number];
+
+export type ApiRole = "contributor" | "project_owner" | "operator";
+
+/** The renewed private-reporting observation that gates optional traces. */
+export type PrivateIntakeStatus =
+  | { status: "verified"; enabled: boolean; verifiedAt: string }
+  | { status: "unavailable" };
+
+export type AuthenticatedActor = {
+  githubId: string;
+  githubLogin: string;
+  roles: readonly ApiRole[];
+  tokenId: string;
+};
+
+export type RunState = "awaiting_trace" | "trace_uploaded" | "finalized";
+
+export type TraceRun = {
+  id: string;
+  clientRunId: string;
+  githubId: string;
+  githubLogin: string;
+  projectId: string;
+  repository: string;
+  projectPolicyRevision: string;
+  provider: string;
+  model: string;
+  client: string;
+  clientVersion: string;
+  state: RunState;
+  traceSha256: string | null;
+  createdAt: string;
+  finalizedAt: string | null;
+};
+
+export type TraceObject = {
+  sha256: string;
+  key: string;
+  sizeBytes: number;
+  contentType: TraceContentType;
+  createdByGithubId: string;
+  createdAt: string;
+};
+
+export const RUN_EVENT_KINDS = [
+  "run_started",
+  "task_selected",
+  "work_started",
+  "checkpoint",
+  "pull_request_opened",
+  "review_requested",
+  "merged",
+  "run_completed",
+  "run_failed",
+] as const;
+
+export type RunEventKind = (typeof RUN_EVENT_KINDS)[number];
+
+export type RunProgressEvent = {
+  id: string;
+  runId: string;
+  githubId: string;
+  kind: RunEventKind;
+  occurredAt: string;
+  source: "agent" | "github";
+  githubObjectId: string | null;
+  githubUrl: string | null;
+  headSha: string | null;
+  createdAt: string;
+};
+
+export type CreateRunInput = Omit<
+  TraceRun,
+  "id" | "state" | "traceSha256" | "createdAt" | "finalizedAt"
+> & {
+  id: string;
+  idempotencyKey: string;
+  createdAt: string;
+};
+
+export type AttachTraceInput = {
+  runId: string;
+  githubId: string;
+  idempotencyKey: string;
+  intentConsumedAt: string;
+  object: TraceObject;
+};
+
+export type TraceUploadIntent = {
+  tokenHash: string;
+  runId: string;
+  githubId: string;
+  sha256: string;
+  sizeBytes: number;
+  contentType: TraceContentType;
+  idempotencyKey: string;
+  createdAt: string;
+  expiresAt: string;
+  consumedAt: string | null;
+};
+
+export type AuditInput = {
+  id: string;
+  actorGithubId: string;
+  action: string;
+  target: string;
+  requestId: string;
+  createdAt: string;
+  details: Record<string, string | number | boolean | null>;
+};
+
+export type WalletClaim = {
+  id: string;
+  githubId: string;
+  githubLogin: string;
+  walletAddress: string;
+  chain: WalletChain;
+  source: "github_issue" | "profile_readme" | "d1_registry";
+  issueRepository: string | null;
+  issueNumber: number | null;
+  sourceBodySha256: string;
+  observedAt: string;
+  recordSha256: string;
+  supersedesClaimId: string | null;
+  createdAt: string;
+};
+
+/**
+ * A single-use nonce binding one wallet claim to a possession challenge.
+ * Consumable state, not a permanent record.
+ */
+export type WalletPossessionChallengeRecord = {
+  challengeId: string;
+  claimId: string;
+  githubId: string;
+  walletAddress: string;
+  issuedAt: string;
+  expiresAt: string;
+  consumedAt: string | null;
+  createdAt: string;
+};
+
+/**
+ * Permanent evidence that the claimed destination key signed its challenge.
+ * Proves possession at signing time only. It carries no payment authority and
+ * its absence never holds, excludes, or reduces a contributor's position.
+ */
+export type WalletPossessionAttestationRecord = {
+  id: string;
+  claimId: string;
+  challengeId: string;
+  githubId: string;
+  walletAddress: string;
+  signature: string;
+  messageSha256: string;
+  attestedAt: string;
+  createdAt: string;
+};
+
+export type PersistenceResult<T> =
+  | { status: "created"; value: T }
+  | { status: "existing"; value: T }
+  | { status: "conflict" };
+
+export interface TracePersistence {
+  hasParticipationBan(githubId: string): Promise<boolean>;
+  createRun(input: CreateRunInput): Promise<PersistenceResult<TraceRun>>;
+  getRun(runId: string): Promise<TraceRun | null>;
+  reserveTraceWrite(
+    input: Pick<AttachTraceInput, "runId" | "githubId" | "object">,
+  ): Promise<boolean>;
+  attachTrace(input: AttachTraceInput): Promise<PersistenceResult<TraceRun>>;
+  finalizeRun(
+    runId: string,
+    githubId: string,
+    finalizedAt: string,
+  ): Promise<TraceRun | null>;
+  appendEvent(
+    event: RunProgressEvent & { idempotencyKey: string },
+  ): Promise<PersistenceResult<RunProgressEvent>>;
+  getTraceObject(sha256: string): Promise<TraceObject | null>;
+  createUploadIntent(
+    intent: TraceUploadIntent,
+  ): Promise<PersistenceResult<TraceUploadIntent>>;
+  getUploadIntent(
+    tokenHash: string,
+    now: string,
+  ): Promise<TraceUploadIntent | null>;
+  putTraceBytes(object: TraceObject, bytes: Uint8Array): Promise<void>;
+  writeAudit(input: AuditInput): Promise<void>;
+  /** Atomically commits a wallet claim and its required audit event. */
+  createWalletClaim(
+    claim: WalletClaim,
+    audit: AuditInput,
+  ): Promise<PersistenceResult<WalletClaim>>;
+  getWalletClaim(claimId: string): Promise<WalletClaim | null>;
+  createWalletPossessionChallenge(
+    record: WalletPossessionChallengeRecord,
+  ): Promise<void>;
+  /** Atomically consumes an unconsumed, unexpired challenge exactly once. */
+  consumeWalletPossessionChallenge(
+    challengeId: string,
+    consumedAt: string,
+  ): Promise<WalletPossessionChallengeRecord | null>;
+  createWalletPossessionAttestation(
+    record: WalletPossessionAttestationRecord,
+    audit: AuditInput,
+  ): Promise<PersistenceResult<WalletPossessionAttestationRecord>>;
+  getWalletPossessionAttestation(
+    claimId: string,
+  ): Promise<WalletPossessionAttestationRecord | null>;
+  /** Returns the tip of the actor's claim lineage on one chain. */
+  getCurrentWalletClaim(
+    githubId: string,
+    chain: WalletChain,
+  ): Promise<WalletClaim | null>;
+}

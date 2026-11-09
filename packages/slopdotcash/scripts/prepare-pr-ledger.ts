@@ -1,0 +1,523 @@
+/**
+ * Adapts the currently deployed public ledger for untrusted pull-request
+ * browser checks when a schema migration has landed in code before production.
+ * Trusted main builds always regenerate from GitHub and never call this.
+ */
+
+import { mkdir, rename, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import {
+  assertLeaderboardSnapshot,
+  assignLeaderboardRanks,
+  compareRankedEntries,
+  createLeaderboardSnapshot,
+  LEADERBOARD_SCHEMA_VERSION,
+  type LeaderboardEntry,
+  type LeaderboardSnapshot,
+  leaderboardMethodology,
+  SCORE_RULE_VERSION,
+  SCORE_V2_EFFECTIVE_AT,
+  type ScoreEvent,
+} from "../src/lib/leaderboard";
+import { isUnavailableModelIdentifier } from "../src/lib/model-identity";
+import { findProject } from "../src/lib/projects.mjs";
+import {
+  REGISTERED_REPOSITORIES,
+  TARGET_REPOSITORIES,
+} from "../src/lib/repositories.mjs";
+import { readLeaderboardFile } from "./leaderboard-files.mjs";
+
+type JsonRecord = Record<string, unknown>;
+
+const PUBLISHED_REPOSITORY_KEYS = [
+  "id",
+  "owner",
+  "name",
+  "displayName",
+  "githubUrl",
+  "description",
+  "integrationBranch",
+  "projectId",
+  "role",
+] as const;
+
+function record(value: unknown, field: string): JsonRecord {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`${field} must be an object`);
+  }
+  return value as JsonRecord;
+}
+
+function array(value: unknown, field: string): unknown[] {
+  if (!Array.isArray(value)) throw new TypeError(`${field} must be an array`);
+  return value;
+}
+
+function rebindTransferredRepositoryPresentation(
+  candidate: JsonRecord,
+): JsonRecord {
+  const repositories = array(candidate.repositories, "snapshot.repositories");
+  let changed = false;
+  const reboundRepositories = repositories.map((value, index) => {
+    const path = `snapshot.repositories[${index}]`;
+    const deployed = record(value, path);
+    const current = REGISTERED_REPOSITORIES.find(
+      (repository) => repository.id === deployed.id,
+    );
+    if (!current) throw new TypeError(`${path}.id is not registered`);
+    if (
+      Object.keys(deployed).length !== PUBLISHED_REPOSITORY_KEYS.length ||
+      PUBLISHED_REPOSITORY_KEYS.some((key) => !Object.hasOwn(deployed, key))
+    ) {
+      throw new TypeError(`${path} must publish exactly the registry fields`);
+    }
+    for (const key of [
+      "id",
+      "description",
+      "integrationBranch",
+      "projectId",
+    ] as const) {
+      if (deployed[key] !== current[key]) {
+        throw new TypeError(`${path}.${key} cannot change during a transfer`);
+      }
+    }
+    const deployedIdentity = `${String(deployed.owner)}/${String(deployed.name)}`;
+    if (
+      ![current.id, ...current.aliases].some(
+        (identity) => identity.toLowerCase() === deployedIdentity.toLowerCase(),
+      ) ||
+      deployed.displayName !== deployedIdentity ||
+      deployed.githubUrl !== `https://github.com/${deployedIdentity}`
+    ) {
+      throw new TypeError(
+        `${path} is not a registered stable repository identity or alias`,
+      );
+    }
+    changed ||= PUBLISHED_REPOSITORY_KEYS.some(
+      (key) => deployed[key] !== current[key],
+    );
+    const {
+      aliases: _aliases,
+      expectedNodeId: _expectedNodeId,
+      ...published
+    } = current;
+    // This role belongs to the retained ledger's collection order. A newer
+    // registry can reorder projects without changing these source records.
+    return { ...published, role: deployed.role };
+  });
+  return changed
+    ? { ...candidate, repositories: reboundRepositories }
+    : candidate;
+}
+
+/**
+ * A project activated in code has no collected rows in the deployed ledger
+ * yet. Insert its repositories, in registry order and without events, so the
+ * pull-request checks see the current target registry. Trusted builds collect
+ * the repository from GitHub instead.
+ */
+function addActivatedRepositories(candidate: JsonRecord): JsonRecord {
+  const repositories = array(candidate.repositories, "snapshot.repositories");
+  const source = record(candidate.source, "snapshot.source");
+  const sourceRepositories = array(
+    source.repositories,
+    "snapshot.source.repositories",
+  );
+  const deployedIds = repositories.map(
+    (value, index) => record(value, `snapshot.repositories[${index}]`).id,
+  );
+  const targetIds = TARGET_REPOSITORIES.map((repository) => repository.id);
+  let cursor = 0;
+  for (const id of deployedIds) {
+    cursor = targetIds.indexOf(String(id), cursor);
+    if (cursor < 0) return candidate;
+    cursor += 1;
+  }
+  if (deployedIds.length === targetIds.length) return candidate;
+  const nextRepositories: unknown[] = [];
+  const nextSourceRepositories: unknown[] = [];
+  for (const target of TARGET_REPOSITORIES) {
+    const index = deployedIds.indexOf(target.id);
+    if (index >= 0) {
+      nextRepositories.push(repositories[index]);
+      nextSourceRepositories.push(sourceRepositories[index]);
+      continue;
+    }
+    const project = findProject(target.projectId);
+    if (project?.repositories[0]?.id !== target.id) {
+      throw new TypeError(
+        `activated repository ${target.id} has no recorded GraphQL node ID`,
+      );
+    }
+    const {
+      aliases: _aliases,
+      expectedNodeId: _expectedNodeId,
+      ...published
+    } = target;
+    nextRepositories.push(published);
+    nextSourceRepositories.push({
+      id: target.id,
+      repositoryId: project.authority.repositoryNodeId,
+    });
+  }
+  return {
+    ...candidate,
+    repository: record(nextRepositories[0], "primary repository").id,
+    repositories: nextRepositories.map((entry, index) => ({
+      ...record(entry, "repository"),
+      role: index === 0 ? "primary" : "member",
+    })),
+    source: {
+      ...source,
+      repositoryId: record(nextSourceRepositories[0], "primary source")
+        .repositoryId,
+      repositories: nextSourceRepositories,
+    },
+  };
+}
+
+function actorId(value: unknown): string {
+  const actor = record(value, "actor");
+  if (typeof actor.id !== "string" || actor.id.length === 0) {
+    throw new TypeError("actor.id must be a non-empty string");
+  }
+  return actor.id;
+}
+
+function eventThirds(event: ScoreEvent): number {
+  return event.scoreThirds ?? event.points * 3;
+}
+
+function v2WorkUnit(event: ScoreEvent): string {
+  const repository = REGISTERED_REPOSITORIES.find(
+    (candidate) => candidate.id === event.repository,
+  );
+  if (!repository)
+    throw new TypeError(`unknown repository ${event.repository}`);
+  return `wu_${repository.projectId}_${event.source.id
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/gu, "_")}`;
+}
+
+function migrateEvent(value: unknown): ScoreEvent | null {
+  const event = record(value, "ledger event") as unknown as ScoreEvent;
+  if (
+    typeof event.occurredAt !== "string" ||
+    Date.parse(event.occurredAt) < Date.parse(SCORE_V2_EFFECTIVE_AT)
+  ) {
+    return event;
+  }
+  if (
+    event.category !== "merged-pull-request" &&
+    event.category !== "evaluated-contribution"
+  ) {
+    return null;
+  }
+  const scoreThirds =
+    event.category === "merged-pull-request"
+      ? 1
+      : Math.max(1, Math.round(event.points * 3));
+  return {
+    ...event,
+    points: scoreThirds / 3,
+    scoreThirds,
+    workUnitId: v2WorkUnit(event),
+    reason:
+      event.category === "merged-pull-request"
+        ? "Accepted outcome has provisional micro credit pending immutable maintainer ratification."
+        : "Reviewed evaluated contribution migrated to integer-thirds credit.",
+  };
+}
+
+function rebuildLeaders(
+  legacyLeaders: unknown[],
+  ledger: ScoreEvent[],
+  attributions: unknown[],
+): LeaderboardEntry[] {
+  const legacyByActor = new Map(
+    legacyLeaders.map((value) => {
+      const leader = record(value, "legacy leader");
+      return [actorId(leader.actor), leader];
+    }),
+  );
+  const eventsByActor = new Map<string, ScoreEvent[]>();
+  for (const event of ledger) {
+    const id = actorId(event.actor);
+    const events = eventsByActor.get(id) ?? [];
+    events.push(event);
+    eventsByActor.set(id, events);
+  }
+  const reportedModelsByActor = new Map<string, Set<string>>();
+  for (const value of attributions) {
+    const attribution = record(value, "attribution");
+    if (attribution.actor === null) continue;
+    const id = actorId(attribution.actor);
+    if (typeof attribution.identifier !== "string") {
+      throw new TypeError("attribution.identifier must be a string");
+    }
+    if (isUnavailableModelIdentifier(attribution.model)) continue;
+    const identifiers = reportedModelsByActor.get(id) ?? new Set<string>();
+    identifiers.add(attribution.identifier);
+    reportedModelsByActor.set(id, identifiers);
+  }
+  const leaders = [...eventsByActor.entries()].map(([id, events]) => {
+    const legacy = legacyByActor.get(id);
+    if (!legacy) throw new TypeError(`ledger actor ${id} has no legacy leader`);
+    const pointThirds: LeaderboardEntry["pointThirds"] = {
+      mergedPullRequests: 0,
+      resolvedIssues: 0,
+      materialTestChanges: 0,
+      evidence: 0,
+      substantiveReviews: 0,
+      evaluatedContributions: 0,
+    };
+    const acceptedOutcomes: LeaderboardEntry["acceptedOutcomes"] = {
+      mergedPullRequests: 0,
+      resolvedIssues: 0,
+      materialTestChanges: 0,
+      evidenceCategories: 0,
+      substantiveReviews: 0,
+      evaluatedContributions: 0,
+    };
+    for (const event of events) {
+      const thirds = eventThirds(event);
+      if (event.category === "merged-pull-request") {
+        pointThirds.mergedPullRequests += thirds;
+        acceptedOutcomes.mergedPullRequests += 1;
+      } else if (event.category === "resolved-issue") {
+        pointThirds.resolvedIssues += thirds;
+        acceptedOutcomes.resolvedIssues += 1;
+      } else if (event.category === "material-test-change") {
+        pointThirds.materialTestChanges += thirds;
+        acceptedOutcomes.materialTestChanges += 1;
+      } else if (event.category === "evidence") {
+        pointThirds.evidence += thirds;
+        acceptedOutcomes.evidenceCategories += 1;
+      } else if (event.category === "substantive-review") {
+        pointThirds.substantiveReviews += thirds;
+        acceptedOutcomes.substantiveReviews += 1;
+      } else {
+        pointThirds.evaluatedContributions += thirds;
+        acceptedOutcomes.evaluatedContributions += 1;
+      }
+    }
+    const scoreThirds = Object.values(pointThirds).reduce(
+      (total, thirds) => total + thirds,
+      0,
+    );
+    return {
+      rank: 0,
+      actor: legacy.actor as LeaderboardEntry["actor"],
+      score: Math.floor(scoreThirds / 3),
+      scoreThirds,
+      points: {
+        mergedPullRequests: pointThirds.mergedPullRequests / 3,
+        resolvedIssues: pointThirds.resolvedIssues / 3,
+        materialTestChanges: pointThirds.materialTestChanges / 3,
+        evidence: pointThirds.evidence / 3,
+        substantiveReviews: pointThirds.substantiveReviews / 3,
+        evaluatedContributions: pointThirds.evaluatedContributions / 3,
+      },
+      pointThirds,
+      acceptedOutcomes,
+      rawActivity: legacy.rawActivity as LeaderboardEntry["rawActivity"],
+      reportedModels: [...(reportedModelsByActor.get(id) ?? [])].sort(
+        (left, right) => left.localeCompare(right),
+      ),
+    };
+  });
+  leaders.sort(compareRankedEntries);
+  assignLeaderboardRanks(leaders);
+  return leaders;
+}
+
+function retainCausalAttributions(
+  values: unknown[],
+  ledger: ScoreEvent[],
+): unknown[] {
+  const causalKeys = new Set<string>();
+  const resolvedArtifacts = new Set<string>();
+  for (const event of ledger) {
+    const id = actorId(event.actor);
+    if (event.source.kind === "pull-request") {
+      causalKeys.add(`${id}\0artifact\0${event.source.id}`);
+    }
+    if (
+      (event.category === "substantive-review" &&
+        event.source.kind === "review") ||
+      (event.category === "evaluated-contribution" &&
+        event.source.kind === "comment")
+    ) {
+      causalKeys.add(`${id}\0source\0${event.source.id}`);
+    }
+    if (event.category === "resolved-issue") {
+      const separator = ":resolved-by:";
+      const index = event.id.lastIndexOf(separator);
+      if (index >= 0) {
+        resolvedArtifacts.add(
+          `${id}\0${event.id.slice(index + separator.length)}`,
+        );
+      }
+    }
+  }
+  return values.filter((value) => {
+    const attribution = record(value, "attribution");
+    if (attribution.actor === null) return false;
+    const id = actorId(attribution.actor);
+    return (
+      causalKeys.has(`${id}\0artifact\0${String(attribution.artifactId)}`) ||
+      causalKeys.has(`${id}\0source\0${String(attribution.sourceId)}`) ||
+      resolvedArtifacts.has(`${id}\0${String(attribution.artifactId)}`)
+    );
+  });
+}
+
+/**
+ * With no active project nothing is collected, so the deployed rows belong to
+ * no current repository. Rebuild the empty snapshot over the deployed window.
+ */
+function emptyRegistryLedger(input: JsonRecord): LeaderboardSnapshot {
+  const window = record(input.window, "snapshot.window");
+  const source = record(input.source, "snapshot.source");
+  const rateLimit = record(source.rateLimit, "snapshot.source.rateLimit");
+  const evidence = record(
+    source.evidenceVerification,
+    "snapshot.source.evidenceVerification",
+  );
+  const generatedAt = String(input.generatedAt);
+  const windowFrom = String(window.from);
+  const windowTo = String(window.to);
+  return createLeaderboardSnapshot({
+    generatedAt,
+    windowFrom,
+    windowTo,
+    sourceUpdatedAt: windowTo,
+    source: {
+      provider: "github-graphql",
+      fetchedAt: generatedAt,
+      cutoffAt: windowTo,
+      repositoryId: null,
+      repositories: [],
+      requestCount: 1,
+      searchSliceCount: 0,
+      rateLimit: {
+        cost: Number(rateLimit.cost),
+        limit: Number(rateLimit.limit),
+        remaining: Number(rateLimit.remaining),
+        resetAt: String(rateLimit.resetAt),
+      },
+      counts: {
+        mergedPullRequests: 0,
+        detailedMergedPullRequests: 0,
+        closedIssues: 0,
+        detailedClosedIssues: 0,
+        resolvedIssues: 0,
+        openIssues: 0,
+        openPullRequests: 0,
+      },
+      verificationWindow: {
+        days: Number(window.days),
+        from: windowFrom,
+        to: windowTo,
+      },
+      evidenceVerification: {
+        status: "complete",
+        sourceCount: 0,
+        artifactCount: 0,
+        maxSources: Number(evidence.maxSources),
+        maxArtifacts: Number(evidence.maxArtifacts),
+      },
+    },
+    mergedPullRequestOutcomes: [],
+    mergedPullRequests: [],
+    reviewedMergedPullRequests: [],
+    detailEligibleMergedPullRequestIds: [],
+    closedIssueCount: 0,
+    resolvedIssues: [],
+    openIssues: [],
+    openPullRequests: [],
+    verificationWindowFrom: windowFrom,
+    verifiedEvidence: [],
+    evaluatedContributions: [],
+  });
+}
+
+export function preparePullRequestLedger(value: unknown): LeaderboardSnapshot {
+  const input = record(value, "snapshot");
+  if (
+    typeof input.generatedAt !== "string" ||
+    Date.parse(input.generatedAt) > Date.now() + 5 * 60 * 1000
+  ) {
+    throw new TypeError("snapshot.generatedAt cannot be in the future");
+  }
+  if (TARGET_REPOSITORIES.length === 0) return emptyRegistryLedger(input);
+  const candidate = addActivatedRepositories(
+    rebindTransferredRepositoryPresentation(record(value, "snapshot")),
+  );
+  if (candidate.schemaVersion === LEADERBOARD_SCHEMA_VERSION) {
+    assertLeaderboardSnapshot(candidate);
+    const leaders = candidate.leaders
+      .map((leader) => ({ ...leader }))
+      .sort(compareRankedEntries);
+    assignLeaderboardRanks(leaders);
+    return { ...candidate, leaders };
+  }
+  if (candidate.schemaVersion !== "5") {
+    throw new TypeError("deployed ledger is not schema 5 or 6");
+  }
+  const ledger = array(candidate.ledger, "snapshot.ledger")
+    .map(migrateEvent)
+    .filter((event): event is ScoreEvent => event !== null)
+    .sort(
+      (left, right) =>
+        right.points - left.points ||
+        left.source.number - right.source.number ||
+        left.id.localeCompare(right.id),
+    );
+  const attributions = retainCausalAttributions(
+    array(candidate.attributions, "snapshot.attributions"),
+    ledger,
+  );
+  const snapshot = {
+    ...candidate,
+    schemaVersion: LEADERBOARD_SCHEMA_VERSION,
+    ruleVersion: SCORE_RULE_VERSION,
+    methodology: leaderboardMethodology(),
+    leaders: rebuildLeaders(
+      array(candidate.leaders, "snapshot.leaders"),
+      ledger,
+      attributions,
+    ),
+    ledger,
+    attributions,
+  };
+  assertLeaderboardSnapshot(snapshot);
+  return snapshot as unknown as LeaderboardSnapshot;
+}
+
+async function main(): Promise<void> {
+  if (process.argv.length !== 4) {
+    throw new TypeError("Usage: prepare-pr-ledger.ts <input> <output>");
+  }
+  const input = resolve(process.argv[2]);
+  const output = resolve(process.argv[3]);
+  const parsed: unknown = JSON.parse(
+    new TextDecoder("utf-8", { fatal: true }).decode(
+      await readLeaderboardFile(input),
+    ),
+  );
+  const snapshot = preparePullRequestLedger(parsed);
+  await mkdir(dirname(output), { recursive: true });
+  const temporary = `${output}.tmp-${process.pid}`;
+  await writeFile(temporary, `${JSON.stringify(snapshot)}\n`, {
+    flag: "wx",
+  });
+  await rename(temporary, output);
+  process.stdout.write(
+    `[Slop] prepared schema ${snapshot.schemaVersion} pull-request ledger from deployed public data\n`,
+  );
+}
+
+if (import.meta.main) {
+  await main();
+}

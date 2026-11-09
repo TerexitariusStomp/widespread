@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "1",
+  "projectId": "canonry",
+  "repositoryId": "Canonry/canonry",
+  "skillName": "contribute-to-canonry",
+  "skillSourcePath": "skills/contribute-to-canonry",
+  "publicOrigin": "https://slop.cash/projects/canonry",
+  "policyAuthority": "https://slop.cash",
+  "usageAdapters": {
+    "codex": "codex",
+    "claude-code": "claude",
+    "grok-build": "grok"
+  }
+}
