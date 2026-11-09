@@ -7,7 +7,7 @@ Registers:
   real directories, mic/camera, speech-to-text, wake lock, periodic sync
   (``_pwa.py``).
 - ``near`` toolset: NEAR wallet/payments — vault-custodied keys, policy-gated
-  sends, x402 paid fetch, Agent Market hiring, intents, TEE attestation
+  sends, x402 paid fetch, Agent Market hiring, intents quotes, TEE attestation
   (``_near.py``).
 - ``wasi`` terminal environment provider: real WASI userspace in-page
   (``_env.py``), selectable via ``terminal.backend: wasi``.
@@ -44,5 +44,5 @@ def register(ctx) -> None:
     ctx.register_skill(
         "near",
         Path(__file__).parent / "skills" / "near" / "SKILL.md",
-        description="Spend and earn on NEAR under the owner's spending policy — vault keys, x402 payments, intents, TEE attestation.",
+        description="Spend and earn on NEAR under the owner's spending policy — vault keys, x402 payments, intents quotes, TEE attestation.",
     )

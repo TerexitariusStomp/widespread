@@ -34,7 +34,7 @@ oracle proof → contract `release()` → contributor paid.
 | `packages/oracle/` | `oracle.ts` (ed25519 verdict signing) + `adjudicator.ts` (NEAR AI Cloud `provider_tee` path) — vendored from the bridge | `widespread-bridge` Worker |
 | `packages/agent/` | `_widespread.py` — the 10-tool `wide_*` toolset for the Hermes agent (discover → claim → ship → get paid) + `SKILL.md` | `near-hermes-browser` plugin |
 | `packages/bot/` | `index.js` — `@widespread $N for <spec>` GitHub App; **merge=accept** → payout | `widespread-bot` probot app |
-| `packages/intents/` | `intents.js` — NEAR Intents 1Click quote→deposit→settle rail (verify-before-credit) | `widespread-solana` rail |
+| `packages/intents/` | `intents.js` — NEAR Intents 1Click quote/status reads (indicative only; no settlement execution) | `widespread-solana` rail |
 
 Canonical homes (deployed/proven): the contract deploys from this repo;
 the oracle+adjudicator run on `widespread-bridge` (Cloudflare Worker);
@@ -79,7 +79,7 @@ node release.js settle <mkt> <sig> <pub> # oracle-signed release → pays claima
   merge=accept bot, the release tooling.
 - **Baseline (pre-window, disclosed):** `widespread-bridge` claim→verdict→
   payout pipeline, `delta-git` forge op-logs, `widespread-runner` sealed
-  executor, `widespread-solana` PYUSD/Aurora rail. Listed as dependencies,
+  executor, `widespread-solana` Intents quote rail. Listed as dependencies,
   not claimed as new work.
 
 ## What we learned

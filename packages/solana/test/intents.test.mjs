@@ -1,10 +1,9 @@
-// intents.test.mjs — hermetic tests for the NEAR Intents leg.
-// globalThis.fetch is stubbed: quote payload shape, status parsing,
-// and the settlement gate (only confirmed statuses count as paid).
+// intents.test.mjs — hermetic tests for the NEAR Intents quote/status reads.
+// globalThis.fetch is stubbed: quote payload shape and status parsing.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TOKENS, quote, getStatus, waitSettled } from '../src/intents.js';
+import { TOKENS, quote, getStatus } from '../src/intents.js';
 
 const realFetch = globalThis.fetch;
 
@@ -61,44 +60,4 @@ test('getStatus parses the deposit-address status endpoint', async () => {
   });
   const s = await getStatus('dep9');
   assert.equal(s.status, 'SUCCESS');
-});
-
-test('waitSettled only accepts confirmed statuses', async () => {
-  const seq = [
-    { status: 'PENDING' },
-    { status: 'SETTLED' },
-  ];
-  let i = 0;
-  stubFetch(() => seq[Math.min(i++, seq.length - 1)]);
-  const r = await waitSettled('depX', { tries: 5, gapMs: 1 });
-  assert.equal(r.settled, true);
-  assert.equal(r.status.status, 'SETTLED');
-});
-
-test('waitSettled treats refunds/failures as not settled', async () => {
-  stubFetch(() => ({ status: 'REFUNDED' }));
-  const r = await waitSettled('depY', { tries: 2, gapMs: 1 });
-  assert.equal(r.settled, false);
-});
-
-test('waitSettled times out on stuck quotes', async () => {
-  stubFetch(() => ({ status: 'PENDING' }));
-  const r = await waitSettled('depZ', { tries: 2, gapMs: 1 });
-  assert.equal(r.settled, false);
-  assert.equal(r.status, 'timeout');
-});
-
-test('intentsPayout returns deposit address + settle closure', async () => {
-  const { intentsPayout } = await import('../src/intents.js');
-  stubFetch((url) => {
-    if (url.endsWith('/quote')) return { depositAddress: 'depQ', amountOut: '4.9' };
-    return { status: 'SUCCESS' };
-  });
-  const p = await intentsPayout({
-    assetIn: TOKENS.SOL_USDC, assetOut: 'x', amount: 5, recipient: 'r',
-  });
-  assert.equal(p.depositAddress, 'depQ');
-  assert.equal(p.amountOut, '4.9');
-  const s = await p.settle();
-  assert.equal(s.settled, true);
 });

@@ -37,7 +37,8 @@ Built on NEAR in-window:
   `near:mainnet`/`near:testnet` (NEP-366 delegate + facilitator-settled
   NEP-141 payment — the agent pays APIs per request); `near_hire_agent`
   hires listed agents on NEAR Agent Market over A2A+x402 with escrow;
-  `near_intents_*` drives 1Click quotes and deposit settlement.
+  `near_intents_*` drives 1Click quotes and status reads (quote-only —
+  no deposit execution).
 - **Private inference, verifiable**: `near-ai-cloud` is a first-class
   provider (`https://cloud-api.near.ai/v1`, Confidential-TEE models ≥64K
   ctx); `near_attest` fetches TEE attestation evidence and the public

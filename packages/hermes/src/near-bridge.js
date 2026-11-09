@@ -25,7 +25,7 @@
  *   provision, policyGet, policySet,
  *   account, view, signSend, signMessage, delegate,
  *   x402Fetch, a2aCard, a2aHire,
- *   intentsTokens, intentsQuote, intentsExecute, intentsStatus,
+ *   intentsTokens, intentsQuote, intentsStatus,
  *   attest
  */
 
@@ -37,8 +37,6 @@ const RPC = {
 // x402 speaks CAIP ('near:mainnet'); policy + RPC speak 'mainnet'.
 const toNet = (n) => String(n || '').replace(/^near:/, '') || 'mainnet'
 const toCaip = (n) => (String(n || '').startsWith('near:') ? n : `near:${toNet(n)}`)
-const INTENTS_DEPOSIT_GAS = 30000000000000n
-const ONE_CLICK = 'https://1click.chaindefuser.com'
 const NEAR_AI_API = 'https://cloud-api.near.ai/v1'
 
 // Deny-by-default: until the owner provisions or sets a policy, every spend
@@ -498,7 +496,9 @@ const OPS = {
       apiKey: a.apiKey || undefined,
     })
     const body = {
-      dry: a.dry !== false,
+      // Quote-only surface: always dry — no deposit address is ever minted
+      // through this bridge (settlement execution was removed).
+      dry: true,
       swapType: a.swapType || 'EXACT_INPUT',
       slippageTolerance: a.slippageTolerance || 100,
       originAsset: a.originAsset,
@@ -512,32 +512,6 @@ const OPS = {
       deadline: a.deadline || new Date(Date.now() + 3600e3).toISOString(),
     }
     return { quote: await client.quote(body) }
-  },
-
-  // Executes the deposit leg of an ORIGIN_CHAIN quote: ft_transfer the
-  // exact input to the quote's depositAddress (policy-checked like any
-  // other spend). Returns the deposit tx; status tracked via intentsStatus.
-  async intentsExecute(ctx, grant, a) {
-    const near = await sdk()
-    const q = await OPS.intentsQuote(ctx, grant, { ...a, dry: false })
-    if (q.error) return q
-    const quote = q.quote && (q.quote.quote || q.quote)
-    const depositAddress = quote && (quote.depositAddress || (quote.quoteRequest || {}).depositAddress)
-    if (!depositAddress) return { error: 'no depositAddress in quote', quote: q.quote }
-    const amountIn = String(quote.amountIn || a.amount)
-    const send = await OPS.signSend(ctx, grant, {
-      handle: a.handle, accountId: a.accountId, network: a.network || 'mainnet',
-      receiverId: a.tokenContract,
-      actions: [{
-        type: 'functionCall', methodName: 'ft_transfer',
-        args: {
-          receiver_id: depositAddress, amount: amountIn,
-          ...(quote.depositMemo ? { memo: quote.depositMemo } : {}),
-        },
-        gas: INTENTS_DEPOSIT_GAS.toString(), deposit: '1',
-      }],
-    })
-    return { depositAddress, amountIn, send }
   },
 
   async intentsStatus(ctx, grant, a) {

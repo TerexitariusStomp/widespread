@@ -1,7 +1,7 @@
-// intents.js — NEAR Intents settlement leg (the $3K bounty integration).
-// Payer funds → quote → deposit → solvers settle to the contributor on
-// Solana (or any chain). Settlement ONLY counts after confirmed status —
-// post-Oct-2026-incident discipline: never credit on deposit alone.
+// intents.js — NEAR Intents quote/status reads (1Click Swap API).
+// Quote-only surface: callers get indicative prices and can poll a
+// deposit's status, but this module never submits deposits or executes
+// settlement — that leg is intentionally absent.
 
 // NEAR Intents 1Click Swap API (defuse/chaindefuser infra) — the current
 // public rail. Replaces the legacy intents-api.aurora.dev endpoint which
@@ -19,7 +19,8 @@ export async function getTokens() {
   return r.json();
 }
 
-// Request a quote: assetIn → assetOut to `recipient` on `destChain`.
+// Request an indicative quote: assetIn → assetOut to `recipient` on
+// `destChain`. dry:true — a preview only, never a deposit instruction.
 export async function quote({ assetIn, assetOut, amount, recipient, destChain, refundTo }) {
   const r = await fetch(`${API}/quote`, {
     method: 'POST',
@@ -40,34 +41,13 @@ export async function quote({ assetIn, assetOut, amount, recipient, destChain, r
     }),
   });
   if (!r.ok) throw new Error(`quote: HTTP ${r.status} ${await r.text()}`);
-  return r.json(); // → depositAddress, estimated output, fees
+  return r.json(); // → indicative output, fees
 }
 
-// Settlement is only real when the solver CONFIRMS — poll status.
+// Read-only settlement status for a deposit address — a single status
+// lookup, no polling loop.
 export async function getStatus(depositAddress) {
   const r = await fetch(`${API}/status?depositAddress=${encodeURIComponent(depositAddress)}`);
   if (!r.ok) throw new Error(`status: HTTP ${r.status}`);
   return r.json();
-}
-
-export async function waitSettled(depositAddress, { tries = 20, gapMs = 8000 } = {}) {
-  for (let i = 0; i < tries; i++) {
-    const s = await getStatus(depositAddress);
-    const st = s.status || s.state;
-    if (/success|settled|completed/i.test(st)) return { settled: true, status: s };
-    if (/refund|fail/i.test(st)) return { settled: false, status: s };
-    await new Promise((r) => setTimeout(r, gapMs));
-  }
-  return { settled: false, status: 'timeout' };
-}
-
-// Full leg: quote → (caller deposits) → waitSettled → true payout.
-export async function intentsPayout(opts) {
-  const q = await quote(opts);
-  return {
-    depositAddress: q.depositAddress || q.deposit_address,
-    amountOut: q.amountOut || q.amount_out,
-    quote: q,
-    settle: () => waitSettled(q.depositAddress || q.deposit_address),
-  };
 }

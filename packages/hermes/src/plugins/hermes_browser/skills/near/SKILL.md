@@ -16,7 +16,7 @@ value-moving call is gated by a spending policy the human owner approved.
    the vault and bound to your session grant.
 3. Work inside the policy: `near_account`/`near_view` are free reads;
    `near_send`/`near_transfer`/`near_pay`/`near_hire_agent`/
-   `near_intents_execute` are policy-gated.
+   `near_intents_*` are read-only quotes.
 4. Denials are honest limits. If a call returns `policy_denied` or
    `near_policy_unset`, report it to the user — do not retry, reshape or
    escalate. The owner can raise caps; you cannot.
@@ -28,9 +28,9 @@ value-moving call is gated by a spending policy the human owner approved.
   pay no gas. Policy caps apply to the discovered price before signing.
 - `near_agent_card` then `near_hire_agent` — hire a listed agent on NEAR
   Agent Market (A2A protocol); payment escrows until it delivers.
-- `near_intents_quote` (dry) → `near_intents_execute` — cross-chain swap:
-  the exact input goes to the quote's deposit address through the same
-  policy gate.
+- `near_intents_tokens` / `near_intents_quote` (always dry) /
+  `near_intents_status` — cross-chain swap quotes and status reads only;
+  deposit execution is not available.
 
 ## Private inference proof
 

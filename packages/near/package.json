@@ -9,7 +9,6 @@
     "deploy": "cd contracts/market && node deploy.js"
   },
   "dependencies": {
-    "@seer-pm/sdk": "^0.0.20",
     "chainsig.js": "^1.1.16",
     "esbuild": "^0.24.0",
     "near-api-js": "^7.4.0",

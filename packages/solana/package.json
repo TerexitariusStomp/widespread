@@ -3,16 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Widespread on Solana \u2014 PYUSD bounty escrow + content-hash anchored payouts on devnet",
+  "description": "Widespread on Solana \u2014 NEAR Intents quote/status reads",
   "scripts": {
-    "payout": "node src/payout.js",
-    "anchor": "node src/anchor.js",
     "test": "node --test test/*.test.mjs"
-  },
-  "dependencies": {
-    "@solana/spl-token": "^0.4.0",
-    "@solana/web3.js": "^1.95.0",
-    "bip39": "^3.1.2",
-    "ed25519-hd-key": "^2.0.0"
   }
 }

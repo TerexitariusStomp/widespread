@@ -241,8 +241,8 @@ _SCHEMAS: Dict[str, Dict[str, Any]] = {
     },
     "near_intents_quote": {
         "name": "near_intents_quote",
-        "description": "Quote a cross-chain swap via NEAR Intents 1Click. dry=true (default) "
-                       "previews price without creating a deposit address.",
+        "description": "Quote a cross-chain swap via NEAR Intents 1Click — always a "
+                       "dry preview; deposit execution is not available.",
         "parameters": {"type": "object", "properties": {
             "origin_asset": {"type": "string", "description": "e.g. 'nep141:wrap.near'"},
             "destination_asset": {"type": "string", "description": "e.g. 'nep141:usdt.tether-token.near'"},
@@ -250,24 +250,7 @@ _SCHEMAS: Dict[str, Dict[str, Any]] = {
             "swap_type": {"type": "string", "description": "EXACT_INPUT|EXACT_OUTPUT|FLEX_INPUT"},
             "account_id": {"type": "string", "description": "recipient/refund account"},
             "recipient": {"type": "string"},
-            "dry": {"type": "boolean", "description": "default true (preview only)"},
         }, "required": ["origin_asset", "destination_asset", "amount"]},
-    },
-    "near_intents_execute": {
-        "name": "near_intents_execute",
-        "description": "Execute an ORIGIN_CHAIN 1Click swap: gets a live quote, then pays the "
-                       "exact input to the quote's deposit address via ft_transfer — fully "
-                       "policy-gated like near_send. Returns deposit address + tx.",
-        "parameters": {"type": "object", "properties": {
-            "origin_asset": {"type": "string"},
-            "destination_asset": {"type": "string"},
-            "amount": {"type": "string"},
-            "token_contract": {"type": "string",
-                               "description": "NEP-141 contract of the origin asset"},
-            "handle": {"type": "string"}, "account_id": {"type": "string"},
-            "network": {"type": "string", "description": "default mainnet"},
-        }, "required": ["origin_asset", "destination_asset", "amount",
-                        "token_contract", "handle", "account_id"]},
     },
     "near_intents_status": {
         "name": "near_intents_status",
@@ -356,15 +339,7 @@ _BINDINGS = [
                         "amount": a.get("amount"),
                         "swapType": a.get("swap_type"),
                         "accountId": a.get("account_id"),
-                        "recipient": a.get("recipient"),
-                        "dry": a.get("dry", True)}), 60.0),
-    ("near_intents_execute", "intentsExecute",
-     _mapper(lambda a: {"originAsset": a.get("origin_asset"),
-                        "destinationAsset": a.get("destination_asset"),
-                        "amount": a.get("amount"),
-                        "tokenContract": a.get("token_contract"),
-                        "handle": a.get("handle"), "accountId": a.get("account_id"),
-                        "network": a.get("network")}), 300.0),
+                        "recipient": a.get("recipient")}), 60.0),
     ("near_intents_status", "intentsStatus",
      _mapper(lambda a: {"depositAddress": a.get("deposit_address")}), 30.0),
     ("near_attest", "attest",

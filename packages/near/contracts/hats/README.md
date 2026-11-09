@@ -78,5 +78,5 @@ identity systems should consume these, not storage internals:
   `/api/hats/:id/foreign` wraps this.
 - Chain-signature callbacks are asynchronous — poll `getSig({sigId})`
   until `status` leaves `requested`; request acceptance ≠ signature.
-- Intents settlement is only real after solver-confirmed status
-  (success/settled/completed) — same discipline as `widespread-solana`.
+- Intents quotes are indicative only; any settlement leg must verify
+  solver-confirmed status (success/settled/completed) before crediting.
