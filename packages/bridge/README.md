@@ -17,7 +17,7 @@ bridge /review → replay the hash chain → recompute each commit's real diff
 Workers AI adjudicator → {verdict, reasoning, confidence}
         ↓
 accept + confidence ≥ floor + valid chain → PayPal Payouts (sandbox) to the
-contributor's PayPal-linked email → PayPal transaction id on the dashboard
+contributor's PayPal-linked email → PayPal transaction id on `/ops`
         ↓
 receipt written back to the forge as a signed commit status (slopcash/payout)
 ```
@@ -37,19 +37,7 @@ receipt written back to the forge as a signed commit status (slopcash/payout)
    → see `{"verified":true,"ship":true,"op_seq":N}` and the entry in
    https://code.widespread.fyi/api/slop/slopdotcash/dg/oplog
 
-2. **Open a bounty** (PayPal sandbox recipient email):
-
-   ```bash
-   node scripts/seed-bounty.mjs \
-     --bridge https://slopcash-bridge.hardwoodstablecoin.workers.dev \
-     --repo slop/slopdotcash --email sb-you@personal.example.com \
-     --amount 25.00 --currency USD \
-     --spec "keeper's signed award payment lands after its binding commit"
-   ```
-
-   → see it under "Open bounties" on the dashboard.
-
-3. **Trigger the review**:
+2. **Trigger the review**:
 
    ```bash
    curl -X POST https://slopcash-bridge.hardwoodstablecoin.workers.dev/review \
@@ -61,14 +49,14 @@ receipt written back to the forge as a signed commit status (slopcash/payout)
    the model's `{verdict, reasoning, confidence}`, and the PayPal payout
    receipt (`batch_id`, `transaction_id`, `transaction_status`).
 
-4. **Watch it live** on the dashboard — open the demo URL; a pending claim
+3. **Watch it live** on `/ops` — open the demo URL; a pending claim
    card fills in left-to-right: claim → evidence → AI verdict → PayPal
-   receipt. The dashboard's own polling also drives claim pickup, so a new
+   receipt. The `/ops` page's own polling also drives claim pickup, so a new
    ship lands as a card without anyone calling `/review`. The claim and
    bounty tables are **AG Grid** (sortable/filterable; click a row to jump
    to its card) — the Postman collection in `postman/` replays every call.
 
-5. **Check the audit trail** — the payout receipt is written back to the
+4. **Check the audit trail** — the payout receipt is written back to the
    forge as a commit status:
 
    ```
@@ -76,7 +64,7 @@ receipt written back to the forge as a signed commit status (slopcash/payout)
    ```
 
    → `context: "slopcash/payout"` with the PayPal batch id and a link back to
-   the dashboard card.
+   the `/ops` card.
 
 ## Architecture
 
@@ -91,7 +79,7 @@ binding. No framework, no build step, ~600 lines of TypeScript.
 | `src/payouts.ts`     | **PayPal Payouts** — OAuth, `POST /v1/payments/payouts`, batch readback |
 | `src/writeback.ts`   | sign a `did:key` envelope, POST receipt to `/dg/status`              |
 | `src/review.ts`      | the pipeline: claim → evidence → verdict → payout → receipt          |
-| `src/dash.ts`        | dashboard HTML                                                       |
+| `src/web/pages.ts`  | web pages + `/ops` console                                            |
 
 Two safety invariants a model verdict cannot override: the hash chain must
 replay cleanly, and confidence must clear `MIN_CONFIDENCE`. Everything else —
@@ -118,8 +106,7 @@ are committed** — PayPal credentials and the agent key are Worker secrets only
 `PAYPAL_API_BASE` defaults to `api-m.sandbox.paypal.com`; a live PayPal app +
 `api-m.paypal.com` is the only change needed for real payouts. `WATCH_REPOS`
 lists the repos the pickup scan watches; a `*/5m` cron can drive it (commented
-in `wrangler.jsonc` — free tier is capped at 5 cron triggers/account) or the
-dashboard's `/api/state` polling does it opportunistically.
+in `wrangler.jsonc` — free tier is capped at 5 cron triggers/account) or the `/ops` page's `/api/state` polling does it opportunistically.
 
 ## Built with
 
@@ -134,7 +121,7 @@ dashboard's `/api/state` polling does it opportunistically.
   attestations in a hash-chained op-log, public commit-diff endpoints, and
   signed `did:key` agent envelopes for the receipt write-back.
 - **Cloudflare Workers + KV** — the whole service.
-- **AG Grid Community** — the dashboard's sortable/filterable claims and
+- **AG Grid Community** — the `/ops` page's sortable/filterable claims and
   bounties tables.
 - **Postman** — `postman/slopcash-bridge.postman_collection.json` replays the
   full demo (op-log read → bounty → review → receipt write-back).
@@ -150,7 +137,7 @@ dashboard's `/api/state` polling does it opportunistically.
 ## Demo video outline (2–4 min)
 
 1. `GET .../dg/oplog` — an agent's signed `dg-ship-1` claim just landed.
-2. Open the dashboard → the card appears: claim details, hash chain VALID,
+2. Open `/ops` → the card appears: claim details, hash chain VALID,
    recomputed diff stats matching the claim.
 3. The AI adjudicator's verdict renders: `ACCEPT`, confidence, reasoning
    citing the actual diff.

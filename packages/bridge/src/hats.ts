@@ -371,7 +371,7 @@ export async function hatsPayoutQuote(
     status: res.ok ? "quoted" : `http ${res.status}`,
     quote: data?.quote ?? data,
     upstream: data?.message ? { message: data.message } : undefined,
-    note: "dry quote only — settlement requires confirmed status via /v0/status; see intents.js waitSettled discipline. NEAR-native origins currently 500 upstream (omft assets quote fine).",
+    note: "indicative dry quote only — settlement requires confirmed status via /v0/status. NEAR-native origins currently 500 upstream (omft assets quote fine).",
   };
 }
 

@@ -53,7 +53,7 @@ describe.skipIf(!LIVE)("live E2E — deployed bridge", () => {
     const enc = encodeURIComponent(id);
     const html = await get(`/bounties/${enc}`);
     expect(html.res.status).toBe(200);
-    const md = await get(`/bounty.md?id=${enc}`);
+    const md = await get(`/bounties/${enc}.md`);
     expect(md.res.status).toBe(200);
     expect(md.res.headers.get("content-type")).toContain("text/markdown");
     expect(md.text).toContain("# ");

@@ -108,7 +108,7 @@ await step("verdict", async () => {
   return { status, settlement: body.settlement };
 });
 
-// 7. payout — PayPal Payouts USD (or PYUSD pending_ops without Paxos creds)
+// 7. payout — PayPal Payouts USD (PYUSD pending_ops queue when PayPal is unconfigured)
 await step("payout", async () => {
   const r = await post("/api/mirrors/payout", { mirror_id: MID });
   const { status, body } = await j(r);

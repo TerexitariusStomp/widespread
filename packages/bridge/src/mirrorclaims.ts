@@ -2,22 +2,21 @@
 //
 // The fiat path has no NEAR escrow: the funder's USD sits in our PayPal
 // (captured via /api/mirrors/capture), and settlement pays the winner in
-// PYUSD on Solana (or USD via PayPal Payouts as fallback). Claims reuse the
-// same forge-artifact validation as NEAR market claims — real submissions
-// only, forge-native identity, unlimited competition, attestation tokens.
+// USD via PayPal Payouts. Claims reuse the same forge-artifact validation
+// as NEAR market claims — real submissions only, forge-native identity,
+// unlimited competition, attestation tokens.
 //
 // Endpoints:
 //   POST /api/mirrors/claims   {mirror_id, forgeRef, ...} → validated claim
 //   GET  /api/mirrors/claims?mirror_id=…                  → list claims
 //   POST /api/mirrors/verdict  {mirror_id, claim_hash, accept, reasoning?}
-//                              → winner + net payout quote (PYUSD/USD)
+//                              → winner + net payout quote (USD)
 //   POST /api/mirrors/payout   {mirror_id}                → execute payout
 
 import type { Env, MirrorListing } from "./types";
 import { validateForgeSubmission, attestationForMirror } from "./claims";
 import { feedDoc } from "./feed";
 import { sendPayout } from "./payouts";
-import { paxosPyusdWithdraw } from "./paxos";
 
 const claimKey = (mirrorId: string, hash: string) => `mclaim:${mirrorId}:${hash}`;
 const claimsPrefix = (mirrorId: string) => `mclaim:${mirrorId}:`;
@@ -92,7 +91,7 @@ export async function handleMirrorClaimPost(req: Request, env: Env, ctx?: Execut
     actor: body.actor ?? evidence.forgeLogin ?? "agent",
     commits: body.commits ?? [],
     evidence,
-    payout: body.payout ?? null,   // {pyusd_solana_address} | {paypal_email}
+    payout: body.payout ?? null,   // {paypal_email}
     attested: !!token,
     created_at: Date.now(),
     status: "pending",
@@ -102,7 +101,7 @@ export async function handleMirrorClaimPost(req: Request, env: Env, ctx?: Execut
   return Response.json({
     ok: true, attested: !!token, claim,
     verification: { endpoint: "/api/claims/verify", token },
-    next: "Claim recorded. Verdict via POST /api/mirrors/verdict selects the winner; payout in PYUSD (Solana) or USD (PayPal).",
+    next: "Claim recorded. Verdict via POST /api/mirrors/verdict selects the winner; payout in USD via PayPal.",
   }, { status: 201 });
 }
 
@@ -147,8 +146,7 @@ export async function handleMirrorVerdict(req: Request, env: Env, ctx?: Executio
   // Auto-ingested claims carry payout:null — the verdict caller (payer or
   // ops) supplies the winner's payout address here.
   const payoutIn = (body.payout ?? claim.payout ?? {}) as {
-    pyusd_solana_address?: string; paypal_email?: string;
-    beneficiary?: Record<string, unknown>;
+    paypal_email?: string;
   };
   const settlement = {
     mirror_id: mirrorId,
@@ -157,11 +155,6 @@ export async function handleMirrorVerdict(req: Request, env: Env, ctx?: Executio
     face_usd: usd,
     platform_cut_usd: +(usd * cutBps / 10000).toFixed(2),
     net_usd: netUsd,
-    // PYUSD is $1-pegged, 6 decimals on Solana (Token-2022).
-    pyusd: payoutIn.pyusd_solana_address
-      ? { asset: "PYUSD", network: "solana", mint: "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",
-          amount: netUsd.toFixed(6), decimals: 6, to: payoutIn.pyusd_solana_address }
-      : null,
     paypal_usd: payoutIn.paypal_email
       ? { asset: "USD", rail: "paypal-payouts", amount: netUsd.toFixed(2), to: payoutIn.paypal_email }
       : null,
@@ -176,7 +169,7 @@ export async function handleMirrorVerdict(req: Request, env: Env, ctx?: Executio
   await env.CLAIMS.put(claimKey(mirrorId, claimHash), JSON.stringify(claim));
 
   return Response.json({ ok: true, settlement,
-    next: accept ? "POST /api/mirrors/payout {mirror_id} to send PYUSD/USD to the winner." : null });
+    next: accept ? "POST /api/mirrors/payout {mirror_id} to send USD to the winner via PayPal." : null });
 }
 
 export async function handleMirrorPayout(req: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
@@ -187,8 +180,9 @@ export async function handleMirrorPayout(req: Request, env: Env, ctx?: Execution
   if (!settlement || settlement.status !== "won") {
     return Response.json({ ok: false, error: "no winning settlement for this mirror" }, { status: 409 });
   }
-  // Terminal markers differ per rail: PayPal batch_id, Paxos transfer_id.
-  if (settlement.payout?.batch_id || settlement.payout?.transfer_id) {
+  // Terminal marker: PayPal batch_id (transaction_id also lands on the
+  // receipt once the batch read-back succeeds).
+  if (settlement.payout?.batch_id || settlement.payout?.transaction_id) {
     return Response.json({ ok: true, status: "already_paid", settlement });
   }
   // In-flight guard: mark "sending" before touching the rail so a
@@ -201,46 +195,8 @@ export async function handleMirrorPayout(req: Request, env: Env, ctx?: Execution
   await env.CLAIMS.put(settleKey(mirrorId), JSON.stringify(settlement));
 
   try {
-    // Payout rail priority: PYUSD on Solana via Paxos (licensed transmitter
-    // of record — sanctions screening + Travel Rule enforced by them) when
-    // the winner gave a Solana address; USD via PayPal Payouts otherwise.
-    const paxosReady = !!(env.PAXOS_CLIENT_ID && env.PAXOS_CLIENT_SECRET && env.PAXOS_PROFILE_ID);
-    if (settlement.pyusd) {
-      const payoutSpec = ((settlement.payout_input ?? {}) as {
-        beneficiary?: { first_name?: string; last_name?: string; physical_address?: { country?: string } };
-      });
-      if (paxosReady) {
-        const refId = `wide-mirror-${mirrorId}`.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 100);
-        const result = await paxosPyusdWithdraw(env, {
-          refId,
-          amount: settlement.pyusd.amount,
-          destinationAddress: settlement.pyusd.to,
-          beneficiary: payoutSpec.beneficiary,
-        });
-        settlement.payout = result.ok
-          ? { rail: "pyusd-solana", provider: "paxos", status: result.status,
-              transfer_id: result.transfer_id, ref_id: refId,
-              ...(result.error ? { note: result.error } : {}) }
-          : { rail: "pyusd-solana", provider: "paxos", status: "failed",
-              error: result.error, travel_rule_required: !!result.travel_rule_required,
-              ...(result.travel_rule_required
-                ? { next: "Resubmit claim payout with beneficiary {first_name,last_name,physical_address.country} or save Travel Rule metadata on the Paxos destination address." }
-                : {}) };
-      } else {
-        // No Paxos creds — queue the exact send for ops (PayPal app / Paxos
-        // dashboard) rather than lose the settlement.
-        settlement.payout = {
-          rail: "pyusd-solana", status: "pending_ops",
-          note: `Send ${settlement.pyusd.amount} PYUSD on Solana to ${settlement.pyusd.to} ` +
-                `(mint ${settlement.pyusd.mint}).`,
-        };
-      }
-      await env.CLAIMS.put(settleKey(mirrorId), JSON.stringify(settlement));
-      return Response.json({ ok: settlement.payout.status !== "failed", settlement });
-    }
-
-    // USD fallback: PayPal Payouts to the winner's PayPal email — live today,
-    // PayPal is the licensed transmitter on this rail.
+    // USD rail: PayPal Payouts to the winner's PayPal email — PayPal is the
+    // licensed transmitter on this rail.
     if (settlement.paypal_usd) {
       const receipt = await sendPayout(env, {
         repo: mirrorId, seq: 0, claimHash: settlement.winning_claim_hash,
@@ -252,7 +208,7 @@ export async function handleMirrorPayout(req: Request, env: Env, ctx?: Execution
       return Response.json({ ok: true, settlement });
     }
 
-    return Response.json({ ok: false, error: "winner provided no payout address (pyusd_solana_address or paypal_email)" }, { status: 409 });
+    return Response.json({ ok: false, error: "winner provided no PayPal payout email (paypal_email)" }, { status: 409 });
   } catch (e) {
     // A thrown rail call must not leave the settlement stuck in "sending".
     settlement.payout = { status: "failed",

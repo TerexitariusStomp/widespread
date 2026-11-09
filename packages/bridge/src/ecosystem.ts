@@ -7,8 +7,8 @@ import type { Env } from "./types";
 
 /* ---------- Sigstore / Rekor — append-only attestation of ship claims ---- */
 
-/** ECDSA P-256 keypair from env (one-time provision; ephemeral fallback
- *  still yields a valid Rekor entry but isn't reproducible). */
+/** ECDSA P-256 keypair from env (one-time provision; returns null when
+ *  unset — callers report a skip reason rather than attest unsigned). */
 async function attestKey(env: Env): Promise<{ key: CryptoKey; pubPem: string } | null> {
   const pkcs8 = (env as unknown as { ATTEST_KEY_PKCS8_B64?: string }).ATTEST_KEY_PKCS8_B64;
   const pubPem = (env as unknown as { ATTEST_PUBKEY_PEM?: string }).ATTEST_PUBKEY_PEM;
@@ -163,9 +163,7 @@ export function rails(env: Env): Record<string, unknown>[] {
   return [
     { id: "near", status: e.NEAR_CONTRACT ? "live" : "configured", note: "contract escrow + oracle release" },
     { id: "paypal", status: e.PAYPAL_CLIENT_ID ? "live" : "off", note: "Payouts batches" },
-    { id: "pyusd-solana", status: "live", note: "widespread-solana rail" },
-    { id: "usdc", status: "live", note: "SPL token payouts" },
-    { id: "near-intents-1click", status: "live", note: "cross-chain intents settlement (dry-run quotes)" },
+    { id: "near-intents-1click", status: "live", note: "cross-chain intents quotes (indicative, dry-run only)" },
     { id: "x402", status: e.X402_FACILITATOR ? "live" : "ready", note: "@fastnear/x402 + @x402/near deps" },
     { id: "tempo", status: e.TEMPO_API ? "live" : "ready", note: "Stripe Tempo stablecoin rail" },
     { id: "privy", status: e.PRIVY_APP_ID ? "live" : "ready", note: "agent identity/wallets" },
@@ -199,7 +197,7 @@ export async function ecosystem(env: Env) {
     partners: {
       disputes: "kleros", proof: "sigstore/rekor", verification: "pr-bots",
       security_pattern: "immunefi/hats/code4rena", funding: "opencollective/polar/onlydust",
-      distribution: "tangled/radicle/forgejo", identity: "privy", payments: "paypal/pyusd/usdc/x402/tempo",
+      distribution: "tangled/radicle/forgejo", identity: "privy", payments: "paypal/x402/tempo",
     },
   };
 }

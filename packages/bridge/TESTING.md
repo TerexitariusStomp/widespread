@@ -65,8 +65,7 @@ The Docker sandbox path (`runInSandbox`) is integration-only — needs the
 
 | Command | Scope | Live? |
 |---|---|---|
-| `npm test` | 12 tests — contentHash, memoIx, keypair IO, Intents quote/status/settlement-gate with stubbed fetch | no |
-| `npm run demo` / `payout` / `anchor` | devnet PYUSD escrow + memo-anchored payout | yes (devnet) |
+| `npm test` | 3 tests — Intents token list, quote, and status reads with stubbed fetch | no |
 
 ## widespread-bot (GitHub App)
 

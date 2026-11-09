@@ -131,14 +131,23 @@ async function handleReview(req: Request, env: Env): Promise<Response> {
 }
 
 /** Read open markets straight from the NEAR market contract — the chain is
- * the state; KV is only a dev fallback when no contract is configured. */
-async function listOnchainMarkets(env: Env): Promise<unknown[] | null> {
-  const acct = (env as { NEAR_CONTRACT?: string }).NEAR_CONTRACT;
-  if (!acct) return null;
-  const markets = await nearView(env, acct, "listOpen", {}) as
-    { marketId: string; payer: string; spec: string; amount: string; locked: string; deadline: string; status: string }[] | null;
-  if (!markets) return null;
-  return markets.map((m) => ({
+ * the source of truth. NEAR_CONTRACT is required config: a missing account
+ * throws immediately rather than silently serving an empty board. Transient
+ * RPC failures degrade to an empty list (the feed treats chain as one
+ * optional source). */
+interface OnchainMarket {
+  marketId: string; payer: string; spec: string;
+  amount: string; locked: string; deadline: string; status: string;
+}
+
+async function listOnchainMarkets(env: Env): Promise<Record<string, unknown>[]> {
+  const acct = env.NEAR_CONTRACT;
+  if (!acct) {
+    throw new Error("NEAR_CONTRACT is not configured — on-chain markets are required");
+  }
+  const markets = await nearView(env, acct, "listOpen", {}).catch(() => null) as
+    OnchainMarket[] | null;
+  return (markets ?? []).map((m) => ({
     marketId: m.marketId, payer: m.payer, spec: m.spec,
     amount: m.amount, locked: m.locked, deadline: m.deadline,
     status: m.status, payout_trace: {
@@ -216,27 +225,19 @@ export default {
       return cachedPage(url, req, () => bountiesPage(env, ctx));
     }
     if (pathname.startsWith("/bounties/")) {
-      const id = safeDecode(pathname.slice("/bounties/".length));
+      const rest = pathname.slice("/bounties/".length);
+      // /bounties/<id>.md — agent-readable markdown twin of the detail page.
+      if (rest.endsWith(".md")) {
+        const id = safeDecode(rest.slice(0, -".md".length));
+        if (!id) return bad("id required", 400);
+        return cachedPage(url, req, () => bountyMarkdown(env, ctx, id));
+      }
+      const id = safeDecode(rest);
       if (!id) return bad("id required", 400);
       return cachedPage(url, req, () => bountyPage(env, ctx, id));
-    }
-    if (pathname === "/bounty" || pathname === "/bounty/") {
-      const id = url.searchParams.get("id") ?? "";
-      if (!id) return bad("id required", 400);
-      return cachedPage(url, req, () => bountyPage(env, ctx, id));
-    }
-    if (pathname === "/bounty.md" || pathname === "/bounty.md/") {
-      const id = url.searchParams.get("id") ?? "";
-      if (!id) return bad("id required", 400);
-      return cachedPage(url, req, () => bountyMarkdown(env, ctx, id));
     }
     if (pathname.startsWith("/fund/")) {
       const id = safeDecode(pathname.slice("/fund/".length));
-      if (!id) return bad("id required", 400);
-      return cachedPage(url, req, () => fundPage(env, ctx, id));
-    }
-    if (pathname === "/fund") {
-      const id = url.searchParams.get("id") ?? "";
       if (!id) return bad("id required", 400);
       return cachedPage(url, req, () => fundPage(env, ctx, id));
     }
@@ -258,20 +259,11 @@ export default {
       if (!repo || !Number.isFinite(seq)) return bad("repo and seq required", 400);
       return cachedPage(url, req, () => receiptPage(env, null, null, repo, seq));
     }
-    if (pathname === "/receipt") {
-      const mirrorId = url.searchParams.get("mirror");
-      const claimHash = url.searchParams.get("claim");
-      const repo = url.searchParams.get("repo");
-      const seqRaw = url.searchParams.get("seq");
-      const seq = seqRaw == null ? null : Number(seqRaw);
-      return cachedPage(url, req, () =>
-        receiptPage(env, mirrorId, claimHash, repo, Number.isFinite(seq) ? seq : null));
-    }
     if (pathname === "/docs") return docsPage();
     // Ops dashboard — the claim→evidence→verdict→payout console. Gated like
     // the other admin surfaces: open when ADMIN_TOKEN is unset (dev/testnet),
     // Bearer-required once configured.
-    if (pathname === "/ops" || pathname === "/dashboard") {
+    if (pathname === "/ops") {
       if (!isAuthorized(req, env)) return bad("unauthorized", 401);
       return new Response(OPS_HTML, {
         headers: { "content-type": "text/html; charset=utf-8" },
@@ -292,10 +284,8 @@ export default {
     // Market truth is the CHAIN (widespread-near contract listOpen), not our
     // KV — the bridge is a thin renderer; participant infra holds the state.
     if (pathname === "/api/markets" && req.method === "GET") {
-      const onchain = await listOnchainMarkets(env).catch(() => null);
-      if (onchain) return json({ markets: onchain, total: onchain.length, source: "chain" });
-      return json({ markets: [], total: 0, source: "chain",
-        error: "no NEAR_CONTRACT configured — markets live on-chain, not in KV" });
+      const markets = await listOnchainMarkets(env);
+      return json({ markets, total: markets.length, source: "chain" });
     }
     if (pathname === "/api/scan" && req.method === "POST") {
       return json({ reviewed: await scan(env) });
@@ -399,8 +389,8 @@ export default {
     }
     if (pathname.startsWith("/api/hats/") && pathname.endsWith("/opportunities") && req.method === "GET") {
       const hatId = pathname.split("/")[3];
-      const markets = (await listOnchainMarkets(env).catch(() => null)) as
-        { marketId: string; spec: string; locked: string }[] | null ?? [];
+      const markets = (await listOnchainMarkets(env)) as
+        { marketId: string; spec: string; locked: string }[];
       return json(await hatsOpportunities(env, hatId, markets));
     }
     if (pathname.startsWith("/api/hats/") && req.method === "GET") {
@@ -546,7 +536,7 @@ export default {
       if (!b.order_id) return bad("order_id required", 400);
       return captureFiatOrder(env, mirrorId, b.order_id, mirror);
     }
-    // Fiat-mirror claim lifecycle: claims → verdict → PYUSD/USD payout.
+    // Fiat-mirror claim lifecycle: claims → verdict → USD payout.
     if (pathname === "/api/mirrors/claims" && req.method === "POST") {
       return handleMirrorClaimPost(req, env, ctx);
     }

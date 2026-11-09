@@ -26,7 +26,7 @@ function recordCard(rec: FeedRecord | MirrorListing): string {
   const usd = m.claimant_share?.est_usd ?? r.est_usd ?? -1;
   const ts = r.updated_at ?? m.updated_at ?? 0;
   const rail = m.id
-    ? "paypal,paxos,near"
+    ? "paypal,near"
     : (r.payout?.rails ?? []).join(",");
   return `<a class="card bounty-card" href="${bountyHref(rec)}"
     data-usd="${usd}" data-ts="${ts}" data-rail="${esc(rail)}" data-forge="${esc(forgeLabel(rec))}">
@@ -131,7 +131,6 @@ export async function bountiesPage(env: Env, ctx?: ExecutionContext): Promise<Re
   <select id="rail" onchange="filterBounties()">
     <option value="">all payout rails</option>
     <option value="paypal">PayPal USD</option>
-    <option value="paxos">PYUSD (Paxos)</option>
     <option value="near">NEAR</option>
   </select>
   <select id="sort" onchange="filterBounties()">
@@ -254,7 +253,7 @@ export async function bountyPage(env: Env, ctx: ExecutionContext | undefined, id
         <pre class="sig-block">POST /api/mirrors/claims
 {"mirror_id": ${JSON.stringify(mirror.id)},
  "forgeRef": "github:owner/repo#123",
- "payout": {"pyusd_solana_address": "…"} or {"paypal_email": "…"}}</pre>
+ "payout": {"paypal_email": "…"}}</pre>
         <p class="faint small">Only accepted once the mirror is funded. Unlimited competing claims — best verified work wins.</p></div>`
     : record
       ? `<div class="card"><h3>Claim</h3>
@@ -276,7 +275,7 @@ export async function bountyPage(env: Env, ctx: ExecutionContext | undefined, id
       : "";
 
   const body = `
-<div class="mut small" style="margin-bottom:14px"><a href="/bounties">← bounties</a> · <a href="/bounty.md?id=${encodeURIComponent(id)}">markdown</a></div>
+<div class="mut small" style="margin-bottom:14px"><a href="/bounties">← bounties</a> · <a href="/bounties/${encodeURIComponent(id)}.md">markdown</a></div>
 <div class="card">
   <div class="bounty-meta" style="margin-bottom:8px">
     ${forgeBadge(mirror ?? record!)}
@@ -309,7 +308,7 @@ ${claimSection}
 ${spec ? `<details class="spec"><summary>Spec / description</summary><div class="body">${esc(spec)}</div></details>` : ""}
 ${record?.claim?.how ? "" : ""}`;
   return html(pageShell({
-    title, nav: "bounties", path: `/bounty?id=${encodeURIComponent(id)}`,
+    title, nav: "bounties", path: `/bounties/${encodeURIComponent(id)}`,
     description: `${title} — ${fmtUsd((mirror?.claimant_share?.est_usd ?? record?.est_usd) ?? null)}${record?.repo ? ` on ${record.repo}` : ""}`,
     body,
     jsonLd: {
@@ -353,7 +352,7 @@ export async function fundPage(env: Env, ctx: ExecutionContext | undefined, id: 
 <script>setTimeout(() => location.reload(), 15000);</script>`;
   return html(pageShell({
     title: `Funding — ${mirror?.title?.slice(0, 60) ?? id}`, nav: "bounties",
-    path: `/fund?id=${encodeURIComponent(id)}`, body,
+    path: `/fund/${encodeURIComponent(id)}`, body,
   }));
 }
 
@@ -473,7 +472,7 @@ You never have to visit this site; everything below is also machine-readable.</p
 <div class="card"><p class="mut small">Every record carries <code>escrow.state</code> (<code>locked</code>/<code>external</code>/<code>label-only</code>/<code>none</code>), reward + USD estimate, <code>trust</code> (repo claims/paid/pass-rate), <code>competition</code> (pending claims, unique claimants), <code>verification</code> requirements, and <code>widespread_offer</code> for mirrorable externals.</p></div>
 
 <h2>Mirrors (third-party bounties)</h2>
-<div class="card"><p class="mut small">External bounties are <b>mirror-only</b>: they list at face value; the platform cut is skimmed from locked funds at release. Payers fund via <code>POST /api/mirrors/fund</code> (PayPal Checkout) → <code>/api/mirrors/capture</code> → ops escrow on NEAR. Claims arrive automatically — submit a normal PR/issue on the source thread; we ingest cross-referenced submissions on funded mirrors. Verdicts via <code>POST /api/mirrors/verdict</code>; payouts in PYUSD (Solana, via Paxos — licensed transmitter) or USD (PayPal Payouts).</p></div>
+<div class="card"><p class="mut small">External bounties are <b>mirror-only</b>: they list at face value; the platform cut is skimmed from locked funds at release. Payers fund via <code>POST /api/mirrors/fund</code> (PayPal Checkout) → <code>/api/mirrors/capture</code> → ops escrow on NEAR. Claims arrive automatically — submit a normal PR/issue on the source thread; we ingest cross-referenced submissions on funded mirrors. Verdicts via <code>POST /api/mirrors/verdict</code>; payouts in USD via PayPal Payouts.</p></div>
 
 <h2>Claiming natively</h2>
 <div class="card"><p class="mut small">NEAR-market bounties: <code>POST /api/claims</code> validates the forge artifact (immutable account ID, real diff, patch fingerprint) and returns an HMAC attestation + ready-to-broadcast <code>shipClaim</code> args. Verify any token at <code>GET /api/claims/verify?token=…</code>. Submissions are unlimited — adjudication picks the best verified claim.</p></div>
@@ -490,13 +489,13 @@ You never have to visit this site; everything below is also machine-readable.</p
 </div></div>
 
 <h2>Receipts</h2>
-<div class="card"><p class="mut small">Every verdict writes back to the forge (<code>dg/status</code>) and mints a public receipt: <code>/receipt?mirror=&lt;id&gt;&amp;claim=&lt;hash&gt;</code> for mirrors, <code>/receipt?repo=&lt;owner/repo&gt;&amp;seq=&lt;n&gt;</code> for forge claims.</p></div>`;
+<div class="card"><p class="mut small">Every verdict writes back to the forge (<code>dg/status</code>) and mints a public receipt: <code>/receipts/m/&lt;mirrorId&gt;/&lt;claimHash&gt;</code> for mirrors, <code>/receipts/r/&lt;owner&gt;/&lt;repo&gt;/&lt;seq&gt;</code> for forge claims.</p></div>`;
   return html(pageShell({ title: "Docs", nav: "docs", path: "/docs", body }));
 }
 
 // ------------------------------------------------------- markdown twin
 
-/** `/bounty.md?id=` — agent-readable twin of the bounty detail page.
+/** `/bounties/<id>.md` — agent-readable twin of the bounty detail page.
  * Raw markdown, no HTML; mirrors the fields agents filter on. */
 export async function bountyMarkdown(env: Env, ctx: ExecutionContext | undefined, id: string): Promise<Response> {
   const doc = await feedDoc(env, ctx);
@@ -551,7 +550,7 @@ export async function bountyMarkdown(env: Env, ctx: ExecutionContext | undefined
     lines.push(`POST /api/mirrors/claims`);
     lines.push(`{"mirror_id": ${JSON.stringify(m.id)},`);
     lines.push(` "forgeRef": "github:owner/repo#123",`);
-    lines.push(` "payout": {"pyusd_solana_address": "…"} or {"paypal_email": "…"}}`);
+    lines.push(` "payout": {"paypal_email": "…"}}`);
     lines.push("```");
   } else if (r?.claim?.how) {
     lines.push("");

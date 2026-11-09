@@ -5,8 +5,6 @@ const feedDocMock = vi.fn();
 vi.mock("../src/feed", () => ({ feedDoc: (...a: unknown[]) => feedDocMock(...a) }));
 const sendPayoutMock = vi.fn();
 vi.mock("../src/payouts", () => ({ sendPayout: (...a: unknown[]) => sendPayoutMock(...a) }));
-const paxosMock = vi.fn();
-vi.mock("../src/paxos", () => ({ paxosPyusdWithdraw: (...a: unknown[]) => paxosMock(...a) }));
 
 import {
   handleMirrorClaimPost,
@@ -185,45 +183,19 @@ describe("handleMirrorPayout", () => {
     expect(sendPayoutMock).not.toHaveBeenCalled();
   });
 
-  it("PYUSD without Paxos creds → pending_ops (nothing lost)", async () => {
-    const env = envWithFunding(); // no PAXOS_* in fakeEnv
+  it("409s when the winner gave no PayPal email", async () => {
+    const env = envWithFunding();
     const hash = await fileClaim(env);
     await handleMirrorVerdict(new Request("https://x", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ mirror_id: MIRROR.id, claim_hash: hash, accept: true,
-        payout: { pyusd_solana_address: "So1anaAddr" } }),
+        payout: {} }),
     }), env);
     const res = await handleMirrorPayout(new Request("https://x", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ mirror_id: MIRROR.id }),
     }), env);
-    const j = await res.json();
-    expect(j.settlement.payout.status).toBe("pending_ops");
-    expect(j.settlement.payout.note).toContain("PYUSD");
-    expect(j.settlement.payout.note).toContain("So1anaAddr");
-  });
-
-  it("PYUSD with Paxos creds → paxos withdrawal", async () => {
-    const env = fakeEnv({
-      CLAIMS: (() => { const kv = fakeKV({
-        [`fiatfund:${MIRROR.id}`]: JSON.stringify({ mirror_id: MIRROR.id, order_id: "O1",
-          amount: "100", currency: "USD", status: "captured", created_at: 0 }),
-      }); return kv; })() as unknown as Env["CLAIMS"],
-      PAXOS_CLIENT_ID: "id", PAXOS_CLIENT_SECRET: "sec", PAXOS_PROFILE_ID: "prof",
-    });
-    const hash = await fileClaim(env);
-    await handleMirrorVerdict(new Request("https://x", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ mirror_id: MIRROR.id, claim_hash: hash, accept: true,
-        payout: { pyusd_solana_address: "So1anaAddr" } }),
-    }), env);
-    paxosMock.mockResolvedValue({ ok: true, status: "completed", transfer_id: "TR1" });
-    const res = await handleMirrorPayout(new Request("https://x", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ mirror_id: MIRROR.id }),
-    }), env);
-    const j = await res.json();
-    expect(j.settlement.payout.provider).toBe("paxos");
-    expect(j.settlement.payout.transfer_id).toBe("TR1");
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/paypal_email/);
   });
 });

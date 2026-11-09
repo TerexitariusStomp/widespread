@@ -1,15 +1,12 @@
-// Poidh rail — sponsor-native ETH settlement leg (Seer FAO contest).
+// poidh.ts — Poidh sponsor-protocol state on Base (read-only).
 // Poidh v3 immutable contracts (docs.poidh.xyz/contracts): solo+open
 // bounties, ETH payouts, claim-proof NFTs, 2.5% protocol fee, 48h
 // contributor voting on multi-funder bounties.
 //
-// Honest positioning: Poidh pays issuer-approved claims — no trustless
-// verification — so it is the COLLECTION rail ("Poidh holds the money,
-// Widespread proves the work"). This module reads live Poidh state and
-// documents the write path; creating bounties needs a funded Base wallet
-// (POIDH_PRIVATE_KEY, never stored by us).
+// This module only READS live Poidh state (bounty counter + protocol
+// params). Creating bounties is a user-wallet operation (POIDH_PRIVATE_KEY
+// stays with the payer, never with us) and is not implemented here.
 
-import { encodeFunctionData, parseAbi } from "viem";
 import type { Env } from "./types";
 
 export const POIDH_CHAINS = {
@@ -80,48 +77,5 @@ export async function poidhInfo(env: Env) {
     votingPeriodSec: voting.v?.toString() ?? null,
     rpcError: counter.err ?? min.err ?? voting.err ?? undefined,
     feeBps: 250,
-    writePath: "createSoloBounty/createBounty via POIDH_PRIVATE_KEY (user wallet) — mirror of wide:funded markets",
-  };
-}
-
-/** Encode a createBounty call for a mirrored wide:funded market — the
- *  actual send requires the payer's key; we return calldata+value so the
- *  payer (or their agent wallet) can broadcast from any wallet UI. */
-export function encodeCreateSoloBounty(name: string, description: string, amountWei: bigint) {
-  const data = encodeFunctionData({
-    abi: parseAbi(["function createSoloBounty(string name, string description) payable returns (uint256)"]),
-    functionName: "createSoloBounty",
-    args: [name, description],
-  });
-  return { to: POIDH_CHAINS.base, data, value: amountWei.toString() };
-}
-
-/** payToHat mirror — bind a Widespread market's payout to an Intentional
- *  Hats hat. The Poidh bounty description carries the linkage so the claim
- *  NFT + issuer approval resolve back to {marketId, hatId} in payout_trace.
- *  Poidh pays issuer-approved claims (no trustless verification) — Widespread
- *  remains the evidence/verification layer; this is the ETH collection rail. */
-export function payToHatMirror(args: {
-  marketId: string; hatId: string; spec: string;
-  amountWei: bigint; wearer?: string;
-}) {
-  const link = JSON.stringify({
-    protocol: "widespread", marketId: args.marketId,
-    hatId: args.hatId, wearer: args.wearer ?? null,
-    verification: "widespread bridge verdict + dg-ship-1 evidence",
-  });
-  const description =
-    `[widespread:market=${args.marketId}:hat=${args.hatId}] ${args.spec}\n\n` +
-    `Settlement link (for payout_trace): ${link}`;
-  const tx = encodeCreateSoloBounty(
-    `widespread m${args.marketId} → hat ${args.hatId}`, description, args.amountWei);
-  return {
-    ...tx,
-    meta: {
-      marketId: args.marketId, hatId: args.hatId,
-      claimNft: POIDH_NFT.base,
-      trace: "hatId → poidh bountyId → claim NFT id → widespread market verdict",
-      honestNote: "Poidh issuer approval ≠ verification — require the Widespread verdict before approving",
-    },
   };
 }

@@ -48,12 +48,6 @@ export interface Env {
    * secretKey = ed25519:<base58> full-access key (NEAR_OPS_SECRET_KEY). */
   NEAR_OPS_ACCOUNT?: string;
   NEAR_OPS_SECRET_KEY?: string;
-  /** Paxos — licensed transmitter of record for PYUSD payouts. */
-  PAXOS_CLIENT_ID?: string;
-  PAXOS_CLIENT_SECRET?: string;
-  PAXOS_PROFILE_ID?: string;
-  PAXOS_IDENTITY_ID?: string;
-  PAXOS_API_BASE?: string;   // default sandbox; https://api.paxos.com prod
 }
 
 /** Normalized discovery record — one funded work item from any source.
