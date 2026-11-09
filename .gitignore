@@ -11,3 +11,4 @@ coverage/
 contracts/*/build/
 contract.js.map
 packages/delta-git/frontend/canary/
+node_modules
