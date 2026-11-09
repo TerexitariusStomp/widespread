@@ -146,7 +146,9 @@ describe("certificates + costs + chaos", () => {
     expect(cert.days_left).toBeLessThanOrEqual(20);
   });
 
-  it("probes certificate expiry from the CT log", async () => {
+  // The CT probe budgets 10s for crt.sh; give the test headroom beyond
+  // vitest's 5s default so a slow-but-honest 502 isn't a timeout.
+  it("probes certificate expiry from the CT log", { timeout: 20_000 }, async () => {
     const list = await req(`/api/v1/spaces/${owner}/certificates`, {
       cookie: seeded.cookieHeader,
     });
