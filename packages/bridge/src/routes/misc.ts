@@ -108,6 +108,64 @@ export function miscRoutes() {
     return json({ contributors, funders, runners, total: contributors.length });
   });
 
+  // Treasury + market-health rollup — the settlement-integrity narrative:
+  // every msettle:* record aggregated into "verified jobs actually settle"
+  // numbers the comparison page can show. Read-only, eventually
+  // consistent (KV list), cached at the edge.
+  app.get("/api/treasury", async (c) => {
+    const settlements: { face: number; cut: number; net: number; won: number; paid: number; rejected: number; pending_payout: number } =
+      { face: 0, cut: 0, net: 0, won: 0, paid: 0, rejected: 0, pending_payout: 0 };
+    let fundedFiat = 0;
+    try {
+      let cursor: string | undefined;
+      do {
+        const page = await c.env.CLAIMS.list({ prefix: "msettle:", cursor, limit: 200 });
+        for (const k of page.keys) {
+          const raw = await c.env.CLAIMS.get(k.name).catch(() => null);
+          if (!raw) continue;
+          const s = JSON.parse(raw) as {
+            status: string; face_usd?: number; platform_cut_usd?: number;
+            net_usd?: number; payout?: { batch_id?: string; transaction_id?: string };
+          };
+          settlements.face += s.face_usd ?? 0;
+          settlements.cut += s.platform_cut_usd ?? 0;
+          settlements.net += s.net_usd ?? 0;
+          if (s.status === "won") settlements.won += 1;
+          else if (s.status === "rejected") settlements.rejected += 1;
+          if (s.payout?.batch_id || s.payout?.transaction_id) settlements.paid += 1;
+          else if (s.status === "won") settlements.pending_payout += 1;
+        }
+        cursor = page.list_complete ? undefined : page.cursor;
+      } while (cursor);
+    } catch { /* settle index optional */ }
+    try {
+      let cursor: string | undefined;
+      do {
+        const page = await c.env.CLAIMS.list({ prefix: "fiatfund:", cursor, limit: 200 });
+        for (const k of page.keys) fundedFiat += 1;
+        cursor = page.list_complete ? undefined : page.cursor;
+      } while (cursor);
+    } catch { /* funding index optional */ }
+    const decided = settlements.won + settlements.rejected;
+    return json({
+      totals_usd: {
+        face: +settlements.face.toFixed(2),
+        platform_cut: +settlements.cut.toFixed(2),
+        net_to_contributors: +settlements.net.toFixed(2),
+      },
+      settlements: {
+        decided,
+        won: settlements.won,
+        rejected: settlements.rejected,
+        paid: settlements.paid,
+        pending_payout: settlements.pending_payout,
+        settle_rate: decided ? Math.round((settlements.paid / Math.max(1, settlements.won)) * 100) / 100 : null,
+      },
+      fiat_funded_mirrors: fundedFiat,
+      note: "settle_rate = paid payouts / won settlements — the number the field averages ~52% on",
+    });
+  });
+
   // Foreguild futarchy — live governance proposals on the NEAR contract.
   app.get("/api/futarchy", async (c) => {
     const acct = (c.env as { FUTARCHY_CONTRACT?: string }).FUTARCHY_CONTRACT;
