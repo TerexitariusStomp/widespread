@@ -1,5 +1,8 @@
-// deploy.js — create a NEAR testnet account + deploy contract.wasm.
+// deploy.js — deploy build/contract.wasm (from `pnpm --filter @widespread/near build`).
 // Usage: node deploy.js [account-id.testnet]
+// Account: NEAR_ACCOUNT + NEAR_PRIVATE_KEY (ed25519:…) env if both set;
+// otherwise reuse/create a testnet account whose key lives in CREDS below.
+// NEAR_NODE_URL overrides the testnet RPC.
 // Key saved to ~/.foreguild-futarchy.json
 import { Account, KeyPair, KeyPairSigner } from "near-api-js";
 import { readFileSync, writeFileSync, existsSync } from "fs";
@@ -7,16 +10,25 @@ import os from "os";
 import path from "path";
 
 const CREDS = path.join(os.homedir(), ".foreguild-futarchy.json");
-const wasm = readFileSync(new URL("./contract.wasm", import.meta.url));
+const WASM = new URL("./build/contract.wasm", import.meta.url);
+if (!existsSync(WASM)) {
+  console.error("build/contract.wasm missing — run `pnpm --filter @widespread/near build` first");
+  process.exit(1);
+}
+const wasm = readFileSync(WASM);
 
 const cfg = {
-  nodeUrl: "https://rpc.testnet.near.org",
+  nodeUrl: process.env.NEAR_NODE_URL || "https://rpc.testnet.near.org",
   helperUrl: "https://helper.testnet.near.org",
 };
 
 async function main() {
   let accountId, keyPair;
-  if (existsSync(CREDS)) {
+  if (process.env.NEAR_ACCOUNT && process.env.NEAR_PRIVATE_KEY) {
+    accountId = process.env.NEAR_ACCOUNT;
+    keyPair = KeyPair.fromString(process.env.NEAR_PRIVATE_KEY);
+    console.log(`using ${accountId} from NEAR_ACCOUNT/NEAR_PRIVATE_KEY`);
+  } else if (existsSync(CREDS)) {
     const c = JSON.parse(readFileSync(CREDS, "utf8"));
     accountId = c.accountId;
     keyPair = KeyPair.fromString(c.secretKey);

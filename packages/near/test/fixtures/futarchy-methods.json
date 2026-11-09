@@ -1,0 +1,19 @@
+{
+  "_source": "git show pre-refactor:packages/near/contracts/futarchy/contract.js — decorator table (_dec* / _applyDecoratedDescriptor) and export list of the previously-deployed compiled bundle. Do not edit to make a test pass: a mismatch means the rebuilt contract's ABI drifted from what was deployed.",
+  "contractClass": "ForeguildFutarchy",
+  "requireInit": false,
+  "stateFields": ["proposals", "yesShares", "noShares", "yesPool", "noPool", "redeemed", "nextId"],
+  "methods": [
+    { "name": "propose", "kind": "call", "payableFunction": true, "privateFunction": false },
+    { "name": "buyShares", "kind": "call", "payableFunction": true, "privateFunction": false },
+    { "name": "resolve", "kind": "call", "payableFunction": false, "privateFunction": false },
+    { "name": "redeem", "kind": "call", "payableFunction": false, "privateFunction": false },
+    { "name": "fundTreasury", "kind": "call", "payableFunction": true, "privateFunction": false },
+    { "name": "getProposal", "kind": "view", "payableFunction": false, "privateFunction": false },
+    { "name": "listProposals", "kind": "view", "payableFunction": false, "privateFunction": false },
+    { "name": "getShares", "kind": "view", "payableFunction": false, "privateFunction": false },
+    { "name": "pools", "kind": "view", "payableFunction": false, "privateFunction": false },
+    { "name": "treasuryBalance", "kind": "view", "payableFunction": false, "privateFunction": false }
+  ],
+  "wasmExports": ["ForeguildFutarchy", "buyShares", "fundTreasury", "getProposal", "getShares", "listProposals", "pools", "propose", "redeem", "resolve", "treasuryBalance"]
+}

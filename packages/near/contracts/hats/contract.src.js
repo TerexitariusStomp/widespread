@@ -1,7 +1,7 @@
 // contract.src.js — Intentional Hats: cross-chain-native role/permission
 // protocol for agentic commerce (near-sdk-js 2.x, same pattern as
-// contracts/market). Source of truth — `contract.js` in this dir is the
-// rollup bundle produced by `cli.js build contract.src.js`.
+// contracts/market). Source of truth — build with
+// `pnpm --filter @widespread/near build` → build/contract.wasm.
 //
 // A hat is an on-chain role: org → hat tree with admin + accountability
 // relations, capability-scope permissions, a chain-signatures derivation

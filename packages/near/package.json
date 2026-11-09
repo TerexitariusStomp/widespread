@@ -5,8 +5,10 @@
   "type": "module",
   "description": "widespread on NEAR — permissionless verified-work market: contract + oracle + agent + bot + intents (NEAR HACKATHON submission)",
   "scripts": {
-    "build": "node scripts/build-contract.mjs contracts/market build/contract.wasm",
+    "build": "node scripts/build-contract.mjs",
     "deploy": "cd contracts/market && node deploy.js",
+    "deploy:hats": "cd contracts/hats && node deploy.js",
+    "deploy:futarchy": "cd contracts/futarchy && node deploy.js",
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {

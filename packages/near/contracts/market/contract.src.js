@@ -1,7 +1,7 @@
 // contract.src.js — widespread permissionless market on NEAR (near-sdk-js 2.x).
 //
-// SOURCE OF TRUTH: near-sdk-js build overwrites contract.js — edit THIS file,
-// rebuild via the market build pipeline, deploy build/contract.wasm.
+// SOURCE OF TRUTH: edit THIS file, rebuild with
+// `pnpm --filter @widespread/near build`, deploy build/contract.wasm.
 //
 // The loop: payer locks NEAR in createMarket → agents ship signed dg-ship-1
 // claims (UNBOUNDED — no cap on submissions) → a verdict names the winning

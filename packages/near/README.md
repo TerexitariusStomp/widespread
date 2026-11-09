@@ -30,7 +30,9 @@ oracle proof → contract `release()` → contributor paid.
 
 | Path | What | Runs where |
 |---|---|---|
-| `contracts/market/` | The market/escrow contract (near-sdk-js 2.x) + deploy/seed/release tooling + built WASM | deployed: `wide-mkt-11561.testnet` |
+| `contracts/market/` | The market/escrow contract (near-sdk-js 2.x) + deploy/release tooling | deployed: `wide-mkt-11561.testnet` |
+| `contracts/hats/` | Hats-style org/role tree, scoped capabilities, MPC foreign-sig requests | testnet |
+| `contracts/futarchy/` | Futarchy governance: YES/NO outcome shares, metric-resolved proposals, treasury spend | testnet |
 | `packages/oracle/` | `oracle.ts` (ed25519 verdict signing) + `adjudicator.ts` (NEAR AI Cloud `provider_tee` path) — vendored from the bridge | `widespread-bridge` Worker |
 | `packages/agent/` | `_widespread.py` — the 10-tool `wide_*` toolset for the Hermes agent (discover → claim → ship → get paid) + `SKILL.md` | `near-hermes-browser` plugin |
 | `packages/bot/` | `index.js` — `@widespread $N for <spec>` GitHub App; **merge=accept** → payout | `widespread-bot` probot app |
@@ -61,15 +63,29 @@ proves derivative use and the locked escrow still pays.
 
 ## Build / deploy (testnet)
 
+All three contracts (`market`, `hats`, `futarchy`) build from
+`contracts/<name>/contract.src.js` → `contracts/<name>/build/contract.wasm`
+(gitignored, never committed):
+
 ```bash
+pnpm install                                   # near-sdk-js postinstall (QJSC+wasi-sdk)
+pnpm --filter @widespread/near build           # all three; or: node scripts/build-contract.mjs futarchy
+pnpm --filter @widespread/near test            # unit tests + method-list gate
 cd contracts/market
-npm i                                   # needs near-sdk-js postinstall (QJSC+wasi-sdk)
-node node_modules/near-sdk-js/lib/cli/cli.js build contract.js contract.wasm
-node deploy.js                          # creates testnet acct + deploys wasm
-node seed.js                            # createMarket a funded market
+node deploy.js                          # deploys build/contract.wasm (see below)
 node release.js register <oraclePub>    # register an oracle
 node release.js settle <mkt> <sig> <pub> # oracle-signed release → pays claimant
 ```
+
+Each `contracts/<name>/deploy.js` deploys that contract's
+`build/contract.wasm`. Account selection: `NEAR_ACCOUNT` + `NEAR_PRIVATE_KEY`
+(`ed25519:…`) env vars if set; otherwise the per-contract creds file in
+`$HOME` (created on first run with a fresh testnet account via the helper).
+`NEAR_NODE_URL` overrides the testnet RPC.
+
+The futarchy contract source was recovered from the previously-deployed
+compiled bundle; `test/fixtures/futarchy-methods.json` records that bundle's
+method table and `test/futarchy.test.mjs` gates the rebuilt contract on it.
 
 ## Hackathon boundary (per HACKATHON.md Q-003)
 
