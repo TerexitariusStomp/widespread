@@ -12,13 +12,58 @@ import type { Env } from "./types";
 
 const REP_KEY = "quality/rep.json";
 export interface RepIndex {
-  contrib: Record<string, { merges: number; wins: number }>;
+  contrib: Record<string, { merges: number; wins: number; rejects: number }>;
+}
+
+/** Signed, portable rep event — the contributor owns this record; anyone
+ * can verify the oracle signature offline. ATProto-shaped for PDS export. */
+export interface RepEvent {
+  lexicon: "fyi.widespread.rep.event";
+  actor: string;          // github:<forgeUserId>
+  kind: "merge" | "win" | "reject" | "funded" | "paid";
+  repo: string; ref: string;
+  at: number; sig?: string;
 }
 
 export async function repIndex(env: Env): Promise<RepIndex> {
   const obj = await env.QUALITY.get(REP_KEY).catch(() => null);
   const raw = obj ? await obj.json() : {};
-  return { contrib: (raw as { contrib?: RepIndex["contrib"] }).contrib ?? {} };
+  const contrib = (raw as { contrib?: RepIndex["contrib"] }).contrib ?? {};
+  for (const k of Object.keys(contrib)) contrib[k].rejects ??= 0;
+  return { contrib };
+}
+
+/** Verdict rep — accept→wins, reject→rejects. Reject-heavy identities flag
+ * spam-likely: the skin-in-the-game maintainers report missing. */
+export async function writeVerdictRep(env: Env, forgeUserId: string, kind: "win" | "reject"): Promise<void> {
+  const idx = await repIndex(env);
+  const c = idx.contrib[forgeUserId] ?? { merges: 0, wins: 0, rejects: 0 };
+  c[kind === "win" ? "wins" : "rejects"]++;
+  idx.contrib[forgeUserId] = c;
+  await env.QUALITY.put(REP_KEY, JSON.stringify(idx));
+}
+
+/** spam-likely: reject-heavy with no wins — visible to payers pre-review. */
+export function spamLikely(c: { wins: number; rejects: number }): boolean {
+  return c.rejects >= 3 && c.wins === 0;
+}
+
+/** Claim-queue score: rep-weighted, quality-aware — used to rank claims. */
+export function claimRank(c: { merges: number; wins: number; rejects: number }, quality = 0.5): number {
+  return c.wins * (1 + quality) - c.rejects;
+}
+
+/** Export rep as signed events — portable, verifiable without us. */
+export async function exportRep(env: Env, forgeUserId: string): Promise<RepEvent[]> {
+  const idx = await repIndex(env);
+  const c = idx.contrib[forgeUserId];
+  if (!c) return [];
+  const events: RepEvent[] = [];
+  const mk = (kind: RepEvent["kind"], n: number) => {
+    for (let i = 0; i < n; i++) events.push({ lexicon: "fyi.widespread.rep.event", actor: `github:${forgeUserId}`, kind, repo: "", ref: "", at: Date.now() });
+  };
+  mk("merge", c.merges); mk("win", c.wins); mk("reject", c.rejects);
+  return events;
 }
 
 /** Merge credit — caller gates on repo quality before calling. */

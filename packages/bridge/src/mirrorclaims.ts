@@ -19,7 +19,7 @@ import { sha256Hex } from "./forge";
 import { feedDoc } from "./feed";
 import { sendPayout } from "./payouts";
 import { resolvePayout } from "./routes/payouts";
-import { bumpFunderRep } from "./rep";
+import { bumpFunderRep, repIndex, spamLikely, claimRank, writeVerdictRep } from "./rep";
 
 const claimKey = (mirrorId: string, hash: string) => `mclaim:${mirrorId}:${hash}`;
 const claimsPrefix = (mirrorId: string) => `mclaim:${mirrorId}:`;
@@ -111,7 +111,18 @@ export async function handleMirrorClaimsList(url: URL, env: Env, ctx?: Execution
   if (!mirrorId) return Response.json({ ok: false, error: "mirror_id required" }, { status: 400 });
   const mirror = await getMirror(env, ctx, mirrorId);
   if (!mirror) return Response.json({ ok: false, error: "mirror not found" }, { status: 404 });
-  return Response.json({ ok: true, mirror_id: mirrorId, claims: await listClaims(env, mirrorId) });
+  // Rep-ranked queue — payers see the most-proven claims first, not 236
+  // unsorted. Reject-heavy identities flag spam-likely for pre-review.
+  const idx = await repIndex(env);
+  const claims = (await listClaims(env, mirrorId)) as Record<string, unknown>[];
+  for (const c of claims) {
+    const r = idx.contrib[String(c.forgeUserId ?? "")];
+    if (r) {
+      c.rep = { ...r, spam_likely: spamLikely(r), rank: claimRank(r) };
+    }
+  }
+  claims.sort((a, b) => Number((b.rep as { rank?: number } | undefined)?.rank ?? 0) - Number((a.rep as { rank?: number } | undefined)?.rank ?? 0));
+  return Response.json({ ok: true, mirror_id: mirrorId, claims });
 }
 
 export async function handleMirrorVerdict(req: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
@@ -174,6 +185,10 @@ export async function handleMirrorVerdict(req: Request, env: Env, ctx?: Executio
   await env.CLAIMS.put(settleKey(mirrorId), JSON.stringify(settlement));
   claim.status = accept ? "won" : "rejected";
   await env.CLAIMS.put(claimKey(mirrorId, claimHash), JSON.stringify(claim));
+  // Contributor rep — reject-heavy identities flag spam-likely for payers.
+  if (claim.forgeUserId) {
+    await writeVerdictRep(env, claim.forgeUserId, accept ? "win" : "reject").catch(() => undefined);
+  }
 
   return Response.json({ ok: true, settlement,
     next: accept ? "POST /api/mirrors/payout {mirror_id} to send USD to the winner via PayPal." : null });

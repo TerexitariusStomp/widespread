@@ -9,6 +9,7 @@
 import { Hono } from "hono";
 import type { Env } from "../types";
 import { json } from "./shared";
+import { repIndex, spamLikely, exportRep, funderRep } from "../rep";
 
 const NONCE_TTL = 600;
 const nonceKey = (id: string) => `payout:nonce:${id}`;
@@ -101,12 +102,26 @@ export function payoutRoutes() {
     return json({ ok: true, binding: { forgeUserId: id, chain, address, bound_at: binding.bound_at } });
   });
 
+  // Contributor identity: bound payout rail + rep counters + spam flag.
   app.get("/api/payouts/:forgeUserId", async (c) => {
     const id = c.req.param("forgeUserId");
     const raw = await c.env.CLAIMS.get(bindKey(id));
-    if (!raw) return json({ error: "no binding" }, 404);
-    const b = JSON.parse(raw) as PayoutBinding;
-    return json({ forgeUserId: id, chain: b.chain, address: b.address, bound_at: b.bound_at });
+    const b = raw ? JSON.parse(raw) as PayoutBinding : null;
+    const idx = await repIndex(c.env);
+    const rep = idx.contrib[id];
+    return json({
+      forgeUserId: id,
+      ...(b ? { chain: b.chain, address: b.address, bound_at: b.bound_at } : {}),
+      rep: rep ? { ...rep, spam_likely: spamLikely(rep) } : null,
+    });
+  });
+
+  // Portable rep — signed events the contributor owns, verifiable offline.
+  app.get("/api/rep/:forgeUserId/export", async (c) => {
+    const id = c.req.param("forgeUserId");
+    const events = await exportRep(c.env, id);
+    const fundRep = await funderRep(c.env, id).catch(() => null);
+    return json({ forgeUserId: id, events, funder: fundRep });
   });
 
   return app;

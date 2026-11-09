@@ -558,7 +558,15 @@ async function pollRetroMerged(env: Env): Promise<FeedRecord[]> {
     const num = Number(pr.number ?? 0);
     const title = String(pr.title ?? "merged work");
     const author = (pr.user as Record<string, unknown> | undefined)?.id;
-    if (author) authors.add(String(author));
+    // Search results don't carry merged_by — one bounded PR fetch tells us
+    // whether the merger is the author (self-merge → no rep credit).
+    const prDetail = await fetchJson(
+      `https://api.github.com/repos/${repo}/pulls/${num}`, ghHeaders(env), 8000,
+    ).catch(() => null) as { merged_by?: { id?: number } } | null;
+    const mergerId = String(prDetail?.merged_by?.id ?? "");
+    const selfMerge = String(author ?? "") !== "" && mergerId !== "" && mergerId === String(author);
+    // Self-merges mint the listing but earn no rep credit.
+    if (author && !selfMerge) authors.add(String(author));
     const closedIssue = String(pr.body ?? "").match(/(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/i)?.[1];
     out.push({
       id: `retro:${repo}#${num}`,
