@@ -8,7 +8,7 @@
     "build": "vite build && pnpm run build:spa",
     "build:spa": "node scripts/ensure-spa-deps.mjs && pnpm -C frontend/canary -r --filter @harnessio/core-design-system --filter @harnessio/filters --filter @harnessio/forms --filter @harnessio/pipeline-graph --filter @harnessio/ui --filter @harnessio/views --filter @harnessio/yaml-editor build:ci && pnpm -C frontend/canary -F gitness build && node scripts/copy-spa.mjs",
     "preview": "vite preview",
-    "deploy": "pnpm run db:migrate && pnpm run build && wrangler deploy",
+    "deploy": "pnpm run db:migrate && pnpm run build && wrangler deploy --containers-rollout none",
     "test": "vitest run --config vitest.unit.config.ts",
     "test:workers": "vitest run --config vitest.config.ts",
     "test:auth": "vitest run --config vitest.config.ts test/auth.worker.test.ts",
