@@ -22,6 +22,8 @@ allowBuilds:
   cpu-features: true
   esbuild: true
   near-sdk-js: true
+  near-sandbox: true
+  near-workspaces: true
   protobufjs: true
   secp256k1: true
   ssh2: true
