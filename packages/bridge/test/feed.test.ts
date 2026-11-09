@@ -4,6 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 import { queryFeed, feedRss, handleMcp, slopToRecord } from "../src/feed";
+import { scoreQuality, extractTopics } from "../src/quality";
 import slopFixture from "./fixtures/slop-projects.json";
 import { seedFeedDoc, feedRecord, realEnv } from "./helpers";
 import type { FeedDoc, FeedRecord } from "../src/types";
@@ -61,6 +62,55 @@ describe("queryFeed", () => {
     const page2 = queryFeed(doc(records), { limit: 2, cursor: page1.next_cursor! });
     expect(page2.records.length).toBe(1);
     expect(page2.next_cursor).toBeNull();
+  });
+});
+
+describe("quality scoring", () => {
+  const entry = (over: object = {}) => ({ score: null, computed_at: 0, ...over });
+  it("archived repos score 0; insufficient signals score null", () => {
+    expect(scoreQuality(entry({ stars: 5000, archived: true }))).toBe(0);
+    expect(scoreQuality(entry({ stars: 10 }))).toBeNull(); // one signal only
+  });
+  it("composite ranks healthy repos high", () => {
+    const hot = scoreQuality(entry({
+      stars: 5000, pushed_at: new Date(Date.now() - 3 * 86400000).toISOString(),
+      merged_30d: 30, maintainer_responsive: true,
+    }))!;
+    const quiet = scoreQuality(entry({
+      stars: 5, pushed_at: new Date(Date.now() - 400 * 86400000).toISOString(),
+      merged_30d: 0, maintainer_responsive: false,
+    }))!;
+    expect(hot).toBeGreaterThan(0.8);
+    expect(quiet).toBeLessThan(0.4);
+  });
+});
+
+describe("topics + interest matching", () => {
+  it("extractTopics unions repo topics, labels and domain keywords", () => {
+    const r = rec({ title: "fix rust memory leak in climate model", spec: "security audit" });
+    const t = extractTopics(r, { score: 0.5, computed_at: 0, topics_repo: ["oss"], language: "Rust" });
+    expect(t).toContain("oss"); expect(t).toContain("rust");
+    expect(t).toContain("climate"); expect(t).toContain("security");
+  });
+  it("?topics= ranks overlapping records first", () => {
+    const d = doc([
+      rec({ id: "env", topics: ["climate", "python"], est_usd: 5 }),
+      rec({ id: "web", topics: ["frontend"], est_usd: 500 }),
+      rec({ id: "none" }),
+    ]);
+    const page = queryFeed(d, { topics: "climate,python" });
+    expect(page.records[0].id).toBe("env");
+    expect(page.records.find((r) => r.id === "none")).toBeUndefined();
+  });
+  it("quality weights trust sort; null quality is neutral", () => {
+    const d = doc([
+      rec({ id: "low", est_usd: 10, quality: { score: 0.1 } }),
+      rec({ id: "high", est_usd: 10, quality: { score: 0.9 } }),
+      rec({ id: "unknown", est_usd: 10 }),
+    ]);
+    const ids = queryFeed(d, { sort: "trust" }).records.map((r) => r.id);
+    expect(ids[0]).toBe("high");
+    expect(ids.indexOf("low")).toBeGreaterThan(ids.indexOf("unknown"));
   });
 });
 
@@ -164,6 +214,22 @@ describe("handleMcp (real KV feed doc)", () => {
     const sc = body.result.structuredContent;
     expect(sc.id).toBe(id);
     expect(sc.title).toContain("mcp seeded bounty");
+  });
+
+  it("feed_match falls back to structured ranking without embeddings", async () => {
+    await seedFeedDoc(env(), [
+      feedRecord({ id: "fm-climate", title: "climate data pipeline", topics: ["climate", "python"], est_usd: 10 }),
+      feedRecord({ id: "fm-web", title: "css fix", topics: ["frontend"] }),
+    ]);
+    const res = await call("tools/call", {
+      name: "feed_match",
+      arguments: { interests: "climate data work in python", topics: ["climate"] },
+    });
+    const body = await res!.json() as { result: { structuredContent: Record<string, unknown> } };
+    const sc = body.result.structuredContent;
+    expect(sc.mode).toBe("structured-fallback");
+    const recs = (sc.records as { id: string }[]) ?? [];
+    expect(recs[0]?.id).toBe("fm-climate");
   });
 
   it("feed_stats reflects the seeded doc", async () => {

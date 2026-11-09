@@ -33,6 +33,7 @@ export function feedRoutes() {
       limit: url.searchParams.get("limit") ? Number(url.searchParams.get("limit")) : undefined,
       cursor: url.searchParams.get("cursor") ?? undefined,
       max_competition: url.searchParams.get("max_competition") ? Number(url.searchParams.get("max_competition")) : undefined,
+      topics: url.searchParams.get("topics") ?? undefined,
     };
     const page = queryFeed(doc, q);
     return json({

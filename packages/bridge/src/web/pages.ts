@@ -28,6 +28,14 @@ function recordCard(rec: FeedRecord | MirrorListing): string {
   const rail = m.id
     ? "paypal,near"
     : (r.payout?.rails ?? []).join(",");
+  const fr = rec as FeedRecord;
+  const chips = [
+    fr.language ? `<span class="mono small" style="color:var(--mut)">${esc(fr.language)}</span>` : "",
+    ...(fr.topics ?? []).slice(0, 3).map((t) => `<span class="mono small" style="border:1px solid var(--line);border-radius:4px;padding:0 4px">${esc(t)}</span>`),
+  ].filter(Boolean).join(" ");
+  const qualityBadge = fr.quality?.score != null
+    ? `<span title="repo health: stars ${fr.quality.stars ?? "?"} · ${fr.quality.maintainer_responsive ? "maintainer active" : "quiet"}">Q${Math.round(fr.quality.score * 100)}</span>`
+    : "";
   return `<a class="card bounty-card" href="${bountyHref(rec)}"
     data-usd="${usd}" data-ts="${ts}" data-rail="${esc(rail)}" data-forge="${esc(forgeLabel(rec))}">
     <div class="bounty-meta">
@@ -43,6 +51,7 @@ function recordCard(rec: FeedRecord | MirrorListing): string {
       ${trust || comp ? `<span class="faint small">${trust || comp}</span>` : ""}
     </div>
     ${trust && comp ? `<div class="stats-line"><span>${trust}</span><span>${comp}</span></div>` : ""}
+    ${chips || qualityBadge ? `<div class="stats-line"><span>${chips}</span><span class="mono small" style="color:var(--gold,#c9a227)">${qualityBadge}</span></div>` : ""}
   </a>`;
 }
 

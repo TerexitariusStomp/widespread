@@ -42,6 +42,22 @@
     "binding": "AI",
     "remote": true
   },
+  // Repo-quality index store (quality/index.json — repo→entry map).
+  "r2_buckets": [
+    {
+      "binding": "QUALITY",
+      "bucket_name": "widespread-bridge"
+    }
+  ],
+  // Record embeddings for semantic feed_match — @cf/baai/bge-base-en-v1.5
+  // (768-dim, cosine). Index must exist on the account before deploy:
+  // `wrangler vectorize create widespread-feed-embed --dimensions=768 --metric=cosine`.
+  "vectorize": [
+    {
+      "binding": "EMBED",
+      "index_name": "widespread-feed-embed"
+    }
+  ],
   // The scheduled() handler scans watched op-logs when a cron slot exists.
   // Free tier allows 5 cron triggers/account — this account is full, so the
   // dashboard's /api/state polling drives the same opportunistic scan.

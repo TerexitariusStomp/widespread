@@ -12,6 +12,7 @@
 
 import { nearView } from "./near";
 import { scanMirrorSubmissions } from "./ingest";
+import { attachQuality, fillQuality, embedRecords, embedText, recordVector, vectorIdMap } from "./quality";
 import { listBounties, listRecords } from "./store";
 import {
   acquireFeedLock, getFeedDoc, getSourceStamp, putFeedDoc,
@@ -642,6 +643,10 @@ export async function refreshFeed(env: Env, ctx?: ExecutionContext): Promise<Fee
       .sort((a, b) => (b.est_usd ?? 0) - (a.est_usd ?? 0) || b.updated_at - a.updated_at)
       .slice(0, MAX_RECORDS);
 
+    // Repo-quality + topic/layer metadata — one R2 read attaches to every
+    // record; unbounded because KV/R2 reads aren't HTTP subrequests.
+    await attachQuality(env, records);
+
     // Automatic mirror monetization: every external/third-party record
     // gets a marked-up market listing; funded ones are detected by
     // specHash match against on-chain markets — no manual step.
@@ -652,6 +657,11 @@ export async function refreshFeed(env: Env, ctx?: ExecutionContext): Promise<Fee
     // Auto-ingest submissions on funded mirrors — agents keep using the
     // original forge flow (PRs on the issue); we file attested claims.
     if (ctx) ctx.waitUntil(scanMirrorSubmissions(env).catch((e) => console.error(`ingest: ${String(e)}`)));
+    // Quality fill + embeddings run post-commit — never block the request.
+    if (ctx) {
+      ctx.waitUntil(fillQuality(env).catch((e) => console.error(`quality: ${String(e)}`)));
+      ctx.waitUntil(embedRecords(env, records).catch((e) => console.error(`embed: ${String(e)}`)));
+    }
     return doc;
   } finally {
     if (locked) await releaseFeedLock(env);
@@ -675,6 +685,9 @@ export async function feedDoc(env: Env, ctx?: ExecutionContext): Promise<FeedDoc
       return fresh ?? { generated_at: 0, sources: {}, records: [] };
     } else void p; // stale doc: serve last-good, refresh behind
   }
+  // Read invocations have their own subrequest budget — let traffic drive
+  // the never-scored-first quality crawl (10min self-gate inside).
+  if (ctx) ctx.waitUntil(fillQuality(env).catch(() => ({ computed: 0, indexed: 0 })));
   return doc ?? { generated_at: 0, sources: {}, records: [] };
 }
 
@@ -802,6 +815,8 @@ export interface FeedQuery {
   min_usd?: number; currency?: string; escrow?: string;
   sort?: "reward" | "newest" | "trust"; limit?: number; cursor?: string;
   max_competition?: number;
+  /** Comma-separated interest list — records sharing ≥1 topic rank first. */
+  topics?: string;
 }
 
 export function queryFeed(doc: FeedDoc, q: FeedQuery): { records: FeedRecord[]; next_cursor: string | null } {
@@ -814,13 +829,26 @@ export function queryFeed(doc: FeedDoc, q: FeedQuery): { records: FeedRecord[]; 
   if (q.currency) recs = recs.filter((r) => (r.currency ?? "").toUpperCase() === q.currency!.toUpperCase());
   if (q.escrow) recs = recs.filter((r) => r.escrow.state === q.escrow);
   if (q.max_competition !== undefined) recs = recs.filter((r) => (r.competition?.pending_claims ?? 0) <= q.max_competition!);
+  // Interest ranking: client supplies its user's topics (never stored);
+  // records sharing topics float to the top, overlap count breaks ties.
+  const want = q.topics ? q.topics.toLowerCase().split(",").map((t) => t.trim()).filter(Boolean) : null;
+  const overlap = want
+    ? new Map(recs.map((r) => [r.id, (r.topics ?? []).filter((t) => want.includes(t)).length]))
+    : null;
+  if (want) recs = recs.filter((r) => (overlap!.get(r.id) ?? 0) > 0);
 
   const sort = q.sort ?? "reward";
   recs = [...recs].sort((a, b) => {
+    // topics supplied: overlap count dominates every sort dimension.
+    if (overlap) {
+      const ov = (overlap.get(b.id) ?? 0) - (overlap.get(a.id) ?? 0);
+      if (ov !== 0) return ov;
+    }
     if (sort === "newest") return b.updated_at - a.updated_at;
     if (sort === "trust") {
-      const ta = (a.est_usd ?? 0) * (a.escrow.state === "locked" ? 1 : a.escrow.state === "external" ? 0.4 : 0.2) * (a.trust?.repo_pass_rate ?? 0.5);
-      const tb = (b.est_usd ?? 0) * (b.escrow.state === "locked" ? 1 : b.escrow.state === "external" ? 0.4 : 0.2) * (b.trust?.repo_pass_rate ?? 0.5);
+      const escW = (s: FeedRecord["escrow"]["state"]) => s === "locked" ? 1 : s === "external" ? 0.4 : 0.2;
+      const ta = (a.est_usd ?? 0) * escW(a.escrow.state) * (a.trust?.repo_pass_rate ?? 0.5) * (0.5 + (a.quality?.score ?? 0.5));
+      const tb = (b.est_usd ?? 0) * escW(b.escrow.state) * (b.trust?.repo_pass_rate ?? 0.5) * (0.5 + (b.quality?.score ?? 0.5));
       return tb - ta;
     }
     return (b.est_usd ?? 0) - (a.est_usd ?? 0) || b.updated_at - a.updated_at;
@@ -867,8 +895,25 @@ const MCP_TOOLS = [
         forge: { type: "string" }, source: { type: "string" }, repo: { type: "string" },
         q: { type: "string" }, min_usd: { type: "number" }, currency: { type: "string" },
         escrow: { type: "string", enum: ["locked", "label-only", "external", "none"] },
+        topics: { type: "string", description: "comma-separated interest list — records sharing topics rank first" },
         sort: { type: "string", enum: ["reward", "newest", "trust"] },
         limit: { type: "number" }, cursor: { type: "string" }, max_competition: { type: "number" },
+      },
+    },
+  },
+  {
+    name: "feed_match",
+    description: "Semantic match: supply free-text interests (what your user knows/cares about — e.g. 'climate data pipelines in python') and get records ranked by embedding similarity × repo quality × trust × (1 - competition). Optionally pass topics[], a record id to find similar work (similar_to), a language, min_quality, or boost_paid to prefer repos with proven payouts. The client supplies the profile — nothing is stored.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        interests: { type: "string" },
+        topics: { type: "array", items: { type: "string" } },
+        similar_to: { type: "string" },
+        language: { type: "string" },
+        min_quality: { type: "number" },
+        boost_paid: { type: "boolean" },
+        limit: { type: "number" },
       },
     },
   },
@@ -920,6 +965,53 @@ export async function handleMcp(env: Env, body: Record<string, unknown>, ctx?: E
         case "feed_search": {
           const page = queryFeed(doc, args as FeedQuery);
           result = { ...page, total_matched: page.records.length, generated_at: doc.generated_at };
+          break;
+        }
+        case "feed_match": {
+          const a = args as { interests?: string; topics?: string[]; similar_to?: string; language?: string; min_quality?: number; boost_paid?: boolean; limit?: number };
+          // Query vector: item→item via stored vector, else embed interests/topics text.
+          let vec: number[] | null = null;
+          let unembedded = false;
+          if (a.similar_to) {
+            vec = await recordVector(env, a.similar_to);
+            if (!vec) unembedded = true;
+          } else {
+            const text = a.interests ?? (a.topics ?? []).join(" ");
+            if (text.trim()) vec = await embedText(env, text.slice(0, 2000));
+          }
+          if (!vec) {
+            // No embedding path — fall back to structured topic ranking.
+            const topics = a.topics ?? (a.similar_to ? doc.records.find((r) => r.id === a.similar_to)?.topics : undefined);
+            const page = queryFeed(doc, { topics: topics?.join(","), sort: "trust", limit: a.limit ?? 20 });
+            result = { mode: "structured-fallback", ...(unembedded ? { note: "similar_to record not yet embedded" } : {}), ...page };
+            break;
+          }
+          let hits: { matches?: { id: string; score: number }[] } | null = null;
+          try { hits = await env.EMBED.query(vec, { topK: 60 }) as { matches?: { id: string; score: number }[] }; } catch { /* remote binding unavailable */ }
+          if (!hits) {
+            // Vectorize unavailable — fall back to structured topic ranking.
+            const topics = a.topics ?? (a.similar_to ? doc.records.find((r) => r.id === a.similar_to)?.topics : undefined);
+            result = { mode: "structured-fallback", ...queryFeed(doc, { topics: topics?.join(","), sort: "trust", limit: a.limit ?? 20 }) };
+            break;
+          }
+          // Vectorize ids are sha256(recordId) — translate back to record ids.
+          const byHash = await vectorIdMap(env);
+          const sim = new Map((hits?.matches ?? []).map((m) => [byHash[m.id] ?? m.id, m.score]));
+          const compNorm = (r: FeedRecord) => Math.min(1, (r.competition?.pending_claims ?? 0) / 10);
+          let ranked = doc.records
+            .map((r) => ({ r, s: (sim.get(r.id) ?? 0) * (0.5 + (r.quality?.score ?? 0.5)) * (0.5 + (r.trust?.repo_pass_rate ?? 0.5)) * (1 - compNorm(r)) }))
+            .filter((x) => sim.has(x.r.id));
+          if (a.language) ranked = ranked.filter((x) => (x.r.language ?? "").toLowerCase() === a.language!.toLowerCase());
+          if (a.min_quality !== undefined) ranked = ranked.filter((x) => (x.r.quality?.score ?? 0) >= a.min_quality!);
+          if (a.boost_paid) ranked = ranked.filter((x) => (x.r.trust?.repo_paid ?? 0) > 0);
+          ranked.sort((x, y) => y.s - x.s);
+          const lim = Math.min(Math.max(a.limit ?? 20, 1), 50);
+          result = {
+            mode: "semantic",
+            matches: ranked.slice(0, lim).map((x) => ({ ...x.r, match_score: Math.round(x.s * 1000) / 1000 })),
+            total_indexed: doc.records.length,
+            embedding_lag: doc.records.filter((r) => !sim.has(r.id)).length > 0,
+          };
           break;
         }
         case "feed_get": {
@@ -1023,6 +1115,27 @@ opire, issuehunt, gitpay, generic) · \`tangled\` · \`radicle\` ·
 \`forgejo\`/\`gitlab\`/\`codeberg\` watchlists · \`external:immunefi\` ·
 \`external:slop\` (slop.cash project registry — monthly contribution
 pools with published reward terms)
+
+## Quality + matching
+
+Every record may carry \`quality{score,stars,open_issues,pushed_at,
+maintainer_responsive}\` (CHAOSS-aligned repo health, 0–1, \`null\` when
+the forge exposes too few signals), \`language\`, and \`topics[]\` (repo
+topics ∪ issue labels ∪ domain keywords).
+
+Client-side matching contract — your AI knows its user; we never profile
+contributors:
+
+- \`GET /api/feed?topics=climate,python\` — records sharing topics rank
+  first, overlap count breaks ties.
+- \`POST /mcp\` → \`feed_match {interests|"topics"|"similar_to", language?,
+  min_quality?, boost_paid?}\` — semantic match via BGE embeddings in
+  Vectorize, re-ranked \`similarity × quality × trust × (1-competition)\`.
+  \`similar_to\` does item→item; \`boost_paid\` prefers repos with proven
+  payouts. Falls back to structured topic ranking when embeddings are
+  unavailable (mode:"structured-fallback").
+- Caveat (CHAOSS): repo scores compare activity health, not project
+  merit — don't compare scores across different project types.
 
 ## Trust model
 

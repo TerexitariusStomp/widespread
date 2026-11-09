@@ -10,6 +10,8 @@ import type { ChainVerification, OpLogEntry } from "@widespread/protocol";
 export interface Env {
   CLAIMS: KVNamespace;
   AI: Ai;
+  QUALITY: R2Bucket;
+  EMBED: VectorizeIndex;
   FORGE_BASE: string;
   WATCH_REPOS: string;
   PAYPAL_API_BASE: string;
@@ -86,6 +88,22 @@ export interface FeedRecord {
   execution?: { recommended: string; isolation: string; alternatives: string[]; note: string };
   trust?: { repo_claims?: number; repo_paid?: number; repo_pass_rate?: number };
   competition?: { pending_claims?: number; unique_claimants?: number; first_claim_age_h?: number };
+  /** Repo health signals (CHAOSS-aligned) — score is 0–1, null when the
+   * forge exposes too few signals to score honestly. */
+  quality?: {
+    score: number | null;
+    stars?: number;
+    merged_30d?: number;
+    open_issues?: number;
+    pushed_at?: string;
+    maintainer_responsive?: boolean;
+    computed_at?: number;
+  };
+  /** Primary repo language — key client-side matching dimension. */
+  language?: string;
+  /** Repo topics + issue labels + domain keywords — client-side matching
+   * surface; consumers rank records against what their AI knows of them. */
+  topics?: string[];
   /** Monetization path for non-Widespread funding — never implies our escrow.
    * String for simple hints; MirrorOffer when a concrete mirror
    * into a Widespread market is available. */
