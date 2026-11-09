@@ -22,8 +22,9 @@
  * Session state lives in the per-session DO: sha256 token hashes only.
  */
 import { HermesSessionDO } from './session-do'
+import { handleTcpUpgrade, mintTcpToken, validateTcpRequest, type TcpEnv } from './tcp'
 
-export interface Env {
+export interface Env extends TcpEnv {
   GW_SESSIONS: DurableObjectNamespace
   SHARE_ORIGINS?: string
 }
@@ -99,6 +100,37 @@ export default {
 
     if (url.pathname === '/' || url.pathname === '/health') {
       return json(200, { service: 'gw-relay', ok: true })
+    }
+
+    // POST /tcp-token — mint a short-lived HMAC token for the relayed TCP
+    // tunnel used by the in-browser runtime's socket module. Same origin
+    // gate + rate limit as session minting; the token is the only credential
+    // /tcp checks (stateless — nothing is stored).
+    if (url.pathname === '/tcp-token' && request.method === 'POST') {
+      const allowOrigin = shareOriginAllowed(origin, env)
+      if (!allowOrigin) return json(403, { error: 'origin_not_allowed' })
+      const ip = request.headers.get('cf-connecting-ip') || 'unknown'
+      if (!rateLimit(`tcpmint:${ip}`, 60, 3600_000) || !rateLimit('tcpmint:global', 5000, 3600_000)) {
+        return json(429, { error: 'rate_limited' }, allowOrigin)
+      }
+      const minted = await mintTcpToken(env)
+      if (!minted) return json(503, { error: 'tcp_tunnel_disabled' }, allowOrigin)
+      return json(200, {
+        token: minted.token,
+        base: `${url.protocol}//${request.headers.get('host')}`,
+        expiresAt: minted.expiresAt,
+      }, allowOrigin)
+    }
+
+    // GET /tcp — validation JSON without an Upgrade header; with one, the
+    // WebSocket pipes to the resolved public TCP endpoint.
+    if (url.pathname === '/tcp' && request.method === 'GET') {
+      const isUpgrade = request.headers.get('Upgrade')?.toLowerCase() === 'websocket'
+      if (isUpgrade) {
+        return handleTcpUpgrade(env, request)
+      }
+      const check = await validateTcpRequest(env, url)
+      return json(check.ok ? 200 : (check.error === 'bad_token' ? 401 : 403), check)
     }
 
     // POST /s — mint a rendezvous session. Origin-restricted + rate-limited.

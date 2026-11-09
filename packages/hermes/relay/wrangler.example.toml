@@ -26,3 +26,8 @@ SHARE_ORIGINS = "https://hermes.example.com,http://localhost:8471"
 
 [observability]
 enabled = false
+
+# HMAC secret for /tcp-token (relayed TCP egress used by the in-browser
+# runtime's socket module). Generate: openssl rand -hex 32. Without it the
+# tunnel endpoints answer 503/401 — sessions and REST bridging are unaffected.
+# TCP_TUNNEL_SECRET = "change-me"
