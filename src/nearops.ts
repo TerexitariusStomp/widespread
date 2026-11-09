@@ -78,10 +78,13 @@ async function rpcCall<T>(env: { NEAR_RPC_URL?: string }, method: string, params
   const j = (await res.json()) as { result?: T; error?: { message?: string; data?: string; cause?: { info?: { error_message?: string } } } };
   if (j.error) {
     const e = j.error as Record<string, unknown>;
-    const detail = e.cause && typeof e.cause === "object"
-      ? JSON.stringify((e.cause as { info?: unknown }).info ?? e.cause)
-      : (typeof e.data === "string" ? e.data : JSON.stringify(e.data ?? e.message));
-    throw new Error(`near rpc ${method}: ${detail}`);
+    const causeInfo = e.cause && typeof e.cause === "object"
+      ? (e.cause as { info?: unknown }).info ?? e.cause
+      : undefined;
+    const detail = causeInfo ?? (typeof e.data === "string" ? e.data : e.data)
+      ?? e.message;
+    const rendered = typeof detail === "string" ? detail : JSON.stringify(detail ?? e);
+    throw new Error(`near rpc ${method}: ${rendered === "{}" ? JSON.stringify(e) : rendered}`);
   }
   return j.result as T;
 }
@@ -188,6 +191,27 @@ export async function nearFunctionCall(
   }>(env, "send_tx", { signed_tx_base64: b64, wait_until: "FINAL" });
   const status = result.receipts_outcome?.map((r) => r?.outcome?.status ?? r) ?? result.status ?? result;
   return { txHash: result.transaction?.hash ?? "", status };
+}
+
+/** Read-only contract call — returns the JSON-parsed result bytes. */
+export async function nearViewCall(
+  env: { NEAR_RPC_URL?: string },
+  contractId: string,
+  methodName: string,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  const bytes = new TextEncoder().encode(JSON.stringify(args));
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 8192) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + 8192));
+  }
+  const r = await rpcCall<{ result?: number[] }>(env, "query", {
+    request_type: "call_function", finality: "final",
+    account_id: contractId, method_name: methodName,
+    args_base64: btoa(bin),
+  });
+  const out = new Uint8Array(r.result ?? []);
+  return JSON.parse(new TextDecoder().decode(out));
 }
 
 /** NEAR price in USD from the Intents token list (wNEAR on near chain). */
