@@ -85,6 +85,21 @@ describe("web pages", () => {
     expect(t).toContain("platform cut");
   });
 
+  it("escapes HTML in titles/specs (XSS)", async () => {
+    feedDocMock.mockResolvedValue({
+      generated_at: Date.now(), sources: {},
+      records: [record({ title: "<script>alert(1)</script>", spec: "<img onerror=x>" })],
+      mirrors: [],
+    });
+    const t = await (await bountiesPage(env)).text();
+    expect(t).not.toContain("<script>alert(1)</script>");
+    expect(t).toContain("&lt;script&gt;");
+    const d = await (await bountyPage(env, undefined,
+      "github-thirdparty:generic:o/r#1")).text();
+    expect(d).not.toContain("<img onerror=x>");
+    expect(d).toContain("&lt;img");
+  });
+
   it("docs page covers feed surfaces + standards status", async () => {
     const t = await docsPage().text();
     expect(t).toContain("/api/feed");

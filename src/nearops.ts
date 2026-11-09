@@ -11,8 +11,14 @@
 const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
 export function b58decode(s: string): Uint8Array {
+  if (s === "") return new Uint8Array(0);
+  // Leading '1's encode zero bytes — count them, decode the rest as a
+  // magnitude, then prepend. (The old in-place version double-counted.)
+  let zeros = 0;
+  while (zeros < s.length && s[zeros] === "1") zeros++;
+  const rest = s.slice(zeros);
   const bytes = [0];
-  for (const ch of s) {
+  for (const ch of rest) {
     let carry = B58.indexOf(ch);
     if (carry < 0) throw new Error(`bad base58 char ${ch}`);
     for (let i = 0; i < bytes.length; i++) {
@@ -22,8 +28,10 @@ export function b58decode(s: string): Uint8Array {
     }
     while (carry) { bytes.push(carry & 0xff); carry >>= 8; }
   }
-  for (const ch of s) { if (ch === "1") bytes.push(0); else break; }
-  return new Uint8Array(bytes.reverse());
+  const mag = rest ? new Uint8Array(bytes.reverse()) : new Uint8Array(0);
+  const out = new Uint8Array(zeros + mag.length);
+  out.set(mag, zeros);
+  return out;
 }
 
 export function b58encode(bytes: Uint8Array): string {
