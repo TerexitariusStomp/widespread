@@ -72,6 +72,23 @@ export function miscRoutes() {
       headers: { "content-type": "application/json", "cache-control": "public, max-age=3600" },
     }));
 
+  // Agent registry — discoverable directory of who works here: contributor
+  // rep (event-sourced, signed) + registered runners. WorkProtocol's
+  // agent-registry parity surface.
+  app.get("/api/agents", async (c) => {
+    const [{ repIndex, spamLikely, claimRank }, { listRunners }] = await Promise.all([
+      import("../rep"), import("../feed"),
+    ]);
+    const idx = await repIndex(c.env);
+    const runners = await listRunners(c.env).catch(() => [] as unknown[]);
+    const contributors = Object.entries(idx.contrib).map(([actor, r]) => ({
+      actor: `github:${actor}`,
+      rep: { ...r, spam_likely: spamLikely(r), rank: claimRank(r) },
+      export: `/api/rep/${actor}/export`,
+    })).sort((a, b) => b.rep.rank - a.rep.rank);
+    return json({ contributors, runners, total: contributors.length });
+  });
+
   // Foreguild futarchy — live governance proposals on the NEAR contract.
   app.get("/api/futarchy", async (c) => {
     const acct = (c.env as { FUTARCHY_CONTRACT?: string }).FUTARCHY_CONTRACT;
