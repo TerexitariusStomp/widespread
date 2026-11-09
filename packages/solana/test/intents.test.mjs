@@ -9,8 +9,10 @@ const realFetch = globalThis.fetch;
 
 function stubFetch(handler) {
   globalThis.fetch = async (url, init) => {
-    const u = String(url);
-    const body = init?.body ? JSON.parse(init.body) : undefined;
+    // axios's fetch adapter hands us a Request object, not (url, init).
+    const u = url instanceof Request ? url.url : String(url);
+    const raw = init?.body ?? (url instanceof Request ? await url.text() : undefined);
+    const body = raw && typeof raw !== 'string' ? undefined : raw ? JSON.parse(raw) : undefined;
     const out = handler(u, body);
     // Handlers may return a bare body, {body, http}, or {body, status:http}.
     const http = typeof out.status === 'number' ? out.status

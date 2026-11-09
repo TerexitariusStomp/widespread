@@ -503,21 +503,27 @@ importers:
 
   packages/runner:
     dependencies:
-      '@noble/ed25519':
-        specifier: ^2.1.0
-        version: 2.3.0
+      '@widespread/protocol':
+        specifier: workspace:*
+        version: link:../protocol
       dockerode:
         specifier: ^4.0.0
         version: 4.0.12(supports-color@10.2.2)
 
   packages/solana:
     dependencies:
+      '@defuse-protocol/one-click-sdk-typescript':
+        specifier: ^0.1.26
+        version: 0.1.26(debug@4.4.3(supports-color@10.2.2))(supports-color@10.2.2)
       '@solana/spl-token':
         specifier: ^0.4.0
         version: 0.4.15(@solana/web3.js@1.99.0(bufferutil@4.2.0)(typescript@6.0.3))(bufferutil@4.2.0)(fastestsmallesttextencoderdecoder@1.0.22)(typescript@6.0.3)
       '@solana/web3.js':
         specifier: ^1.95.0
         version: 1.99.0(bufferutil@4.2.0)(typescript@6.0.3)
+      axios:
+        specifier: ^1.7.0
+        version: 1.21.0(debug@4.4.3(supports-color@10.2.2))(supports-color@10.2.2)
 
 packages:
 
@@ -2506,9 +2512,6 @@ packages:
   '@noble/curves@2.4.0':
     resolution: {integrity: sha512-P4/62zrgfH33CneE3Dn4WhJVA22YUU0eR51wKIan4NVRvwsA0YnPTwWGpNbpuacSujmSFLvyzpyuR30+fbq2Ew==}
     engines: {node: '>= 20.19.0'}
-
-  '@noble/ed25519@2.3.0':
-    resolution: {integrity: sha512-M7dvXL2B92/M7dw9+gzuydL8qn/jiqNHaoR3Q+cb1q1GHV7uwE17WCyFMG+Y+TZb5izcaXk5TdJRrDUxHXL78A==}
 
   '@noble/ed25519@3.2.0':
     resolution: {integrity: sha512-criDgRlnUA09hchYrTy/JUWPIEap5rZxQe6wDWzRx51oWWpDRcUpuNzlgPxDJaOK6AsW9c0wKcj3rKRv6t+bPQ==}
@@ -8580,8 +8583,6 @@ snapshots:
   '@noble/curves@2.4.0':
     dependencies:
       '@noble/hashes': 2.4.0
-
-  '@noble/ed25519@2.3.0': {}
 
   '@noble/ed25519@3.2.0': {}
 
