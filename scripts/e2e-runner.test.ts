@@ -269,7 +269,25 @@ test("registry fixture writes survive idle-socket closure without replay", async
     const server = await startGitHubApiFixture(0);
     // Reproduce a server retiring idle sockets while the independent test
     // client starts its next request. Never interrupt an active request.
-    const closeIdle = setInterval(() => server.closeIdleConnections(), 1);
+    // Only sockets that have already served a request are eligible:
+    // closeIdleConnections() also destroys freshly-accepted sockets whose
+    // first request is still in flight (Node ≥22), which is not the
+    // scenario under test.
+    const sockets = new Set();
+    server.on("connection", (socket) => {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+    });
+    server.on("request", (request) => {
+      request.socket.__served = true;
+    });
+    const closeIdle = setInterval(() => {
+      for (const socket of sockets) {
+        if (socket.__served && !socket._httpMessage && !socket.destroyed) {
+          socket.destroy();
+        }
+      }
+    }, 1);
     try {
       const child = spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(client)}, "http://127.0.0.1:" + server.address().port], { stdio: "inherit" });
       const status = await new Promise((resolve, reject) => {
