@@ -17,7 +17,7 @@ import { claimRoutes } from "./routes/claims";
 import { hatRoutes } from "./routes/hats";
 import { miscRoutes } from "./routes/misc";
 import { payoutRoutes } from "./routes/payouts";
-import { scanMirrorSubmissions } from "./ingest";
+import { scanMirrorSubmissions, settleMergedClaims } from "./ingest";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -48,5 +48,6 @@ export default {
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(scan(env).catch((e) => console.error(`scan: ${String(e)}`)));
     ctx.waitUntil(scanMirrorSubmissions(env).catch((e) => console.error(`ingest: ${String(e)}`)));
+    ctx.waitUntil(settleMergedClaims(env).catch((e) => console.error(`settle: ${String(e)}`)));
   },
 } satisfies ExportedHandler<Env>;

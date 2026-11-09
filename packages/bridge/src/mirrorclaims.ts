@@ -195,24 +195,25 @@ export async function handleMirrorVerdict(req: Request, env: Env, ctx?: Executio
     next: accept ? "POST /api/mirrors/payout {mirror_id} to send USD to the winner via PayPal." : null });
 }
 
-export async function handleMirrorPayout(req: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
-  const body = (await req.json().catch(() => null)) as Record<string, unknown> | null;
-  const mirrorId = String(body?.mirror_id ?? "");
-  if (!mirrorId) return Response.json({ ok: false, error: "mirror_id required" }, { status: 400 });
+/** Payout core — shared by the HTTP route and the auto-settle path
+ * (merge=accept). Returns a plain result; HTTP wrappers shape it. */
+export async function executeMirrorPayout(env: Env, mirrorId: string): Promise<{
+  ok: boolean; status?: string; settlement?: unknown; error?: string; code?: number;
+}> {
   const settlement = await kv(env).get(settleKey(mirrorId)).then((v) => v ? JSON.parse(v) : null);
   if (!settlement || settlement.status !== "won") {
-    return Response.json({ ok: false, error: "no winning settlement for this mirror" }, { status: 409 });
+    return { ok: false, error: "no winning settlement for this mirror", code: 409 };
   }
   // Terminal marker: PayPal batch_id (transaction_id also lands on the
   // receipt once the batch read-back succeeds).
   if (settlement.payout?.batch_id || settlement.payout?.transaction_id) {
-    return Response.json({ ok: true, status: "already_paid", settlement });
+    return { ok: true, status: "already_paid", settlement };
   }
   // In-flight guard: mark "sending" before touching the rail so a
   // concurrent retry can't double-pay during the KV propagation window.
   if (settlement.payout?.status === "sending"
       && Date.now() - Number(settlement.payout.attempted_at ?? 0) < 10 * 60 * 1000) {
-    return Response.json({ ok: true, status: "payout_in_progress", settlement });
+    return { ok: true, status: "payout_in_progress", settlement };
   }
   settlement.payout = { status: "sending", attempted_at: Date.now() };
   await kv(env).put(settleKey(mirrorId), JSON.stringify(settlement));
@@ -235,15 +236,23 @@ export async function handleMirrorPayout(req: Request, env: Env, ctx?: Execution
       if (payer && payer.toLowerCase() !== settlement.paypal_usd.to?.toLowerCase()) {
         await bumpFunderRep(env, payer, "paid").catch(() => undefined);
       }
-      return Response.json({ ok: true, settlement });
+      return { ok: true, settlement };
     }
 
-    return Response.json({ ok: false, error: "winner provided no PayPal payout email (paypal_email)" }, { status: 409 });
+    return { ok: false, error: "winner provided no PayPal payout email (paypal_email)", code: 409 };
   } catch (e) {
     // A thrown rail call must not leave the settlement stuck in "sending".
     settlement.payout = { status: "failed",
       error: e instanceof Error ? e.message : String(e) };
     await kv(env).put(settleKey(mirrorId), JSON.stringify(settlement));
-    return Response.json({ ok: false, error: settlement.payout.error, settlement }, { status: 500 });
+    return { ok: false, error: settlement.payout.error, settlement, code: 500 };
   }
+}
+
+export async function handleMirrorPayout(req: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
+  const body = (await req.json().catch(() => null)) as Record<string, unknown> | null;
+  const mirrorId = String(body?.mirror_id ?? "");
+  if (!mirrorId) return Response.json({ ok: false, error: "mirror_id required" }, { status: 400 });
+  const r = await executeMirrorPayout(env, mirrorId);
+  return Response.json(r, { status: r.ok ? 200 : (r.code ?? 500) });
 }

@@ -11,7 +11,7 @@
 //   forge watchlists 60m · external boards 60m–6h
 
 import { nearView } from "./near";
-import { scanMirrorSubmissions } from "./ingest";
+import { scanMirrorSubmissions, settleMergedClaims } from "./ingest";
 import { attachQuality, fillQuality, embedRecords, embedText, recordVector, vectorIdMap, repoQualityEntry } from "./quality";
 import { creditMerges } from "./rep";
 import { listBounties, listRecords } from "./store";
@@ -714,6 +714,9 @@ export async function refreshFeed(env: Env, ctx?: ExecutionContext): Promise<Fee
     // Auto-ingest submissions on funded mirrors — agents keep using the
     // original forge flow (PRs on the issue); we file attested claims.
     if (ctx) ctx.waitUntil(scanMirrorSubmissions(env).catch((e) => console.error(`ingest: ${String(e)}`)));
+    // Auto-settle: merged claims on funded mirrors pay out unattended
+    // (merge=accept — deterministic, same rule the platform runs on).
+    if (ctx) ctx.waitUntil(settleMergedClaims(env).catch((e) => console.error(`settle: ${String(e)}`)));
     // Quality fill + embeddings run post-commit — never block the request.
     if (ctx) {
       ctx.waitUntil(fillQuality(env).catch((e) => console.error(`quality: ${String(e)}`)));
