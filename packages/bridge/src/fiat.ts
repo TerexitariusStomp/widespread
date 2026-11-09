@@ -13,33 +13,14 @@
 
 import type { Env, MirrorListing } from "./types";
 import { nearFunctionCall, nearPriceUsd, nearViewCall } from "./nearops";
+import { paypalAccessToken, paypalApi } from "./paypal";
 
-const PAYPAL_API = (env: Env) => env.PAYPAL_API_BASE;
-
-interface PayPalToken { access_token: string; expires_at: number }
-let cached: PayPalToken | null = null;
-
-async function accessToken(env: Env): Promise<string> {
-  if (cached && cached.expires_at > Date.now() + 30_000) return cached.access_token;
-  const res = await fetch(`${PAYPAL_API(env)}/v1/oauth2/token`, {
-    method: "POST",
-    headers: {
-      authorization: `Basic ${btoa(`${env.PAYPAL_CLIENT_ID}:${env.PAYPAL_CLIENT_SECRET}`)}`,
-      "content-type": "application/x-www-form-urlencoded",
-    },
-    body: "grant_type=client_credentials",
-  });
-  if (!res.ok) throw new Error(`paypal oauth: HTTP ${res.status}`);
-  const body = (await res.json()) as { access_token: string; expires_in: number };
-  cached = { access_token: body.access_token, expires_at: Date.now() + body.expires_in * 1000 };
-  return body.access_token;
-}
 
 async function pp(env: Env, method: string, path: string, body?: unknown): Promise<Record<string, unknown>> {
-  const res = await fetch(`${PAYPAL_API(env)}${path}`, {
+  const res = await fetch(`${paypalApi(env)}${path}`, {
     method,
     headers: {
-      authorization: `Bearer ${await accessToken(env)}`,
+      authorization: `Bearer ${await paypalAccessToken(env)}`,
       "content-type": "application/json",
     },
     ...(body ? { body: JSON.stringify(body) } : {}),

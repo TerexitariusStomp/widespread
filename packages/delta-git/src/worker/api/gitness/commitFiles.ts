@@ -32,7 +32,7 @@ const te = new TextEncoder();
 const MAX_ACTIONS = 256;
 const MAX_ACTION_BYTES = 2 * 1024 * 1024;
 
-export interface CommitFileAction {
+interface CommitFileAction {
   action?: string;
   encoding?: string;
   path?: string;

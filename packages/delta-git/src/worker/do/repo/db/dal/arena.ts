@@ -85,13 +85,6 @@ export async function getMatch(
   return rows[0];
 }
 
-export async function updateMatch(
-  db: DrizzleSqliteDODatabase,
-  id: string,
-  patch: Partial<MatchRow>
-): Promise<void> {
-  await db.update(matches).set(patch).where(eq(matches.id, id));
-}
 
 /** Conditional status transition — returns false if the row moved already. */
 export async function transitionMatch(

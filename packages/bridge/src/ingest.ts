@@ -14,20 +14,11 @@
 import type { Env, MirrorListing } from "./types";
 import { getFeedDoc } from "./feedstore";
 import { validateForgeSubmission, attestationForMirror } from "./claims";
+import { GH_API, ghHeaders, sha256Hex } from "./forge";
 
 const MIRROR_SCAN_LIMIT = 10;
 const PR_SCAN_LIMIT = 15;
 const claimKey = (mirrorId: string, hash: string) => `mclaim:${mirrorId}:${hash}`;
-
-const GH_API = "https://api.github.com";
-
-function ghHeaders(env: Env): Record<string, string> {
-  return {
-    accept: "application/vnd.github+json",
-    "user-agent": "widespread-bridge",
-    ...(env.GITHUB_TOKEN ? { authorization: `Bearer ${env.GITHUB_TOKEN}` } : {}),
-  };
-}
 
 /** Extract owner/repo + issue number from a GitHub-sourced record id like
  * `github-thirdparty:generic:Expensify/App#103875`. */
@@ -45,11 +36,6 @@ async function isFunded(env: Env, mirror: MirrorListing): Promise<boolean> {
   if (mirror.status === "funded" && mirror.funded_market_id) return true;
   const f = await env.CLAIMS.get(`fiatfund:${mirror.id}`).then((v) => v ? JSON.parse(v) : null);
   return f?.status === "captured";
-}
-
-async function sha256Hex(s: string): Promise<string> {
-  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
-  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 /** One scan pass — called after each feed refresh (30 min cadence). */

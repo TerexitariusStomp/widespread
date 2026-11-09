@@ -179,7 +179,7 @@ function concatBytes(...parts: Uint8Array[]): Uint8Array {
 
 /** Split `https://user:pass@host/path` → clean base + Basic auth header.
  * Mirror credentials live in the target URL, never logged or stored apart. */
-export function splitRemoteAuth(url: string): { base: string; auth?: string } {
+function splitRemoteAuth(url: string): { base: string; auth?: string } {
   try {
     const parsed = new URL(url);
     if (!parsed.username) return { base: url.replace(/\/$/, "") };

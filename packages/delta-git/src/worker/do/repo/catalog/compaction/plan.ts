@@ -13,7 +13,7 @@ const COMPACTION_FAN_IN = 4;
 // Types
 // ---------------------------------------------------------------------------
 
-export type CompactionTierState = {
+type CompactionTierState = {
   tier: number;
   activePackCount: number;
 };

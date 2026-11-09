@@ -373,7 +373,6 @@ export const processedEvents = sqliteTable(
   (t) => [primaryKey({ columns: [t.eventId], name: "processed_events_pk" })]
 );
 
-export type ProcessedEventRow = typeof processedEvents.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // Issues — GitHub-shaped tracker backed by this repo's DO
@@ -494,7 +493,6 @@ export const issueLabels = sqliteTable(
   ]
 );
 
-export type IssueLabelRow = typeof issueLabels.$inferSelect;
 
 // Milestones are numbered like issues so URLs read `/milestones/2`.
 export const milestones = sqliteTable(

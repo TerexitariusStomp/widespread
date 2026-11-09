@@ -133,7 +133,7 @@ export function getAuthorizationServer(origin: string): OAuthAuthorizationServer
   return server;
 }
 
-export function getBearerToken(request: Request): string | null {
+function getBearerToken(request: Request): string | null {
   const header = request.headers.get("Authorization") || "";
   const match = /^Bearer\s+(.+)$/i.exec(header);
   return match?.[1]?.trim() || null;
@@ -144,8 +144,8 @@ async function sha256Hex(input: string): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-export const OAUTH_DPOP_ACCESS_PREFIX = "oauthdpop:at:";
-export const OAUTH_DPOP_REFRESH_PREFIX = "oauthdpop:rt:";
+const OAUTH_DPOP_ACCESS_PREFIX = "oauthdpop:at:";
+const OAUTH_DPOP_REFRESH_PREFIX = "oauthdpop:rt:";
 
 /** Record the DPoP key binding for freshly issued tokens. Called by the
  *  /oauth/token wrapper after a successful token response. */

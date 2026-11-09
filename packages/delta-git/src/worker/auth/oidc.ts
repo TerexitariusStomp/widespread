@@ -36,7 +36,7 @@ export interface OidcConfig {
   clientSecret: string;
 }
 
-export type OidcConfigError =
+type OidcConfigError =
   | "missing_issuer"
   | "insecure_issuer"
   | "missing_client_id"
@@ -147,7 +147,7 @@ export async function deriveTransactionCookieSecret(
   return new Uint8Array(derived);
 }
 
-export type DecodeTransactionPayloadError = "malformed" | "invalid_payload" | "expired";
+type DecodeTransactionPayloadError = "malformed" | "invalid_payload" | "expired";
 
 export type DecodeTransactionPayloadResult =
   | { ok: true; payload: TransactionPayload }
@@ -179,7 +179,7 @@ export interface OidcProvider {
   configuration: oidc.Configuration;
 }
 
-export type OidcDiscoveryError = "discovery_failed" | "invalid_endpoint";
+type OidcDiscoveryError = "discovery_failed" | "invalid_endpoint";
 
 export type OidcDiscoveryResult =
   | { ok: true; provider: OidcProvider }
@@ -262,11 +262,11 @@ export async function discoverOidcProvider(
   return { ok: true, provider };
 }
 
-export interface TokenExchangeResponse {
+interface TokenExchangeResponse {
   claims: oidc.IDToken;
 }
 
-export type ExchangeError = "token_exchange_failed" | "invalid_id_token";
+type ExchangeError = "token_exchange_failed" | "invalid_id_token";
 
 export type ExchangeResult =
   | { ok: true; tokens: TokenExchangeResponse }
@@ -303,12 +303,12 @@ export async function exchangeAuthorizationCode(
   return { ok: true, tokens: { claims } };
 }
 
-export interface VerifiedIdToken {
+interface VerifiedIdToken {
   sub: string;
   preferredUsername?: string;
 }
 
-export type VerifyError = "missing_sub";
+type VerifyError = "missing_sub";
 
 export type VerifyResult =
   | { ok: true; verified: VerifiedIdToken }

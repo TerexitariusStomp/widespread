@@ -1,7 +1,7 @@
 import { pktLine, flushPkt } from "@/worker/git/core";
 import type { Logger } from "@/worker/common/logger";
 
-export const SIDEBAND_PAYLOAD_MAX_BYTES = 65_515;
+const SIDEBAND_PAYLOAD_MAX_BYTES = 65_515;
 
 type SidebandEnqueueController = {
   enqueue(chunk: Uint8Array): void;
@@ -94,7 +94,7 @@ export class SidebandProgressMux {
   }
 }
 
-export function createSidebandTransform(options?: {
+function createSidebandTransform(options?: {
   onProgress?: (msg: string) => void;
   signal?: AbortSignal;
 }): TransformStream<Uint8Array, Uint8Array> {

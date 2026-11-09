@@ -28,13 +28,3 @@ export function scanTextForSecrets(text: string, path?: string): SecretFinding[]
 }
 
 /** Scan every file entry in a patch-like {path: text} map. */
-export function scanForSecrets(
-  files: Map<string, string> | Record<string, string>
-): SecretFinding[] {
-  const findings: SecretFinding[] = [];
-  const entries = files instanceof Map ? files.entries() : Object.entries(files);
-  for (const [path, text] of entries) {
-    findings.push(...scanTextForSecrets(text, path));
-  }
-  return findings;
-}

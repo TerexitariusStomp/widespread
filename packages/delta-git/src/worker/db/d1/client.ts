@@ -23,4 +23,3 @@ export function createDb(executor: D1Executor): Db {
 
 // Type alias used by DAL function signatures so callers can pass the
 // session-backed or plain client without changing the helper.
-export type DbExecutor = Db;

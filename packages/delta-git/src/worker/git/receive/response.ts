@@ -7,7 +7,7 @@ import {
 
 export type ReceiveResponseMode = "plain" | "side-band-64k";
 
-export function buildSidebandReceiveBody(reportStatusBody: Uint8Array): Uint8Array {
+function buildSidebandReceiveBody(reportStatusBody: Uint8Array): Uint8Array {
   return concatChunks([...createSidebandPacketChunks(1, reportStatusBody), flushPkt()]);
 }
 

@@ -32,7 +32,7 @@ const log = createLogger(undefined, { service: "GitnessExec" });
 /** A running execution silent for this long is presumed dead. */
 const STALE_MS = 10 * 60 * 1000;
 
-export function pipelineByIdOrUid(pipes: RepoPipeline[], param: string): RepoPipeline | undefined {
+function pipelineByIdOrUid(pipes: RepoPipeline[], param: string): RepoPipeline | undefined {
   const n = parseInt(param, 10);
   return pipes.find((p) => p.id === n || p.identifier === param);
 }

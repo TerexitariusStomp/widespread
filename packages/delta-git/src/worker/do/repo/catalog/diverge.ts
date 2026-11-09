@@ -18,9 +18,9 @@ const DIVERGEABLE_PREFIX = "refs/heads/";
 const DELTA_PREFIX = "refs/delta/";
 
 export const MERGE_INTENT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-export const MAX_OPEN_INTENTS_PER_REF = 64;
+const MAX_OPEN_INTENTS_PER_REF = 64;
 
-export type DivergencePlan = {
+type DivergencePlan = {
   kind: "plan";
   /** Commands rewritten to delta refs, plus the ones that validated as-is. */
   commands: ReceiveCommand[];
@@ -30,7 +30,7 @@ export type DivergencePlan = {
 };
 
 /** No divergence plan possible — report the original conflict. */
-export type DivergenceRejected = { kind: "rejected" };
+type DivergenceRejected = { kind: "rejected" };
 
 export type DivergenceOutcome = DivergencePlan | DivergenceRejected;
 
@@ -170,7 +170,7 @@ export function planDivergence(args: {
 // quarantinable.
 // ---------------------------------------------------------------------------
 
-export type QuarantinePlan = {
+type QuarantinePlan = {
   kind: "quarantined";
   /** Rewritten delta-ref commands to apply. */
   commands: ReceiveCommand[];
@@ -180,7 +180,7 @@ export type QuarantinePlan = {
 };
 
 /** Nothing quarantinable — every command was a delete or non-heads ref. */
-export type QuarantineRejected = { kind: "rejected"; statuses: ReceiveStatus[] };
+type QuarantineRejected = { kind: "rejected"; statuses: ReceiveStatus[] };
 
 export type QuarantineOutcome = QuarantinePlan | QuarantineRejected;
 

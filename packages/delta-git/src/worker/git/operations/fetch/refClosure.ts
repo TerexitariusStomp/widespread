@@ -19,7 +19,7 @@ const COMMIT_TYPE_CODE = 1;
 /** Sentinel for the per-object tree-depth table used by `tree:<n>` filters. */
 const DEPTH_UNSET = 0xffff;
 
-export type RefClosureStats = {
+type RefClosureStats = {
   indexedObjects: number;
   queued: number;
   seen: number;

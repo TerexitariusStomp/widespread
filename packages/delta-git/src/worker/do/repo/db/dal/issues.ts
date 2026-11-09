@@ -75,14 +75,6 @@ export async function updateIssue(
   await db.update(issues).set(patch).where(eq(issues.id, id));
 }
 
-export async function countIssues(
-  db: DrizzleSqliteDODatabase,
-  state?: "open" | "closed"
-): Promise<number> {
-  const sel = db.select({ n: sql<number>`count(*)` }).from(issues);
-  const rows = state ? await sel.where(eq(issues.state, state)) : await sel;
-  return rows[0]?.n ?? 0;
-}
 
 // ---------------------------------------------------------------------------
 // Issue comments
@@ -187,9 +179,6 @@ export async function listLabels(db: DrizzleSqliteDODatabase, limit = 200): Prom
   return await db.select().from(labels).orderBy(asc(labels.name)).limit(limit);
 }
 
-export async function deleteLabel(db: DrizzleSqliteDODatabase, id: string): Promise<void> {
-  await db.delete(labels).where(eq(labels.id, id));
-}
 
 /** Resolve display labels for a set of issues in one query per side. */
 export async function listIssueLabels(

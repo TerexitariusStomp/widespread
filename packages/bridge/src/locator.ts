@@ -4,7 +4,7 @@
 // template for single-commit evidence. GitHub is the zero-setup baseline;
 // knot/radicle/deltagit are opt-in sovereign remotes.
 
-export type LocatorType =
+type LocatorType =
   | "github" | "gitlab" | "forgejo" | "codeberg"
   | "knot" | "radicle" | "deltagit" | "generic";
 
@@ -36,7 +36,7 @@ const TEMPLATES: Record<LocatorType, { diff: string | null; api: string | null }
   generic:  { diff: null, api: null },
 };
 
-export function detectType(url: string): LocatorType {
+function detectType(url: string): LocatorType {
   if (/github\.com/.test(url)) return "github";
   if (/gitlab\.com/.test(url)) return "gitlab";
   if (/codeberg\.org/.test(url)) return "codeberg";

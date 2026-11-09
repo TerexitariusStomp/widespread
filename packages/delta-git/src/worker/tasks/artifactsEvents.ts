@@ -178,4 +178,3 @@ export async function handleArtifactsEventBatch(
 }
 
 // Test seams.
-export const __test = { WORKSPACE_NAME_RE };

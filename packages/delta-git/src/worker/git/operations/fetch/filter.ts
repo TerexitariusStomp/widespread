@@ -8,7 +8,7 @@ import { typeCodeToObjectType } from "@/worker/git/object-store/support";
  * rules. Git combine semantics: an object is omitted only when EVERY rule
  * omits it, so inclusion ORs the rules.
  */
-export type FilterRule =
+type FilterRule =
   | { kind: "blob-none" }
   | { kind: "tree-depth"; depth: number }
   | { kind: "blob-limit"; bytes: number }
@@ -102,7 +102,7 @@ export function parseFilterSpec(raw: string): ParsedFilter | undefined {
  * it under-estimates inflated size for deltified blobs, so under-exclusion
  * stays on the superset (safe) side.
  */
-export function ruleIncludes(
+function ruleIncludes(
   rule: FilterRule,
   objectType: GitObjectType,
   storedSize: number,

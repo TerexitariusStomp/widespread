@@ -202,7 +202,7 @@ export async function suggestCodeOwnerReviewers(args: {
   return [...owners];
 }
 
-export async function loadCodeownersSource(
+async function loadCodeownersSource(
   env: Env,
   access: { route: { doName: string }; cacheCtx?: Parameters<typeof readPath>[4] }
 ): Promise<string | null> {

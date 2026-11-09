@@ -19,12 +19,18 @@
 //   5. spec binding: evidence.specHash or market specHash match.
 
 import { nearView } from "./near";
+import {
+  gh, parseForgeRef, patchFingerprint, sha256Hex,
+  type GhFile, type GhIssue, type GhPull,
+} from "./forge";
 import type { Env } from "./types";
 
-const GH_API = "https://api.github.com";
+// Re-exported for existing callers/tests — the canonical home is forge.ts.
+export { parseForgeRef };
+
 const TOKEN_TTL_MS = 7 * 24 * 3600 * 1000;
 
-export interface ClaimBody {
+interface ClaimBody {
   marketId?: string;
   forgeRef?: string;          // https://github.com/o/r/pull/12 | /issues/3 | o/r#12
   claimant?: string;          // NEAR account that receives payout
@@ -33,60 +39,6 @@ export interface ClaimBody {
   specHash?: string;
   forgeUserId?: string;       // claimed github numeric id — verified vs author
   evidence?: Record<string, unknown>;
-}
-
-interface GhAuthor { id: number; login: string }
-interface GhIssue {
-  number: number; state: string; title: string;
-  user: GhAuthor; pull_request?: unknown;
-}
-interface GhPull extends GhIssue {
-  head: { sha: string }; merged_at?: string | null;
-  additions: number; deletions: number; changed_files: number;
-}
-interface GhFile { filename: string; patch?: string; status: string }
-
-function ghHeaders(env: Env): Record<string, string> {
-  return {
-    accept: "application/vnd.github+json",
-    "user-agent": "widespread-bridge",
-    ...(env.GITHUB_TOKEN ? { authorization: `Bearer ${env.GITHUB_TOKEN}` } : {}),
-  };
-}
-
-async function gh<T>(env: Env, path: string): Promise<{ data: T | null; error?: string }> {
-  const res = await fetch(`${GH_API}${path}`, { headers: ghHeaders(env) });
-  if (res.status === 403 || res.status === 429) {
-    const reset = res.headers.get("x-ratelimit-reset");
-    return { data: null, error: `github rate limited${reset ? ` (resets ${new Date(Number(reset) * 1000).toISOString()})` : ""} — set GITHUB_TOKEN secret` };
-  }
-  if (!res.ok) return { data: null, error: `github ${res.status} for ${path}` };
-  return { data: (await res.json()) as T };
-}
-
-/** Parse owner/repo + kind + number from a forge ref. Returns null when the
- * ref isn't a recognized GitHub issue/PR locator. */
-export function parseForgeRef(ref: string):
-  { owner: string; repo: string; kind: "issue" | "pr"; number: number } | null {
-  const m = ref.match(/github\.com\/([\w.-]+)\/([\w.-]+)\/(issues|pull)\/(\d+)/i)
-    ?? ref.match(/^([\w.-]+)\/([\w.-]+)[#\/](\d+)$/);
-  if (!m) return null;
-  if (m.length === 5) {
-    return { owner: m[1], repo: m[2], kind: m[3].toLowerCase() === "pull" ? "pr" : "issue", number: Number(m[4]) };
-  }
-  return { owner: m[1], repo: m[2], kind: "issue", number: Number(m[3]) };
-}
-
-/** Deterministic fingerprint over a PR's file patches — the cheap
- * "is this real work" signal (non-empty diff) without a git binary. */
-async function patchFingerprint(files: GhFile[]): Promise<string | null> {
-  const material = files
-    .filter((f) => f.patch)
-    .map((f) => `${f.filename}${f.status}${f.patch}`)
-    .join("\n---\n");
-  if (!material) return null;
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(material));
-  return "sha256:" + [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 async function hmac(secret: string, data: string): Promise<string> {
@@ -254,11 +206,6 @@ export async function handleClaimPost(req: Request, env: Env): Promise<Response>
     shipClaimArgs,
     next: `Sign + broadcast shipClaim(${acct}) with shipClaimArgs from any NEAR account.`,
   }, { status: 201 });
-}
-
-async function sha256Hex(s: string): Promise<string> {
-  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
-  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 export async function handleClaimVerify(url: URL, env: Env): Promise<Response> {

@@ -6,7 +6,7 @@ import { z } from "zod";
 // D1. The payload deliberately omits `visibility` because KV is
 // eventually consistent and must not be an authorization source.
 
-export const RouteCacheRecordSchema = z.object({
+const RouteCacheRecordSchema = z.object({
   repositoryId: z.string(),
   namespaceId: z.string(),
   doName: z.string(),

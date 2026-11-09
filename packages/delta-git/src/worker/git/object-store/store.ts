@@ -2,7 +2,6 @@ import type { CacheContext } from "@/worker/cache";
 import type { Logger } from "@/worker/common/logger";
 import type { PackedObjectResult } from "./types";
 
-import { createBlobFromBytes } from "@/worker/common";
 import { parseCommitRefs, parseTagTarget, parseTreeChildOids } from "@/worker/git/core";
 import {
   MAX_SIMULTANEOUS_CONNECTIONS,
@@ -175,22 +174,5 @@ export async function readObjectRefsBatch(
   return out;
 }
 
-export async function readBlobStream(
-  env: Env,
-  repoId: string,
-  oid: string,
-  cacheCtx?: CacheContext
-): Promise<Response | null> {
-  const obj = await readObject(env, repoId, oid, cacheCtx);
-  if (!obj || obj.type !== "blob") return null;
-  return new Response(createBlobFromBytes(obj.payload).stream(), {
-    headers: {
-      "Content-Type": "application/octet-stream",
-      "Cache-Control": "public, max-age=31536000, immutable",
-      ETag: `"${obj.oid}"`,
-    },
-  });
-}
 
 export { findObject } from "./lookup";
-export { logPackedObjectMismatch } from "./support";

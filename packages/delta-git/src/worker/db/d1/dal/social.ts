@@ -89,25 +89,6 @@ export async function listStarredRepos(db: Db, userId: string): Promise<StarredR
 
 // Star counts batched by repo — the repo listing and explore pages need one
 // query, not N lookups.
-export async function starCountsForRepos(
-  db: Db,
-  repositoryIds: string[]
-): Promise<Map<string, number>> {
-  const out = new Map<string, number>();
-  if (repositoryIds.length === 0) return out;
-  const rows = await db
-    .select({ repositoryId: stars.repositoryId, count: sql<number>`count(*)` })
-    .from(stars)
-    .where(
-      sql`${stars.repositoryId} IN (${sql.join(
-        repositoryIds.map((id) => sql`${id}`),
-        sql`, `
-      )})`
-    )
-    .groupBy(stars.repositoryId);
-  for (const row of rows) out.set(row.repositoryId, row.count);
-  return out;
-}
 
 // --- topics ----------------------------------------------------------------
 

@@ -18,7 +18,6 @@ import type { Db } from "@/worker/db/d1/client";
 import { listMembershipsForNamespace } from "@/worker/db/d1/dal/namespaces";
 import {
   listCasbinRules,
-  listGroupsForUserInNamespace,
   listServiceAccounts,
   listUserGroupMembers,
   listUserGroups,
@@ -52,12 +51,12 @@ export function principalForUser(userId: string): string {
   return `user:${userId}`;
 }
 
-export function principalForServiceAccount(id: string): string {
+function principalForServiceAccount(id: string): string {
   return `svc:${id}`;
 }
 
 /** Synthesize the namespace's casbin policy text. Exported for tests. */
-export async function policyForNamespace(db: Db, namespaceId: string): Promise<string> {
+async function policyForNamespace(db: Db, namespaceId: string): Promise<string> {
   const lines: string[] = [];
   for (const [role, actions] of Object.entries(ROLE_ACTIONS)) {
     lines.push(`p, role:${role}, ${namespaceId}, *, ${actions}`);
@@ -112,28 +111,6 @@ export async function enforceInNamespace(
 /** The strongest built-in role a user holds in this namespace — direct
  *  membership wins, then group-derived roles. Returns null when the user
  *  has no access at all (mirrors the old membership-existence gate). */
-export async function effectiveRoleForUser(
-  db: Db,
-  namespaceId: string,
-  userId: string
-): Promise<string | null> {
-  const members = await listMembershipsForNamespace(db, namespaceId);
-  const direct = members.find((m) => m.userId === userId);
-  if (direct) return direct.role;
-  const groups = await listGroupsForUserInNamespace(db, namespaceId, userId);
-  if (!groups.length) return null;
-  const rank = (r: string) => (r === "owner" ? 3 : r === "developer" ? 2 : 1);
-  return groups.map((g) => g.role).sort((a, b) => rank(b) - rank(a))[0];
-}
 
 /** Does `sub` hold at least `act` on `obj` in this namespace — the
  *  membership gate first (cheap), then casbin for custom-rule denies. */
-export async function allowedInNamespace(
-  db: Db,
-  namespaceId: string,
-  sub: string,
-  obj: string,
-  act: string
-): Promise<boolean> {
-  return enforceInNamespace(db, namespaceId, sub, obj, act);
-}

@@ -22,17 +22,17 @@ export function arenaShuffleKey(viewer: string, matchId: string, entryId: string
 // recover their stake plus a pro-rata share of the pool; losers forfeit
 // FORFEIT_PCT of theirs. Earlier votes weigh more (CONVICTION_BONUS_MAX
 // decays linearly to zero at judgeEndsAt) and earn a larger pool share.
-export const VOTE_MIN_REP = 5;
-export const VOTE_MIN_STAKE = 1;
+const VOTE_MIN_REP = 5;
+const VOTE_MIN_STAKE = 1;
 /** A rep-bearing account must be this old before it can vote — fresh
  * sockpuppets can't stake what they never earned. Accounts holding
  * VOTE_AGE_BYPASS_REP skip the wait: rep that high was demonstrably
  * earned, not minted. */
-export const VOTE_MIN_ACCOUNT_AGE_MS = 60 * 60 * 1000; // 1 hour
+const VOTE_MIN_ACCOUNT_AGE_MS = 60 * 60 * 1000; // 1 hour
 // A match winner banks participation + prize rep ≥ this — so a first-match
 // winner can judge the next match without waiting out the account-age
 // gate, while a fresh sockpuppet still can't reach it cheaply.
-export const VOTE_AGE_BYPASS_REP = 20;
+const VOTE_AGE_BYPASS_REP = 20;
 
 /** Shared gate decision: rep floor + stake escrow + account age. */
 export function voteGateError(
@@ -46,10 +46,10 @@ export function voteGateError(
   }
   return null;
 }
-export const VOTE_MAX_STAKE = 25;
+const VOTE_MAX_STAKE = 25;
 export const VOTER_FORFEIT_PCT = 50;
 export const VOTER_POOL_SHARE = 0.2; // slice of match.prizeRep reserved for voters
-export const CONVICTION_BONUS_MAX = 1.0;
+const CONVICTION_BONUS_MAX = 1.0;
 
 /** Clamp a client-supplied stake request into the allowed range. */
 export function clampStake(raw: number | undefined | null): number {

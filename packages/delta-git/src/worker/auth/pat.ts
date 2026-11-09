@@ -19,7 +19,7 @@ const BASE32_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
 
 const PAT_PATTERN = /^goc_([0-9a-f]{8})_([abcdefghijklmnopqrstuvwxyz234567]{32})$/;
 
-export function formatPatPublicPrefix(hexPrefix: string): string {
+function formatPatPublicPrefix(hexPrefix: string): string {
   return `${PAT_PREFIX_PUBLIC}${hexPrefix}`;
 }
 

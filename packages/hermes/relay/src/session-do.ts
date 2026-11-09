@@ -31,6 +31,7 @@
  * partyserver's Server; auth gating, the REST bridge, and the frame
  * protocol above are the session's own contract.
  */
+import { b64decode, b64encode, sha256Hex } from './encoding'
 import { Server, type Connection, type ConnectionContext, type WSMessage } from 'partyserver'
 
 export interface SessionInit {
@@ -63,28 +64,6 @@ const REST_TIMEOUT_MS = 60_000
 const INTERNAL_HEADER = 'x-gw-internal'
 
 const te = new TextEncoder()
-
-async function sha256Hex(data: string): Promise<string> {
-  const d = await crypto.subtle.digest('SHA-256', te.encode(data))
-  return Array.from(new Uint8Array(d)).map((b) => b.toString(16).padStart(2, '0')).join('')
-}
-
-function b64encode(buf: ArrayBuffer): string {
-  const bytes = new Uint8Array(buf)
-  let s = ''
-  const CHUNK = 0x8000
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    s += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + CHUNK)))
-  }
-  return btoa(s)
-}
-
-function b64decode(b64: string): Uint8Array {
-  const bin = atob(b64)
-  const out = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
-  return out
-}
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {

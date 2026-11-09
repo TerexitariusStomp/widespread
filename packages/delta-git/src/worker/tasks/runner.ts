@@ -10,7 +10,7 @@ import { runPlatformRunnerOnce } from "@/worker/runner/platform";
 import type { RepoQueueMessageHandle, RunnerDispatchQueueMessage } from "./types";
 
 /** Grace window for client-side delegates before the platform claims. */
-export const RUNNER_DISPATCH_DELAY_SECONDS = 25;
+const RUNNER_DISPATCH_DELAY_SECONDS = 25;
 
 export async function enqueueRunnerDispatch(
   env: Env,

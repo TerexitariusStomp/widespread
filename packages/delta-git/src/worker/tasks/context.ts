@@ -10,7 +10,7 @@ import {
   countSubrequest,
 } from "@/worker/git/operations/limits";
 
-export type QueueLogContext = Omit<LoggerContext, "requestId">;
+type QueueLogContext = Omit<LoggerContext, "requestId">;
 
 export type QueueTaskContext = {
   db: Db;

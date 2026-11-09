@@ -14,7 +14,7 @@ import { diffUrlFor, resolveLocator } from "./locator";
 const DIFF_EXCERPT_CHARS = 6000;
 const MAX_PATCH_BYTES = 2 * 1024 * 1024;
 
-export interface ParsedDiff {
+interface ParsedDiff {
   files: string[];
   linesAdded: number;
   linesRemoved: number;
@@ -25,7 +25,7 @@ export interface ParsedDiff {
  * Same counting contract the forge verifier uses (diff --git b-paths,
  * +/− lines inside hunks, +++/--- header lines excluded).
  */
-export function parseUnifiedDiff(text: string): ParsedDiff {
+function parseUnifiedDiff(text: string): ParsedDiff {
   const files: string[] = [];
   let linesAdded = 0;
   let linesRemoved = 0;
@@ -50,7 +50,7 @@ export function parseUnifiedDiff(text: string): ParsedDiff {
 }
 
 /** Pull the commit subject line out of a format-patch body. */
-export function patchSubject(patch: string): string | null {
+function patchSubject(patch: string): string | null {
   const m = patch.match(/^Subject: (?:\[PATCH[^\]]*\] )?(.*)$/m);
   return m ? m[1].trim() : null;
 }
@@ -63,7 +63,7 @@ export function patchSubject(patch: string): string | null {
  * index lines, and commit metadata are all stripped, so a copy can't
  * hide behind cosmetic edits.
  */
-export async function patchFingerprint(diffText: string): Promise<string> {
+async function patchFingerprint(diffText: string): Promise<string> {
   const lines = diffText.split("\n").filter((l) => {
     // keep added/removed content lines only — the change itself
     return (l.startsWith("+") && !l.startsWith("+++"))

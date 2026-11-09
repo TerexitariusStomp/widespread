@@ -158,24 +158,13 @@ export function toGitnessUser(viewer: Viewer) {
   };
 }
 
-export function toGitnessPrincipal(uid: string) {
-  return {
-    id: numericId(uid),
-    uid,
-    display_name: uid,
-    email: "",
-    type: "user",
-    created: 0,
-    updated: 0,
-  };
-}
 
 // Git trailer block — the `Co-authored-by: Name <email>` tail GitHub uses to
 // render commit co-authors. Only the trailing contiguous trailer lines count;
 // a "Co-authored-by:" mid-message body is just prose.
 const CO_AUTHOR_RE = /^Co-authored-by:\s*(.+?)\s*<([^<>\s]+)>\s*$/i;
 
-export function parseCoAuthors(message: string): { name: string; email: string }[] {
+function parseCoAuthors(message: string): { name: string; email: string }[] {
   const lines = message.split("\n");
   const out: { name: string; email: string }[] = [];
   for (let i = lines.length - 1; i >= 0; i--) {

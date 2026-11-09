@@ -5,7 +5,7 @@ import {
   buildPack,
   callStubWithRetry,
   deleteLooseObjectCopies,
-  seedLegacyPackedRepo,
+  seedPackedRepoState,
   seedPackedRepo,
   toRequestBody,
   uniqueRepoId,
@@ -157,7 +157,7 @@ describe("pack-first read-path regressions", () => {
       { type: "commit", payload: mergeCommitPayload },
     ]);
 
-    await seedLegacyPackedRepo({
+    await seedPackedRepoState({
       env,
       repoId,
       getStub,

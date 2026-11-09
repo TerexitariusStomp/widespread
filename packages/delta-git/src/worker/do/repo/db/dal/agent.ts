@@ -321,16 +321,6 @@ export async function listActiveWebhookSubs(db: DrizzleSqliteDODatabase): Promis
   return await db.select().from(webhookSubs).where(eq(webhookSubs.active, 1));
 }
 
-export async function setWebhookSubActive(
-  db: DrizzleSqliteDODatabase,
-  id: string,
-  active: boolean
-): Promise<void> {
-  await db
-    .update(webhookSubs)
-    .set({ active: active ? 1 : 0 })
-    .where(eq(webhookSubs.id, id));
-}
 
 export async function updateWebhookSub(
   db: DrizzleSqliteDODatabase,

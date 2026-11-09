@@ -65,20 +65,3 @@ export function toPackedObjectResult(
   };
 }
 
-export function logPackedObjectMismatch(args: {
-  env: Env;
-  repoId: string;
-  oid: string;
-  reason: string;
-  details?: Record<string, unknown>;
-}) {
-  const log = createLogger(args.env.LOG_LEVEL, {
-    service: "PackedObjectShadow",
-    repoId: args.repoId,
-  });
-  log.warn("shadow:mismatch", {
-    oid: args.oid,
-    reason: args.reason,
-    ...(args.details || {}),
-  });
-}

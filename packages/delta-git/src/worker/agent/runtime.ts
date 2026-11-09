@@ -22,7 +22,7 @@ import { DurableObject } from "cloudflare:workers";
 //   - task ledger — every processed message appends a durable record
 //   - `/status`   — introspection fetch surface
 
-export interface TaskRecord {
+interface TaskRecord {
   id: string;
   kind: string;
   status: "running" | "ok" | "failed";
@@ -31,7 +31,7 @@ export interface TaskRecord {
   detail?: string;
 }
 
-export interface QueueTaskResult {
+interface QueueTaskResult {
   /** "ack" finishes the queue message; "retry" defers to queue backoff. */
   action: "ack" | "retry";
   detail?: string;
@@ -41,7 +41,7 @@ const TASK_LEDGER_LIMIT = 64;
 const MEM_KEY = "agent/memory";
 const TASK_PREFIX = "task/";
 
-export abstract class AgentRuntime extends DurableObject<Env> {
+abstract class AgentRuntime extends DurableObject<Env> {
   abstract readonly role: string;
 
   /** Dispatch a queue body to the agent's handler. */
@@ -200,7 +200,7 @@ interface FirehoseLedger {
 }
 
 /** Durable per-delivery record — what the gitness webhook-executions UI reads. */
-export interface FirehoseDelivery {
+interface FirehoseDelivery {
   id: string;
   url: string;
   kind: string;

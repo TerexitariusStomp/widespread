@@ -18,6 +18,8 @@ from typing import Any, Dict, Optional
 
 from agent.terminal_env_provider import TerminalEnvironmentProvider
 
+# jscpd: provider classes intentionally mirror each other — WASI and local-host
+# backends implement the same TerminalEnvironmentProvider contract independently.
 logger = logging.getLogger(__name__)
 
 _STATE_NAME = "local-host.json"

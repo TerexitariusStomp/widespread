@@ -15,7 +15,6 @@
 
 import { getSandbox, type SandboxOptions } from "@cloudflare/sandbox";
 import type { ForgeSandbox } from "@/worker/do/sandbox/forgeSandbox";
-import { applyEgressPolicy, JOB_EGRESS_ALLOWLISTS, type EgressPolicyResult } from "./egress";
 
 /** Jobs are meant to finish and go away; workspaces linger for a user. */
 const JOB_SLEEP_AFTER = "10m";
@@ -61,36 +60,6 @@ export function workspaceSandbox(
   );
 }
 
-export interface JobSpec {
-  /** Shell command(s) run inside the sandbox, in order. */
-  commands: string[];
-  /** Files staged into the sandbox before commands run (path → contents). */
-  files?: Record<string, string>;
-  /** Repo to `git clone` first (already-credentialed URL). */
-  repoUrl?: string;
-  /** Branch/tag for the checkout. */
-  ref?: string;
-  /** env vars exported for the commands — NEVER secrets. */
-  envVars?: Record<string, string>;
-  /** Extra egress domains beyond the kind's allowlist (job-declared). */
-  egressAllow?: string[];
-  /** Per-job timeout override, capped at JOB_TIMEOUT_MS. */
-  timeoutMs?: number;
-}
-
-export interface JobResult {
-  ok: boolean;
-  /** stdout+stderr of every command, concatenated in order. */
-  output: string;
-  /** Exit code of the first failing command, or of the last command. */
-  exitCode: number;
-  /** Files collected back out of the sandbox after the run. */
-  artifacts: Record<string, string>;
-  /** Whether the in-container egress policy was enforced for the run. */
-  egress?: EgressPolicyResult;
-  durationMs: number;
-}
-
 /**
  * Run a job to completion inside a fresh ForgeSandbox instance.
  *
@@ -99,90 +68,3 @@ export interface JobResult {
  * returns `{ok:false}` rather than throwing, so callers can record honest
  * job state.
  */
-export async function runJob(
-  env: Env,
-  namespaceSlug: string,
-  kind: string,
-  jobId: string,
-  spec: JobSpec,
-  collect: string[] = []
-): Promise<JobResult> {
-  const started = Date.now();
-  const timeoutMs = Math.min(spec.timeoutMs ?? JOB_TIMEOUT_MS, JOB_TIMEOUT_MS);
-  const deadline = started + timeoutMs;
-  const output: string[] = [];
-  const artifacts: Record<string, string> = {};
-  let exitCode = 0;
-
-  try {
-    const sandbox = jobSandbox(env, namespaceSlug, kind, jobId, {
-      containerTimeouts: { instanceGetTimeoutMS: 60_000, portReadyTimeoutMS: 120_000 },
-    });
-    // Egress policy lands before any job-controlled code runs. Kinds with
-    // no allowlist stay open (workspaces are dev environments).
-    const allowlist = JOB_EGRESS_ALLOWLISTS[kind];
-    let egress: EgressPolicyResult | undefined;
-    if (allowlist) {
-      egress = await applyEgressPolicy(sandbox, [...allowlist, ...(spec.egressAllow ?? [])]);
-    }
-    if (spec.envVars) await sandbox.setEnvVars(spec.envVars);
-    if (spec.files) {
-      for (const [path, contents] of Object.entries(spec.files)) {
-        await sandbox.writeFile(path, contents);
-      }
-    }
-    if (spec.repoUrl) {
-      const checkout = await sandbox.gitCheckout(spec.repoUrl, {
-        branch: spec.ref,
-        targetDir: "/workspace/repo",
-      });
-      if (!checkout.success) {
-        return {
-          ok: false,
-          output: `git clone failed (exit ${checkout.exitCode ?? "?"})`,
-          exitCode: checkout.exitCode ?? 128,
-          artifacts,
-          durationMs: Date.now() - started,
-        };
-      }
-    }
-    for (const command of spec.commands) {
-      if (Date.now() > deadline) {
-        output.push(`[timeout] job exceeded ${timeoutMs}ms budget`);
-        exitCode = 124;
-        break;
-      }
-      const result = await sandbox.exec(command);
-      output.push(`$ ${command}\n${result.stdout}${result.stderr}`);
-      if (!result.success) {
-        exitCode = result.exitCode;
-        break;
-      }
-      exitCode = result.exitCode;
-    }
-    for (const path of collect) {
-      try {
-        const file = await sandbox.readFile(path);
-        if (file.success && file.content !== undefined) artifacts[path] = file.content;
-      } catch {
-        // best-effort collection — a missing artifact is not a job failure
-      }
-    }
-    return {
-      ok: exitCode === 0,
-      output: output.join("\n"),
-      exitCode,
-      artifacts,
-      egress,
-      durationMs: Date.now() - started,
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      output: `sandbox error: ${error instanceof Error ? error.message : String(error)}`,
-      exitCode: -1,
-      artifacts,
-      durationMs: Date.now() - started,
-    };
-  }
-}

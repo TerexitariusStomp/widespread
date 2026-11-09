@@ -6,6 +6,7 @@
 // through PayPal.
 
 import type { Env } from "./types";
+import { paypalAccessToken } from "./paypal";
 
 const PRICE = { value: "0.01", currency_code: "USD" };
 // The sandbox business account that receives agent payments.
@@ -51,16 +52,8 @@ interface Order {
 
 async function orderPaid(env: Env, orderId: string): Promise<Order | null> {
   if (!env.PAYPAL_CLIENT_ID || !env.PAYPAL_CLIENT_SECRET) return null;
-  const tokenRes = await fetch(`${env.PAYPAL_API_BASE}/v1/oauth2/token`, {
-    method: "POST",
-    headers: {
-      authorization: `Basic ${btoa(`${env.PAYPAL_CLIENT_ID}:${env.PAYPAL_CLIENT_SECRET}`)}`,
-      "content-type": "application/x-www-form-urlencoded",
-    },
-    body: "grant_type=client_credentials",
-  });
-  if (!tokenRes.ok) return null;
-  const { access_token } = (await tokenRes.json()) as { access_token: string };
+  const access_token = await paypalAccessToken(env).catch(() => null);
+  if (!access_token) return null;
   const res = await fetch(`${env.PAYPAL_API_BASE}/v2/checkout/orders/${orderId}`, {
     headers: { authorization: `Bearer ${access_token}` },
   }).catch(() => null);

@@ -5,7 +5,6 @@ import type { Logger } from "@/worker/common/logger";
 import type { RepositoryRoute } from "@/worker/repositories/route";
 
 import {
-  PAT_LAST_USED_READ_THROTTLE_MS,
   shouldTouchPatLastUsedAt,
   verifyPat,
   verifyPatIdentity,
@@ -51,7 +50,7 @@ export type GitAuthResult =
   | { kind: "oauth"; verified: OAuthVerified }
   | { kind: "oauth-rejected" };
 
-export interface OAuthVerified {
+interface OAuthVerified {
   principal: OAuthPrincipal;
   /** userId convenience — matches PatVerifyOk's field for actor plumbing */
   userId: string;
@@ -205,4 +204,3 @@ export function scheduleTouchPatLastUsedAt(
   return true;
 }
 
-export { PAT_LAST_USED_READ_THROTTLE_MS };

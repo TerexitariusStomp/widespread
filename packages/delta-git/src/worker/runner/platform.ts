@@ -31,19 +31,19 @@ import { applyEgressPolicy, JOB_EGRESS_ALLOWLISTS } from "@/worker/compute/egres
 const log = createLogger(undefined, { service: "PlatformRunner" });
 
 /** Runner name recorded on claimed executions (and `exec.runner`). */
-export const PLATFORM_RUNNER = "cf-platform";
+const PLATFORM_RUNNER = "cf-platform";
 
 /**
  * Platform-side wall-clock cap per execution — intentionally below the
  * shared JOB_TIMEOUT_MS and below the queue consumer's own budget so a
  * runaway workflow fails honestly instead of being orphaned mid-run.
  */
-export const PLATFORM_RUN_TIMEOUT_MS = 10 * 60 * 1000;
+const PLATFORM_RUN_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** Cap on a single step's runtime. */
 const STEP_TIMEOUT_MS = 5 * 60 * 1000;
 
-export interface StepExecOutcome {
+interface StepExecOutcome {
   exitCode: number;
   /** Combined stdout+stderr, in order. */
   output: string;
@@ -66,7 +66,7 @@ export interface StepExecutor {
 }
 
 /** ForgeSandbox-backed executor: stage a tar of the commit, extract, exec. */
-export function sandboxStepExecutor(env: Env, doName: string, jobId: string): StepExecutor {
+function sandboxStepExecutor(env: Env, doName: string, jobId: string): StepExecutor {
   const sandbox = jobSandbox(env, doName, "ci", jobId, {
     containerTimeouts: { instanceGetTimeoutMS: 60_000, portReadyTimeoutMS: 120_000 },
   });

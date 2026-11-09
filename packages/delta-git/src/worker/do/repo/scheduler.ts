@@ -11,7 +11,7 @@ import { getDb, nextMatchDeadline } from "./db";
  * Plan the next alarm time purely from existing DO state and repo config.
  * Priority: compaction wake/retry, then idle cleanup.
  */
-export async function planNextAlarm(
+async function planNextAlarm(
   state: DurableObjectState,
   env: Env,
   now = Date.now()

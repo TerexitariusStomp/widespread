@@ -11,12 +11,12 @@ import { toPackedObjectResult, typeCodeToObjectType } from "./support";
 
 export type PackedMaterializerCyclePolicy = "throw" | "miss";
 
-export type PackedRefBaseResolver = (
+type PackedRefBaseResolver = (
   oid: string,
   visited: Set<string>
 ) => Promise<PackedObjectResult | undefined>;
 
-export type PackedMaterializerAbortCheck = (stage: string) => void;
+type PackedMaterializerAbortCheck = (stage: string) => void;
 
 export type PackedMaterializerOptions = {
   env: Env;

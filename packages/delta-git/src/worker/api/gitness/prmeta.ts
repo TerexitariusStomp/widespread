@@ -70,7 +70,7 @@ export async function writePrMeta(env: Env, doName: string, intentId: string, me
 // GitHub's auto-close vocabulary — "closes #12", "fixed #3", "resolves: #7".
 const ISSUE_REF_RE = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[:\s]+#(\d+)/gi;
 
-export function linkedIssueNumbers(text: string | undefined | null): number[] {
+function linkedIssueNumbers(text: string | undefined | null): number[] {
   if (!text) return [];
   const out = new Set<number>();
   for (const m of text.matchAll(ISSUE_REF_RE)) out.add(parseInt(m[1], 10));

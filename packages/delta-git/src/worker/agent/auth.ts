@@ -3,7 +3,6 @@ import type { Db } from "@/worker/db/d1";
 
 import { eq } from "drizzle-orm";
 import { agents } from "@/worker/db/d1/schema";
-import { bytesToHex } from "@/worker/common/hex";
 import { didKeyFromPublicKey, verifyDg1Request } from "@widespread/protocol";
 
 // delta-git agent auth — ed25519 DID + signed request envelopes.
@@ -17,10 +16,10 @@ import { didKeyFromPublicKey, verifyDg1Request } from "@widespread/protocol";
 // Replay protection relies on the timestamp window plus nonce freshness
 // checks kept cheap in D1.
 
-export const AGENT_SIG_WINDOW_SEC = 300;
+const AGENT_SIG_WINDOW_SEC = 300;
 
 /** Canonical agent DID for a new registration: `did:key` (ed25519). */
-export function didForPubkey(pubkeyBytes: Uint8Array): string {
+function didForPubkey(pubkeyBytes: Uint8Array): string {
   return didKeyFromPublicKey(pubkeyBytes);
 }
 
@@ -41,10 +40,6 @@ export function hexToBytesSafe(hex: string): Uint8Array | undefined {
   return out;
 }
 
-export async function bodyDigestHex(body: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", body as BufferSource);
-  return bytesToHex(new Uint8Array(digest));
-}
 
 export type AgentAuth = { kind: "ok"; agent: AgentRow } | { kind: "rejected"; reason: string };
 
@@ -59,7 +54,7 @@ export async function getAgent(db: Db, did: string): Promise<AgentRow | undefine
  * charset, bounded length. Returns null when the input doesn't conform —
  * callers treat null as "field absent" rather than an error.
  */
-export function normalizeAgentTag(value: string | undefined | null): string | null {
+function normalizeAgentTag(value: string | undefined | null): string | null {
   if (!value) return null;
   // Lowercase and collapse any run of non-tag characters into a single
   // hyphen so "Claude Code" and "claude_code" roll up together.

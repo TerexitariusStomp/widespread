@@ -1,10 +1,10 @@
 /**
  * Request/route validation helpers used across UI routes.
  */
-export const MAX_REF_LEN = 256;
-export const MAX_PATH_LEN = 4096;
-export const OWNER_REPO_RE = /^[A-Za-z0-9._-]{1,100}$/;
-export const REF_RE = /^[A-Za-z0-9._\/-]{1,256}$/; // allow refs/heads/main, tags, simple branch names
+const MAX_REF_LEN = 256;
+const MAX_PATH_LEN = 4096;
+const OWNER_REPO_RE = /^[A-Za-z0-9._-]{1,100}$/;
+const REF_RE = /^[A-Za-z0-9._\/-]{1,256}$/; // allow refs/heads/main, tags, simple branch names
 export const OID_RE = /^[0-9a-fA-F]{40}$/;
 
 export function isValidOwnerRepo(s: string): boolean {

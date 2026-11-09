@@ -53,9 +53,6 @@ export async function gunzip(data: Uint8Array): Promise<Uint8Array> {
  * Create a deflate compression transform stream
  * @returns TransformStream for compression
  */
-export function createDeflateStream(): TransformStream<Uint8Array, Uint8Array> {
-  return asByteTransformStream(new CompressionStream("deflate"));
-}
 
 /**
  * Create a deflate decompression transform stream

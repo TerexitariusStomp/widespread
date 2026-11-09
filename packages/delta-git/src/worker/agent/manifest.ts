@@ -5,8 +5,8 @@
 // acceptPatchCommit + merge-intent lane as everything else.
 
 export const MANIFEST_MAX_FILES = 24;
-export const MANIFEST_MAX_FILE_BYTES = 64 * 1024;
-export const MANIFEST_MAX_TOTAL_BYTES = 512 * 1024;
+const MANIFEST_MAX_FILE_BYTES = 64 * 1024;
+const MANIFEST_MAX_TOTAL_BYTES = 512 * 1024;
 
 const ALLOWED_EXT = new Set([
   "html",
@@ -22,7 +22,7 @@ const ALLOWED_EXT = new Set([
   "htaccess",
 ]);
 
-export interface ManifestFile {
+interface ManifestFile {
   path: string;
   content: string;
 }
@@ -61,7 +61,7 @@ export function extractFileManifest(text: string): SiteManifest | undefined {
 }
 
 /** Path/extension/size policy. Returns null when the file is acceptable. */
-export function manifestFileError(file: ManifestFile): string | null {
+function manifestFileError(file: ManifestFile): string | null {
   const p = file.path;
   if (!p || p.length > 200) return "bad-path";
   if (p.startsWith("/") || p.includes("\\") || /^[a-zA-Z]:/.test(p)) return "absolute-path";

@@ -132,8 +132,6 @@ export async function seedPackedRepoState(
   return { getStub: args.getStub, packKeys };
 }
 
-/** @deprecated Alias for backward compatibility during migration */
-export const seedLegacyPackedRepo = seedPackedRepoState;
 
 type SeedPackedRepoArgs = {
   env: Env;

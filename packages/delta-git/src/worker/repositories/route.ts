@@ -35,7 +35,7 @@ export type RepositoryRoute = {
   source: "kv" | "d1";
 };
 
-export type RepositoryRouteResolutionMode = "route-cache-only" | "allow-d1-fallback";
+type RepositoryRouteResolutionMode = "route-cache-only" | "allow-d1-fallback";
 
 export type RepositoryRouteResolutionOptions = {
   // Anonymous repository serving uses only the ROUTES candidate cache so a

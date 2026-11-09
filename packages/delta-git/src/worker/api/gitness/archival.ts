@@ -372,4 +372,4 @@ export async function collectArchiveEntries(
   }
 }
 
-export const MAX_ARCHIVE_ENTRIES = 20000;
+const MAX_ARCHIVE_ENTRIES = 20000;

@@ -108,7 +108,7 @@ async function emitPackPayload(
 // Passthrough stream (single pack, all objects selected)
 // ---------------------------------------------------------------------------
 
-export async function passthroughSinglePack(
+async function passthroughSinglePack(
   env: Env,
   snapshotPack: OrderedPackSnapshotEntry,
   readState: PackReadState,

@@ -15,7 +15,7 @@ import { renderUiDocumentResponse } from "@/worker/routes/uiResponse";
 // Re-export the cache-policy predicates so existing handlers don't need
 // to know they live in the cache layer. The lower Git/protocol modules
 // import directly from `@/worker/cache/policy`.
-export { isRequestPrivate, markRequestPrivate };
+export { isRequestPrivate };
 
 export async function loadHeadAndRefsCached(
   env: Env,
@@ -43,7 +43,7 @@ export async function loadHeadAndRefsCached(
 // viewer load so handlers don't reach into `index.ts` internals. Callers
 // that have already resolved a viewer can pass it through to avoid a
 // second D1 round trip.
-export async function notFound(
+async function notFound(
   c: AppContext,
   title?: string,
   viewer?: Viewer | null
@@ -59,7 +59,7 @@ export async function notFound(
 
 // Same as `notFound` but returns a JSON 404 — used by data API endpoints
 // (`/api/refs`) where SSR shell would be wasted bytes.
-export function notFoundJson(): Response {
+function notFoundJson(): Response {
   return new Response(JSON.stringify({ error: "Not found" }), {
     status: 404,
     headers: {

@@ -51,7 +51,7 @@ export interface RepCert {
   sig?: string;
 }
 
-export const REP_CERT_TTL_MS = 24 * 3600 * 1000;
+const REP_CERT_TTL_MS = 24 * 3600 * 1000;
 
 /** The exact bytes the signature covers — sig-less cert, insertion order. */
 export function repCertSignable(cert: RepCert): Uint8Array {

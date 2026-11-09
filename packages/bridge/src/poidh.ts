@@ -9,13 +9,13 @@
 
 import type { Env } from "./types";
 
-export const POIDH_CHAINS = {
+const POIDH_CHAINS = {
   ethereum: "0xE731dFadBFf20542E10D09D26Fc71445C70d4232",
   arbitrum: "0x5555Fa783936C260f77385b4E153B9725feF1719",
   base: "0x5555Fa783936C260f77385b4E153B9725feF1719",
   degen: "0x18E5585ca7cE31b90Bc8BB7aAf84152857cE243f",
 } as const;
-export const POIDH_NFT = {
+const POIDH_NFT = {
   ethereum: "0x9c5f45d5e1382e4058d334d93c6c01442012a4d9",
   arbitrum: "0x27e117cc9a8da363442e7bd0618939e3eeeacf6a",
   base: "0x27e117cc9a8da363442e7bd0618939e3eeeacf6a",

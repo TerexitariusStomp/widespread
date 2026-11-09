@@ -20,7 +20,7 @@ type ButtonAsAnchor = ButtonBaseProps &
     href: string;
   };
 
-export type ButtonProps = ButtonAsButton | ButtonAsAnchor;
+type ButtonProps = ButtonAsButton | ButtonAsAnchor;
 
 const shared =
   "inline-flex items-center justify-center gap-2 rounded-md font-medium no-underline hover:no-underline focus-visible:outline-none disabled:opacity-50 disabled:pointer-events-none transition-colors";
@@ -40,9 +40,6 @@ const sizes: Record<ButtonSize, string> = {
   md: "px-3 py-[5px] text-sm leading-5",
 };
 
-export function buttonClasses(variant: ButtonVariant = "primary", size: ButtonSize = "md"): string {
-  return `${shared} ${variants[variant]} ${sizes[size]}`;
-}
 
 export function Button({
   variant = "primary",

@@ -175,11 +175,6 @@ export async function findArtifact(
     .get();
 }
 
-export async function deleteArtifactRow(db: Db, id: string): Promise<ArtifactRow | undefined> {
-  const row = await db.select().from(artifacts).where(eq(artifacts.id, id)).get();
-  if (row) await db.delete(artifacts).where(eq(artifacts.id, id)).run();
-  return row;
-}
 
 // Space-level listing for the Artifacts nav page — joins repositories so the
 // UI can show which repo produced each artifact.
@@ -232,13 +227,6 @@ export async function listConnectors(db: Db, namespaceId: string): Promise<Conne
 }
 export async function insertConnector(db: Db, row: NewConnectorRow): Promise<void> {
   await db.insert(connectors).values(row).run();
-}
-export async function updateConnector(
-  db: Db,
-  id: string,
-  patch: Partial<ConnectorRow>
-): Promise<void> {
-  await db.update(connectors).set(patch).where(eq(connectors.id, id)).run();
 }
 export async function deleteConnector(db: Db, id: string): Promise<void> {
   await db.delete(connectors).where(eq(connectors.id, id)).run();
@@ -312,9 +300,6 @@ export async function updateTicket(
 ): Promise<void> {
   await db.update(externalTickets).set(patch).where(eq(externalTickets.id, id)).run();
 }
-export async function deleteTicket(db: Db, id: string): Promise<void> {
-  await db.delete(externalTickets).where(eq(externalTickets.id, id)).run();
-}
 
 export async function listGitopsTargets(db: Db, namespaceId: string): Promise<GitopsTargetRow[]> {
   return db.select().from(gitopsTargets).where(eq(gitopsTargets.namespaceId, namespaceId)).all();
@@ -338,9 +323,6 @@ export async function listPolicies(db: Db, namespaceId: string): Promise<PolicyR
 }
 export async function insertPolicy(db: Db, row: NewPolicyRow): Promise<void> {
   await db.insert(policies).values(row).run();
-}
-export async function updatePolicy(db: Db, id: string, patch: Partial<PolicyRow>): Promise<void> {
-  await db.update(policies).set(patch).where(eq(policies.id, id)).run();
 }
 export async function deletePolicy(db: Db, id: string): Promise<void> {
   await db.delete(policies).where(eq(policies.id, id)).run();
@@ -615,9 +597,6 @@ export async function updateDevEnvironment(
 ): Promise<void> {
   await db.update(devEnvironments).set(patch).where(eq(devEnvironments.id, id)).run();
 }
-export async function deleteDevEnvironment(db: Db, id: string): Promise<void> {
-  await db.delete(devEnvironments).where(eq(devEnvironments.id, id)).run();
-}
 
 export async function listDatabaseRecords(
   db: Db,
@@ -711,9 +690,6 @@ export async function updateDashboard(
   patch: Partial<DashboardRow>
 ): Promise<void> {
   await db.update(dashboards).set(patch).where(eq(dashboards.id, id)).run();
-}
-export async function deleteDashboard(db: Db, id: string): Promise<void> {
-  await db.delete(dashboards).where(eq(dashboards.id, id)).run();
 }
 
 // --- feature flags + overrides ---------------------------------------------------

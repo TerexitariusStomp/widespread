@@ -4,7 +4,7 @@ export type RefLike = {
   name: string;
 };
 
-export function shortRefName(refName: string): string {
+function shortRefName(refName: string): string {
   return refName.replace(/^refs\/(heads|tags)\//, "");
 }
 
@@ -22,21 +22,3 @@ export function formatRefOption(ref: RefLike): { name: string; displayName: stri
   };
 }
 
-export function countRefsByKind(refs: readonly RefLike[]): {
-  branchCount: number;
-  tagCount: number;
-  otherCount: number;
-} {
-  let branchCount = 0;
-  let tagCount = 0;
-  let otherCount = 0;
-
-  for (const ref of refs) {
-    const kind = classifyRef(ref.name);
-    if (kind === "branch") branchCount++;
-    else if (kind === "tag") tagCount++;
-    else otherCount++;
-  }
-
-  return { branchCount, tagCount, otherCount };
-}

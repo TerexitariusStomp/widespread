@@ -1,7 +1,7 @@
 import type { GitObjectType } from "@/worker/git/core";
 export type { PackCatalogRow } from "@/worker/do/repo/db/schema";
 
-export type PackedObjectLocation = {
+type PackedObjectLocation = {
   packKey: string;
   objectIndex: number;
   offset: number;
@@ -14,7 +14,6 @@ export type PackedObjectResult = PackedObjectLocation & {
   payload: Uint8Array;
 };
 
-export type PackedObjectReadResult = PackedObjectResult | undefined;
 
 export type IdxView = {
   packKey: string;

@@ -11,7 +11,7 @@
 
 import { parse as parseYaml } from "yaml";
 
-export interface WorkflowStepSpec {
+interface WorkflowStepSpec {
   name: string;
   /** Shell commands run in order inside the staged worktree. */
   commands: string[];
@@ -26,7 +26,7 @@ export interface WorkflowStepSpec {
   skipped?: boolean;
 }
 
-export interface WorkflowStageSpec {
+interface WorkflowStageSpec {
   name: string;
   steps: WorkflowStepSpec[];
 }

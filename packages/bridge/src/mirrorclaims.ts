@@ -15,6 +15,7 @@
 
 import type { Env, MirrorListing } from "./types";
 import { validateForgeSubmission, attestationForMirror } from "./claims";
+import { sha256Hex } from "./forge";
 import { feedDoc } from "./feed";
 import { sendPayout } from "./payouts";
 
@@ -72,9 +73,7 @@ export async function handleMirrorClaimPost(req: Request, env: Env, ctx?: Execut
   }
 
   const evidence: Record<string, unknown> = { ...fv.evidence, claim_api: "mirror-v1", mirror_id: mirrorId };
-  const claimHash = String(evidence.patch_fingerprint ??
-    `sha256:${[...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(evidence))))]
-      .map((b) => b.toString(16).padStart(2, "0")).join("")}`);
+  const claimHash = String(evidence.patch_fingerprint ?? `sha256:${await sha256Hex(JSON.stringify(evidence))}`);
 
   const token = await attestationForMirror(env, {
     mirror_id: mirrorId, forgeRef, forgeUserId: evidence.forgeUserId,

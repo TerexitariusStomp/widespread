@@ -1,3 +1,4 @@
+import { b64urlDecode, b64urlEncode } from './encoding'
 /**
  * tcp.ts — relayed TCP egress for the in-browser Hermes runtime.
  *
@@ -28,24 +29,6 @@ export interface TcpEnv {
 const te = new TextEncoder()
 const TOKEN_TTL_MS = 10 * 60 * 1000
 
-function b64urlEncode(buf: ArrayBuffer | Uint8Array): string {
-  const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf)
-  let s = ''
-  const CHUNK = 0x8000
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    s += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + CHUNK)))
-  }
-  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-}
-
-function b64urlDecode(s: string): Uint8Array {
-  const b64 = s.replace(/-/g, '+').replace(/_/g, '/')
-  const bin = atob(b64 + '='.repeat((4 - (b64.length % 4)) % 4))
-  const out = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
-  return out
-}
-
 async function hmacHex(secret: string, data: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     'raw', te.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
@@ -53,11 +36,6 @@ async function hmacHex(secret: string, data: string): Promise<string> {
   return Array.from(new Uint8Array(sig)).map((b) => b.toString(16).padStart(2, '0')).join('')
 }
 
-export interface TcpToken {
-  exp: number
-  nonce: string
-  sig: string
-}
 
 export async function mintTcpToken(env: TcpEnv): Promise<{ token: string; expiresAt: number } | null> {
   const secret = env.TCP_TUNNEL_SECRET
@@ -70,7 +48,7 @@ export async function mintTcpToken(env: TcpEnv): Promise<{ token: string; expire
   return { token: `v1.${exp}.${nonce}.${sig}`, expiresAt: exp }
 }
 
-export async function verifyTcpToken(env: TcpEnv, token: string): Promise<boolean> {
+async function verifyTcpToken(env: TcpEnv, token: string): Promise<boolean> {
   const secret = env.TCP_TUNNEL_SECRET
   if (!secret || !token) return false
   const parts = token.split('.')
@@ -98,7 +76,7 @@ function ipv4Parts(ip: string): number[] | null {
 }
 
 /** True when the IPv4/IPv6 literal must never be dialed from the relay. */
-export function isBlockedAddress(ip: string): boolean {
+function isBlockedAddress(ip: string): boolean {
   const v4 = ipv4Parts(ip)
   if (v4) {
     const [a, b] = v4 as [number, number, number, number]
@@ -158,7 +136,7 @@ async function dohResolve(host: string): Promise<string[]> {
 }
 
 /** Resolve + filter to public addresses. Returns [] when nothing dialable. */
-export async function resolvePublic(host: string): Promise<string[]> {
+async function resolvePublic(host: string): Promise<string[]> {
   const literal = host.trim()
   if (isIpLiteral(literal)) {
     return isBlockedAddress(literal) ? [] : [literal]

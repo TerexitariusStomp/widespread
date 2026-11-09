@@ -169,7 +169,7 @@ export async function readCronPipelineRepos(env: Env): Promise<string[]> {
 // so list reads stay small.
 // ---------------------------------------------------------------------------
 
-export type ExecutionStatus =
+type ExecutionStatus =
   | "pending"
   | "running"
   | "success"
@@ -178,7 +178,7 @@ export type ExecutionStatus =
   | "killed"
   | "skipped";
 
-export interface RepoExecutionStep {
+interface RepoExecutionStep {
   number: number;
   name: string;
   status: ExecutionStatus;
@@ -187,7 +187,7 @@ export interface RepoExecutionStep {
   stopped?: number;
 }
 
-export interface RepoExecutionStage {
+interface RepoExecutionStage {
   number: number;
   name: string;
   status: ExecutionStatus;
@@ -450,31 +450,8 @@ export async function writeIssueLocks(env: Env, doName: string, locks: Record<st
 // whole map; we persist it verbatim so "viewed" survives reloads.
 // ---------------------------------------------------------------------------
 
-export interface FileViews {
-  /** path → blob sha the viewer marked viewed at ("" when unmarked). */
-  views: Record<string, string>;
-  updated: number;
-}
 
-export async function readFileViews(
-  env: Env,
-  doName: string,
-  intentId: string,
-  viewer: string
-): Promise<FileViews> {
-  const raw = await env.ROUTES.get(`gfv:${doName}:${intentId}:${viewer}`, "json").catch(() => null);
-  return (raw as FileViews | null) ?? { views: {}, updated: 0 };
-}
 
-export async function writeFileViews(
-  env: Env,
-  doName: string,
-  intentId: string,
-  viewer: string,
-  views: FileViews
-) {
-  await env.ROUTES.put(`gfv:${doName}:${intentId}:${viewer}`, JSON.stringify(views));
-}
 
 // ---------------------------------------------------------------------------
 // Pipeline/PR templates — real records; used by the template pickers.
@@ -562,7 +539,7 @@ export async function writeSecrets(env: Env, scopeKey: string, secrets: SecretRe
 // client-side scan attestations without gating; "require" refuses receive
 // finalization when a pushed head has no pass/warn attestation; "off"
 // disables both.
-export type PushScanPolicy = "report" | "require" | "off";
+type PushScanPolicy = "report" | "require" | "off";
 
 export interface SecuritySettings {
   /** Include secret detectors in the client-side push scan suite. */
@@ -628,7 +605,7 @@ interface ScanIndex {
   alertMap: Record<number, string>;
 }
 
-export const MAX_SCAN_ANALYSES = 200;
+const MAX_SCAN_ANALYSES = 200;
 
 async function readScanIndex(env: Env, doName: string): Promise<ScanIndex> {
   const raw = await env.ROUTES.get(`gscan-idx:${doName}`, "json").catch(() => null);

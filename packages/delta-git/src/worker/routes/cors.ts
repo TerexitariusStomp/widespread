@@ -17,7 +17,7 @@ function allowedOrigin(req: Request): string {
   return req.headers.get("Origin") ?? "null";
 }
 
-export function gitCorsHeaders(req: Request): Record<string, string> {
+function gitCorsHeaders(req: Request): Record<string, string> {
   return {
     "Access-Control-Allow-Origin": allowedOrigin(req),
     "Access-Control-Allow-Credentials": "true",

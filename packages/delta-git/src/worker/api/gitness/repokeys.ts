@@ -34,7 +34,7 @@ function repoKeyKvKey(doName: string, userId: string): string {
   return `repokey:${doName}:${userId}`;
 }
 
-export interface RepoKeyRecord {
+interface RepoKeyRecord {
   wrapped: string;
   wrapped_by: string;
   created: number;

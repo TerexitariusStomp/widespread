@@ -16,7 +16,7 @@ import type { Db } from "@/worker/db/d1/client";
 // Request-body note: content-digest binds the whole body, so signature-gated
 // receives are buffered at the gate (rebuilt Request for the streaming
 // handler) and size-capped — the PAT path keeps full streaming.
-export const HTTP_SIG_WINDOW_SEC = 300;
+const HTTP_SIG_WINDOW_SEC = 300;
 export const HTTP_SIG_MAX_BODY_BYTES = 64 * 1024 * 1024;
 
 export type HttpSigVerify =

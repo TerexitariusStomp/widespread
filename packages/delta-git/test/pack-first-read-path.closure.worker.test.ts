@@ -13,7 +13,7 @@ import { hexToBytes } from "@/worker/common/hex";
 import {
   callStubWithRetry,
   deleteLooseObjectCopies,
-  seedLegacyPackedRepo,
+  seedPackedRepoState,
   uniqueRepoId,
 } from "./util/test-helpers";
 import { setupRepoForTests } from "./util/repoSeed";
@@ -118,7 +118,7 @@ describe("pack-first read path closure", () => {
       { type: "tree", payload: treePayload },
     ]);
 
-    await seedLegacyPackedRepo({
+    await seedPackedRepoState({
       env,
       repoId,
       getStub,

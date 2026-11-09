@@ -9,6 +9,8 @@ const ALLOWED_HOSTS = new Set([
   'welcome-api.nousresearch.com',
 ])
 
+// jscpd: intentionally duplicated with public/_worker.js — the Pages _worker.js and the standalone
+// proxy-worker are separate deployables that cannot share modules.
 const HOP_BY_HOP = [
   'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
   'te', 'trailer', 'transfer-encoding', 'upgrade',

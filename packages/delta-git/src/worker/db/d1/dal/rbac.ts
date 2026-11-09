@@ -1,7 +1,7 @@
 // RBAC DAL — casbin rule rows plus the domain tables (user groups,
 // service accounts, resource groups) the policy plane describes.
 
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 import type { Db } from "../client";
 import {
@@ -25,28 +25,7 @@ export async function listCasbinRules(db: Db): Promise<CasbinRuleRow[]> {
   return db.select().from(casbinRules).all();
 }
 
-export async function insertCasbinRule(db: Db, row: Omit<CasbinRuleRow, "id">): Promise<void> {
-  await db.insert(casbinRules).values(row).run();
-}
 
-export async function deleteCasbinRule(db: Db, row: Omit<CasbinRuleRow, "id">): Promise<void> {
-  const clauses = [eq(casbinRules.ptype, row.ptype)];
-  for (const [col, val] of [
-    [casbinRules.v0, row.v0],
-    [casbinRules.v1, row.v1],
-    [casbinRules.v2, row.v2],
-    [casbinRules.v3, row.v3],
-    [casbinRules.v4, row.v4],
-    [casbinRules.v5, row.v5],
-  ] as const) {
-    if (val === null || val === undefined) clauses.push(isNull(col));
-    else clauses.push(eq(col, val));
-  }
-  await db
-    .delete(casbinRules)
-    .where(and(...clauses))
-    .run();
-}
 
 // --- user groups -------------------------------------------------------------
 

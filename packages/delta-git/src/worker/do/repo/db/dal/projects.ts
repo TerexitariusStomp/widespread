@@ -61,9 +61,6 @@ export async function updateProject(
   await db.update(projects).set(patch).where(eq(projects.id, id));
 }
 
-export async function deleteProject(db: DrizzleSqliteDODatabase, id: string): Promise<void> {
-  await db.delete(projects).where(eq(projects.id, id));
-}
 
 // --- columns -----------------------------------------------------------------
 

@@ -59,13 +59,6 @@ export async function updateDiscussion(
   await db.update(discussions).set(patch).where(eq(discussions.id, id));
 }
 
-export async function deleteDiscussion(db: DrizzleSqliteDODatabase, id: string): Promise<boolean> {
-  const rows = await db
-    .delete(discussions)
-    .where(eq(discussions.id, id))
-    .returning({ id: discussions.id });
-  return rows.length > 0;
-}
 
 export async function insertDiscussionComment(
   db: DrizzleSqliteDODatabase,

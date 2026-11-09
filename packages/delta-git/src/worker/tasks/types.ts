@@ -1,10 +1,8 @@
 import { z } from "zod";
 
-export { z };
-
 export type RepoQueueMessageHandle<Body> = MessageBatch<Body>["messages"][number];
 
-export const CompactionQueueMessageSchema = z.object({
+const CompactionQueueMessageSchema = z.object({
   kind: z.literal("compaction"),
   doId: z.string(),
   repoId: z.string().optional(),
@@ -12,7 +10,7 @@ export const CompactionQueueMessageSchema = z.object({
 
 export type CompactionQueueMessage = z.infer<typeof CompactionQueueMessageSchema>;
 
-export const CompactionDeleteQueueMessageSchema = z.object({
+const CompactionDeleteQueueMessageSchema = z.object({
   kind: z.literal("compaction-delete"),
   doId: z.string(),
   repoId: z.string().optional(),
@@ -21,7 +19,7 @@ export const CompactionDeleteQueueMessageSchema = z.object({
 
 export type CompactionDeleteQueueMessage = z.infer<typeof CompactionDeleteQueueMessageSchema>;
 
-export const PackRefBackfillQueueMessageSchema = z.object({
+const PackRefBackfillQueueMessageSchema = z.object({
   kind: z.literal("pack-ref-backfill"),
   doId: z.string(),
   repoId: z.string().optional(),
@@ -30,7 +28,7 @@ export const PackRefBackfillQueueMessageSchema = z.object({
 
 export type PackRefBackfillQueueMessage = z.infer<typeof PackRefBackfillQueueMessageSchema>;
 
-export const RouteCacheSyncMessageSchema = z.object({
+const RouteCacheSyncMessageSchema = z.object({
   kind: z.literal("route-cache-sync"),
   repositoryId: z.string(),
   namespaceSlug: z.string(),
@@ -40,7 +38,7 @@ export const RouteCacheSyncMessageSchema = z.object({
 
 export type RouteCacheSyncMessage = z.infer<typeof RouteCacheSyncMessageSchema>;
 
-export const RepositoryDeleteMessageSchema = z.object({
+const RepositoryDeleteMessageSchema = z.object({
   kind: z.literal("repository-delete"),
   repositoryId: z.string(),
   namespaceId: z.string(),
@@ -53,7 +51,7 @@ export const RepositoryDeleteMessageSchema = z.object({
 
 export type RepositoryDeleteMessage = z.infer<typeof RepositoryDeleteMessageSchema>;
 
-export const WebhookQueueMessageSchema = z.object({
+const WebhookQueueMessageSchema = z.object({
   kind: z.literal("webhook"),
   doId: z.string(),
   repoId: z.string().optional(),
@@ -67,7 +65,7 @@ export const WebhookQueueMessageSchema = z.object({
 
 export type WebhookQueueMessage = z.infer<typeof WebhookQueueMessageSchema>;
 
-export const DeployQueueMessageSchema = z.object({
+const DeployQueueMessageSchema = z.object({
   kind: z.literal("deploy"),
   doId: z.string(),
   repoId: z.string().optional(),
@@ -82,7 +80,7 @@ export const DeployQueueMessageSchema = z.object({
 
 export type DeployQueueMessage = z.infer<typeof DeployQueueMessageSchema>;
 
-export const AdjudicateQueueMessageSchema = z.object({
+const AdjudicateQueueMessageSchema = z.object({
   kind: z.literal("adjudicate"),
   doId: z.string(),
   repoId: z.string().optional(),
@@ -93,7 +91,7 @@ export type AdjudicateQueueMessage = z.infer<typeof AdjudicateQueueMessageSchema
 
 // Federation mirror-out: a public ref advanced → push the delta to
 // configured mirror targets (Tangled, Radicle, or a signed webhook relay).
-export const FederateQueueMessageSchema = z.object({
+const FederateQueueMessageSchema = z.object({
   kind: z.literal("federate"),
   doId: z.string(),
   repoId: z.string().optional(),
@@ -108,7 +106,7 @@ export type FederateQueueMessage = z.infer<typeof FederateQueueMessageSchema>;
 
 // Overnight self-improvement pass: pick open idea work-intents and drive
 // idea → spec → patch → verify → merge → attest through the normal lanes.
-export const OvernightQueueMessageSchema = z.object({
+const OvernightQueueMessageSchema = z.object({
   kind: z.literal("overnight"),
   doId: z.string(),
   repoId: z.string().optional(),
@@ -121,7 +119,7 @@ export type OvernightQueueMessage = z.infer<typeof OvernightQueueMessageSchema>;
 // Arena resolution: a match's judging window expired → the task computes
 // composite scores (auto-signals + votes), marks the winner, applies rep
 // deltas, and pushes the winning head to the canonical remote.
-export const ArenaResolveQueueMessageSchema = z.object({
+const ArenaResolveQueueMessageSchema = z.object({
   kind: z.literal("arena-resolve"),
   // Repo DO id (hex) — the canonical repo that owns the match.
   doId: z.string(),
@@ -135,7 +133,7 @@ export type ArenaResolveQueueMessage = z.infer<typeof ArenaResolveQueueMessageSc
 // Site-smith build: the work intent's body is a natural-language site
 // description; the seat generates a WordPress Playground blueprint + block
 // theme + static mirror and lands it via the normal merge lanes.
-export const SiteBuildQueueMessageSchema = z.object({
+const SiteBuildQueueMessageSchema = z.object({
   kind: z.literal("site-build"),
   doId: z.string(),
   repoId: z.string().optional(),
@@ -146,7 +144,7 @@ export type SiteBuildQueueMessage = z.infer<typeof SiteBuildQueueMessageSchema>;
 
 // CI trigger: a ref advanced → spawn pending executions for every pipeline
 // on that repo with `on_push` (and a matching branch filter, if set).
-export const PipelineTriggerQueueMessageSchema = z.object({
+const PipelineTriggerQueueMessageSchema = z.object({
   kind: z.literal("pipeline-trigger"),
   doId: z.string(),
   repoId: z.string(),
@@ -158,7 +156,7 @@ export type PipelineTriggerQueueMessage = z.infer<typeof PipelineTriggerQueueMes
 
 // Knowledge refresh: a head ref advanced → rebuild the repo knowledge base
 // (symbols, dep graph, summaries) keyed to the new HEAD.
-export const KnowledgeRefreshQueueMessageSchema = z.object({
+const KnowledgeRefreshQueueMessageSchema = z.object({
   kind: z.literal("knowledge-refresh"),
   doId: z.string(),
   repoId: z.string(),
@@ -171,7 +169,7 @@ export type KnowledgeRefreshQueueMessage = z.infer<typeof KnowledgeRefreshQueueM
 // Platform runner dispatch: an execution went pending → the built-in
 // Cloudflare delegate claims and runs it if no client runner picks it up
 // first (the enqueue delay is the external-delegate grace window).
-export const RunnerDispatchQueueMessageSchema = z.object({
+const RunnerDispatchQueueMessageSchema = z.object({
   kind: z.literal("runner-dispatch"),
   repoId: z.string(),
 });
@@ -181,7 +179,7 @@ export type RunnerDispatchQueueMessage = z.infer<typeof RunnerDispatchQueueMessa
 // Platform security scan: a queued `security_tests` row whose target is a
 // repo on this forge gets a real scan in a ForgeSandbox (gitleaks/trivy/
 // osv-scanner) and the row is updated with the findings.
-export const SecurityScanQueueMessageSchema = z.object({
+const SecurityScanQueueMessageSchema = z.object({
   kind: z.literal("security-scan"),
   testId: z.string(),
 });
@@ -191,7 +189,7 @@ export type SecurityScanQueueMessage = z.infer<typeof SecurityScanQueueMessageSc
 // Supply-chain build: a `supply_chain_docs` row created without a document
 // gets a real one — syft SBOM for `sbom`, a DSSE-signed in-toto statement
 // for `provenance`/`attestation`.
-export const SupplyChainBuildQueueMessageSchema = z.object({
+const SupplyChainBuildQueueMessageSchema = z.object({
   kind: z.literal("supply-chain-build"),
   docId: z.string(),
 });
@@ -218,4 +216,3 @@ export const RepoTaskQueueMessageSchema = z.discriminatedUnion("kind", [
   SupplyChainBuildQueueMessageSchema,
 ]);
 
-export type RepoTaskQueueMessage = z.infer<typeof RepoTaskQueueMessageSchema>;

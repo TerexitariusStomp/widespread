@@ -21,12 +21,10 @@
   },
   "dependencies": {
     "@defuse-protocol/one-click-sdk-typescript": "0.1.26",
-    "@noble/curves": "^1.9.0",
-    "@noble/hashes": "^1.8.0",
     "@scure/base": "^1.1.6",
     "@widespread/protocol": "workspace:*",
     "axios": "^1.21.0",
-    "chainsig.js": "^1.1.16",
+    "hono": "^4.13.17",
     "near-api-js": "^7.4.0"
   }
 }

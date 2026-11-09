@@ -12,8 +12,8 @@ import { createDb } from "@/worker/db/d1/client";
 import { getLimiter } from "@/worker/git/operations/limits";
 import { emitD1Bookmark, readInboundD1Bookmark } from "./d1Bookmark";
 
-export type RequestLogContext = Omit<LoggerContext, "requestId">;
-export type RequestLogFactory = (context: RequestLogContext) => Logger;
+type RequestLogContext = Omit<LoggerContext, "requestId">;
+type RequestLogFactory = (context: RequestLogContext) => Logger;
 
 export type AppBindings = {
   Bindings: Env;

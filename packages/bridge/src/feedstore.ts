@@ -22,10 +22,6 @@ export async function putFeedDoc(env: Env, doc: FeedDoc): Promise<void> {
   await env.CLAIMS.put(DOC_KEY, JSON.stringify(doc));
 }
 
-export async function feedUpdatedAt(env: Env): Promise<number> {
-  const doc = await getFeedDoc(env);
-  return doc?.generated_at ?? 0;
-}
 
 export async function getSourceStamp(env: Env, name: string): Promise<SourceStamp | null> {
   return env.CLAIMS.get<SourceStamp>(`${TS_PREFIX}${name}`, "json").catch(() => null);

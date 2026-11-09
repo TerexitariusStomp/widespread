@@ -10,14 +10,14 @@ import { createLogger } from "@/worker/common/logger";
 import type { CacheContext } from "@/worker/cache";
 import { repoSearchDocs, type FileDoc } from "@/worker/search";
 
-export interface FileKnowledge {
+interface FileKnowledge {
   path: string;
   ext: string;
   symbols: { name: string; kind: string; line: number }[];
   imports: string[];
 }
 
-export interface KnowledgeEdge {
+interface KnowledgeEdge {
   from: string;
   to: string;
   kind: "file" | "package";
@@ -44,7 +44,7 @@ const MAX_LINE = 500;
 const MAX_GLOSSARY = 24;
 const MAX_SYMBOLS_PER_FILE = 60;
 
-export function kbKvKey(doName: string): string {
+function kbKvKey(doName: string): string {
   return `${KV_PREFIX}${doName}`;
 }
 
@@ -288,7 +288,7 @@ function detectEntrypoints(files: FileKnowledge[]): string[] {
 }
 
 /** Deterministic mermaid module graph — module-level dep edges, no AI. */
-export function mermaidModuleGraph(files: FileKnowledge[], edges: KnowledgeEdge[]): string {
+function mermaidModuleGraph(files: FileKnowledge[], edges: KnowledgeEdge[]): string {
   const mods = new Map<string, Set<string>>();
   for (const e of edges) {
     if (e.kind !== "file") continue;
@@ -397,7 +397,7 @@ function fallbackSummary(files: FileKnowledge[], packages: string[]): string {
 
 // --- pipeline --------------------------------------------------------------
 
-export async function buildRepoKnowledge(
+async function buildRepoKnowledge(
   env: Env,
   doName: string,
   cacheCtx: CacheContext | undefined

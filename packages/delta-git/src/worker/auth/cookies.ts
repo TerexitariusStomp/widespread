@@ -8,7 +8,7 @@ import type { AppContext } from "@/worker/routes/hono";
 // Cloudflare custom domains serve this app over HTTPS, and the test pool
 // runs over a Secure-origin URL, so the prefix is safe to use everywhere.
 export const AUTH_COOKIE_PREFIX = "host";
-export const SESSION_COOKIE_NAME = "goc_session";
+const SESSION_COOKIE_NAME = "goc_session";
 export const OIDC_TX_COOKIE_NAME = "goc_oidc";
 export const SESSION_COOKIE_HEADER_NAME = `__Host-${SESSION_COOKIE_NAME}`;
 export const OIDC_TX_COOKIE_HEADER_NAME = `__Host-${OIDC_TX_COOKIE_NAME}`;
@@ -71,7 +71,7 @@ export function clearOidcTransactionCookie(c: AppContext): void {
 
 // DID session cookie — carries a signed JWT (HS256 over SESSION_SECRET)
 // whose jti is revocable via the did_sessions D1 table.
-export const DID_SESSION_COOKIE_NAME = "dg_session";
+const DID_SESSION_COOKIE_NAME = "dg_session";
 const DID_SESSION_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24; // 24h, matches JWT exp
 
 export function setDidSessionCookie(c: AppContext, jwt: string): void {

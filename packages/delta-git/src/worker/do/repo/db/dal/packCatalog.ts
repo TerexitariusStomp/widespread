@@ -43,14 +43,6 @@ export async function getPackCatalogRow(
   return rows[0];
 }
 
-export async function getPackCatalogSeqMax(db: DrizzleSqliteDODatabase): Promise<number> {
-  const rows = await db
-    .select({
-      maxSeqHi: sql<number>`coalesce(max(${packCatalog.seqHi}), 0)`,
-    })
-    .from(packCatalog);
-  return rows[0]?.maxSeqHi || 0;
-}
 
 export async function upsertPackCatalogRow(
   db: DrizzleSqliteDODatabase,

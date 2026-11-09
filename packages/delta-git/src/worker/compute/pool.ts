@@ -393,60 +393,9 @@ export async function poolAwardStatus(env: Env, ref: string): Promise<PoolAwardS
   }
 }
 
-const dispatchResponse = z.object({
-  results: z.array(z.object({ jobId: z.string().optional(), error: z.string().optional() })),
-});
-
 /**
  * Submit a structured job (research/index/copy envelopes) through the batch
  * endpoint — `/jobs` awaits a result inline, but intents want fire-and-forget
  * dispatch, and `/jobs/batch` never blocks on results. Returns the jobId or
  * null on rejection/unavailability.
  */
-export async function poolDispatch(
-  env: Env,
-  args: {
-    project?: string;
-    taskType: number;
-    payload: unknown;
-    priority?: "interactive" | "batch";
-    /**
-     * "public" → PUBLIC classification (any node); "internal" → INTERNAL
-     * (durable+DID-bound nodes only); anything else is refused here.
-     */
-    visibility: "public" | "internal" | "private" | string;
-  }
-): Promise<{ jobId: string } | null> {
-  const classification = classificationFor(args.visibility);
-  if (!classification) return null;
-  if (!computeEnabled(env)) return null;
-  const log = createLogger(env.LOG_LEVEL, { service: "ComputePool" });
-  try {
-    const res = await fetch(coordinatorUrl(env, "/jobs/batch"), {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${env.COMPUTE_DISPATCH_TOKEN}`,
-      },
-      body: JSON.stringify({
-        jobs: [
-          {
-            payload: JSON.stringify(args.payload),
-            taskType: args.taskType,
-            project: args.project,
-            classification,
-            priority: args.priority,
-          },
-        ],
-      }),
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!res.ok) return null;
-    const parsed = dispatchResponse.safeParse(await res.json());
-    const first = parsed.success ? parsed.data.results[0] : undefined;
-    return first?.jobId ? { jobId: first.jobId } : null;
-  } catch (error) {
-    log.warn("pool:dispatch-failed", { project: args.project, error: String(error) });
-    return null;
-  }
-}

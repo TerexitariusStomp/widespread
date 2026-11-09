@@ -2,29 +2,8 @@
 // batch API is identical live, only api-m.paypal.com + a live app differ.
 
 import type { Env, PayoutReceipt } from "./types";
+import { paypalAccessToken } from "./paypal";
 
-interface PayPalToken {
-  access_token: string;
-  expires_at: number;
-}
-
-let cached: PayPalToken | null = null;
-
-async function accessToken(env: Env): Promise<string> {
-  if (cached && cached.expires_at > Date.now() + 30_000) return cached.access_token;
-  const res = await fetch(`${env.PAYPAL_API_BASE}/v1/oauth2/token`, {
-    method: "POST",
-    headers: {
-      authorization: `Basic ${btoa(`${env.PAYPAL_CLIENT_ID}:${env.PAYPAL_CLIENT_SECRET}`)}`,
-      "content-type": "application/x-www-form-urlencoded",
-    },
-    body: "grant_type=client_credentials",
-  });
-  if (!res.ok) throw new Error(`paypal oauth: HTTP ${res.status} ${await res.text()}`);
-  const body = (await res.json()) as { access_token: string; expires_in: number };
-  cached = { access_token: body.access_token, expires_at: Date.now() + body.expires_in * 1000 };
-  return body.access_token;
-}
 
 export interface PayoutRequest {
   repo: string;
@@ -67,7 +46,7 @@ export async function sendPayout(env: Env, req: PayoutRequest): Promise<PayoutRe
     currency: req.currency,
   };
   try {
-    const token = await accessToken(env);
+    const token = await paypalAccessToken(env);
     const senderBatchId = `widespread-${req.repo.replace("/", "-")}-${req.seq}-${req.claimHash.slice(0, 8)}`;
     receipt.sender_batch_id = senderBatchId;
     const res = await fetch(`${env.PAYPAL_API_BASE}/v1/payments/payouts`, {
@@ -145,7 +124,7 @@ export async function refreshBatch(env: Env, prior: PayoutReceipt): Promise<Payo
   const receipt: PayoutReceipt = { ...prior };
   if (!prior.batch_id) return receipt;
   try {
-    const token = await accessToken(env);
+    const token = await paypalAccessToken(env);
     const batch = await readBatch(env, token, prior.batch_id);
     if (!batch) {
       receipt.error = `batch readback failed`;

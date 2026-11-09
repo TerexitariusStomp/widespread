@@ -4,7 +4,6 @@ import type { RepoStateSchema } from "../repoState";
 
 import {
   claimMergeIntent,
-  countOpenIntentsForRef,
   expireMergeIntents,
   getMergeIntent,
   insertMergeVote,
@@ -527,4 +526,3 @@ export async function advanceMergeIntentDeltaState(args: {
   };
 }
 
-export { countOpenIntentsForRef };

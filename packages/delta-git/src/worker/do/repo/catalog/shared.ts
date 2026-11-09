@@ -13,7 +13,6 @@ export const MAX_CONCURRENT_RECEIVES = 8;
 export const COMPACTION_REARM_DELAY_MS = 60_000;
 export const COMPACTION_WAKE_DELAY_MS = 5_000;
 export const DEFAULT_HEAD: Head = { target: "refs/heads/main", unborn: true };
-export const IDX_HEADER_LEN = 8 + 256 * 4;
 
 export type BeginReceiveResult =
   | { ok: false; retryAfter: number }
@@ -28,16 +27,6 @@ export type BeginReceiveResult =
       activeCatalog: PackCatalogRow[];
     };
 
-export function uniq(items: Array<string | undefined>): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const item of items) {
-    if (!item || seen.has(item)) continue;
-    seen.add(item);
-    out.push(item);
-  }
-  return out;
-}
 
 /**
  * Ensures all required repo metadata keys exist with sensible defaults.

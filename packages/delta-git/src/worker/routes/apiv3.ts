@@ -54,7 +54,7 @@ const td = new TextDecoder();
 
 // Frozen machine error codes (DGS-02): `message` stays GitHub-compatible
 // prose for `gh`; `error` is the stable code agents branch on.
-export const ERROR_CODES = {
+const ERROR_CODES = {
   400: "bad-request",
   401: "unauthorized",
   403: "forbidden",
@@ -68,7 +68,7 @@ export const ERROR_CODES = {
 
 type ErrorStatus = keyof typeof ERROR_CODES;
 
-export function v3Err(c: AppContext, status: ErrorStatus, message: string): Response {
+function v3Err(c: AppContext, status: ErrorStatus, message: string): Response {
   return c.json({ message, error: ERROR_CODES[status] }, status as never);
 }
 

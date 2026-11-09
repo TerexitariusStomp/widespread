@@ -1,3 +1,6 @@
 node_modules/
 .env
 /tmp/
+
+# Solana devnet payer — generated locally, never committed
+.devnet-keypair.json

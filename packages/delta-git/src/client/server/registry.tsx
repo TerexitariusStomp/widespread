@@ -41,7 +41,6 @@ const views: Record<string, ViewDefinition> = {
   },
 };
 
-export type UiViewName = keyof typeof views;
 
 export function getViewDefinition(name: string): ViewDefinition | undefined {
   return views[name];

@@ -7,7 +7,7 @@
 // surfaces.
 
 const SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
-export const SLUG_MAX_LENGTH = 40;
+const SLUG_MAX_LENGTH = 40;
 
 export const RESERVED_SLUGS: readonly string[] = [
   "auth",

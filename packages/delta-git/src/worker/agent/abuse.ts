@@ -12,7 +12,7 @@
 // the DO where they're strongly consistent.
 
 const RATE_PREFIX = "ratelimit:";
-export const QUOTA_PREFIX = "quota:ns:";
+const QUOTA_PREFIX = "quota:ns:";
 
 export interface RateLimitSpec {
   /** Bucket name for metrics/keys (e.g. "auth.challenge"). */
@@ -160,14 +160,6 @@ export async function chargeStorageQuota(
 }
 
 /** Release previously charged bytes (e.g. on repo deletion). */
-export async function releaseStorageQuota(
-  kv: KVNamespace,
-  namespaceId: string,
-  bytes: number
-): Promise<void> {
-  const used = await getStorageUsed(kv, namespaceId);
-  await kv.put(`${QUOTA_PREFIX}${namespaceId}`, String(Math.max(0, used - bytes)));
-}
 
 // ---------------------------------------------------------------------------
 // Analytics Engine

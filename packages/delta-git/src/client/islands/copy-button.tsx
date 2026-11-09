@@ -9,7 +9,7 @@ export type CopyButtonProps = {
   value: string;
 };
 
-export function CopyButtonIsland({ value }: CopyButtonProps) {
+function CopyButtonIsland({ value }: CopyButtonProps) {
   const [copied, setCopied] = useState(false);
 
   return (

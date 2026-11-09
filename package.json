@@ -8,5 +8,8 @@
     "build": "pnpm -r --if-present build",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test"
+  },
+  "devDependencies": {
+    "knip": "^6.44.2"
   }
 }

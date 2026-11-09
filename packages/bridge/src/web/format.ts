@@ -4,7 +4,6 @@
 import type { FeedRecord, MirrorListing } from "../types";
 import { esc } from "./shell";
 
-export { esc };
 
 export function fmtUsd(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n)) return "—";
@@ -31,10 +30,6 @@ export function timeAgo(ms?: number): string {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
-export function fmtTime(ms?: number): string {
-  if (!ms) return "—";
-  return new Date(ms).toISOString().replace("T", " ").slice(0, 16) + "Z";
-}
 
 export function shortHash(h?: string, n = 10): string {
   if (!h) return "—";

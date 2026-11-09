@@ -1,3 +1,4 @@
+import { b64urlEncode, sha256Hex } from './encoding'
 /**
  * hermes-relay — rendezvous Worker for browser-hosted Hermes gateways.
  *
@@ -33,18 +34,10 @@ const te = new TextEncoder()
 const SID_RE = /^[0-9a-f-]{36}$/
 const TOKEN_LEN = 43 // 32 random bytes, base64url
 
-async function sha256Hex(data: string): Promise<string> {
-  const d = await crypto.subtle.digest('SHA-256', te.encode(data))
-  return Array.from(new Uint8Array(d)).map((b) => b.toString(16).padStart(2, '0')).join('')
-}
-
 function randomToken(): string {
   const bytes = new Uint8Array(32)
   crypto.getRandomValues(bytes)
-  return btoa(String.fromCharCode.apply(null, Array.from(bytes)))
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '')
+  return b64urlEncode(bytes)
 }
 
 function json(status: number, body: unknown, corsOrigin?: string): Response {

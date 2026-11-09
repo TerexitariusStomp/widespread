@@ -4,7 +4,6 @@ import type { CacheContext } from "./cache";
 // decide whether the shared Workers Cache may be read or written. Public
 // repositories cache freely; private repositories must bypass shared
 // cache reads/writes regardless of upstream success.
-export type SharedCachePolicy = "allow-shared-cache" | "bypass-shared-cache";
 
 // CacheContext memo flag tags. `no-cache-read`/`no-cache-write` are honored
 // by the shared cache helpers; route handlers that mark a request private

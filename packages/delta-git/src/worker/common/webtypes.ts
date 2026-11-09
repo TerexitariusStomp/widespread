@@ -2,7 +2,7 @@ export function asBodyInit(bytes: Uint8Array): BodyInit {
   return bytes as unknown as BodyInit;
 }
 
-export function asBlobPart(bytes: Uint8Array): BlobPart {
+function asBlobPart(bytes: Uint8Array): BlobPart {
   return bytes as unknown as BlobPart;
 }
 

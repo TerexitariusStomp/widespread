@@ -25,7 +25,7 @@ import { appendOpLogEntry } from "./oplog";
 // open/closed lifecycle: a discussion's resolution is an accepted answer
 // (Q&A categories) or simply the thread itself.
 
-export const DISCUSSION_CATEGORIES = [
+const DISCUSSION_CATEGORIES = [
   "general",
   "announcements",
   "ideas",
@@ -33,7 +33,7 @@ export const DISCUSSION_CATEGORIES = [
   "show-and-tell",
   "polls",
 ] as const;
-export type DiscussionCategory = (typeof DISCUSSION_CATEGORIES)[number];
+type DiscussionCategory = (typeof DISCUSSION_CATEGORIES)[number];
 
 function validCategory(category: string | undefined): DiscussionCategory | null {
   if (!category) return "general";

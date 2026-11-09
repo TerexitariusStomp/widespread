@@ -219,6 +219,28 @@ function x402Signer(ctx, grant, handle, accountId, network) {
 
 // ------------------------------------------------------------------ ops ---
 
+// Shared action-list builder + policy gate for the two transaction paths
+// (signSend and delegate) — identical NEP-366 action shapes and spend rules.
+function txActions(near, actions) {
+  return (actions || []).map((act) => {
+    if (act.type === 'transfer')
+      return near.actions.transfer(BigInt(act.amount || '0'))
+    if (act.type === 'functionCall')
+      return near.actions.functionCall(
+        act.methodName, act.args || {},
+        BigInt(act.gas || '30000000000000'), BigInt(act.deposit || '0'))
+    throw new Error(`unsupported action type ${act.type}`)
+  })
+}
+
+async function enforceTxPolicy(ctx, grant, a) {
+  const method = (a.actions || []).map((x) => x.methodName || x.type).join(',')
+  await enforcePolicy(ctx, grant, {
+    network: toNet(a.network), receiverId: a.receiverId,
+    method, depositYocto: depositOf(a.actions).toString(),
+  })
+}
+
 const OPS = {
   // Introspection: keys this grant can see, effective policy, bridge health.
   async status(ctx, grant, a) {
@@ -338,20 +360,8 @@ const OPS = {
 
   async signSend(ctx, grant, a) {
     const near = await sdk()
-    const acts = (a.actions || []).map((act) => {
-      if (act.type === 'transfer')
-        return near.actions.transfer(BigInt(act.amount || '0'))
-      if (act.type === 'functionCall')
-        return near.actions.functionCall(
-          act.methodName, act.args || {},
-          BigInt(act.gas || '30000000000000'), BigInt(act.deposit || '0'))
-      throw new Error(`unsupported action type ${act.type}`)
-    })
-    const method = (a.actions || []).map((x) => x.methodName || x.type).join(',')
-    await enforcePolicy(ctx, grant, {
-      network: toNet(a.network), receiverId: a.receiverId,
-      method, depositYocto: depositOf(a.actions).toString(),
-    })
+    const acts = txActions(near, a.actions)
+    await enforceTxPolicy(ctx, grant, a)
     const signer = await vaultSigner(ctx, grant, a.handle)
     const account = new near.Account(a.accountId, provider(near, toNet(a.network || 'testnet')), signer)
     const outcome = await account.signAndSendTransaction({
@@ -390,20 +400,8 @@ const OPS = {
   // themselves — e.g. custom x402 servers or sponsored-tx services.
   async delegate(ctx, grant, a) {
     const near = await sdk()
-    const acts = (a.actions || []).map((act) => {
-      if (act.type === 'functionCall')
-        return near.actions.functionCall(
-          act.methodName, act.args || {},
-          BigInt(act.gas || '30000000000000'), BigInt(act.deposit || '0'))
-      if (act.type === 'transfer')
-        return near.actions.transfer(BigInt(act.amount || '0'))
-      throw new Error(`unsupported action type ${act.type}`)
-    })
-    const method = (a.actions || []).map((x) => x.methodName || x.type).join(',')
-    await enforcePolicy(ctx, grant, {
-      network: toNet(a.network), receiverId: a.receiverId,
-      method, depositYocto: depositOf(a.actions).toString(),
-    })
+    const acts = txActions(near, a.actions)
+    await enforceTxPolicy(ctx, grant, a)
     const signer = await vaultSigner(ctx, grant, a.handle)
     const prov = provider(near, toNet(a.network || 'testnet'))
     const pk = await signer.getPublicKey()

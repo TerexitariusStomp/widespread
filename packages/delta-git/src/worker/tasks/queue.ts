@@ -15,7 +15,7 @@ import { RepoTaskQueueMessageSchema } from "./types";
 import { handleArtifactsEventBatch } from "./artifactsEvents";
 import { handleArenaResolveMessage } from "./arena";
 
-export type { RepoTaskQueueMessage, RepositoryDeleteMessage, RouteCacheSyncMessage } from "./types";
+export type { RepositoryDeleteMessage, RouteCacheSyncMessage } from "./types";
 
 // The queue carries repo lifecycle work as well as maintenance: compaction,
 // pack-ref backfill, route-cache repair, and repository deletion. Producers

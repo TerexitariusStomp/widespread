@@ -129,7 +129,7 @@ function schedulePackRefBackfill(args: {
   }
 }
 
-export async function loadPackRefSnapshot(
+async function loadPackRefSnapshot(
   env: Env,
   repoId: string,
   snapshot: OrderedPackSnapshot,

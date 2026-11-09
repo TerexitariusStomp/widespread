@@ -47,7 +47,6 @@ import {
   LIMITS,
 } from "@/worker/agent/abuse";
 import type { NamespaceRow } from "@/worker/db/d1/schema/namespaces";
-import type { RepositoryRow } from "@/worker/db/d1/schema/repositories";
 import { isValidOwnerRepo } from "@/shared/web";
 import { validateSlugForRoute } from "@/shared/slugs";
 import { getRepoStub } from "@/worker/common";
@@ -84,9 +83,6 @@ function toGitnessSpace(ns: NamespaceRow) {
   };
 }
 
-export function spaceRepoView(row: RepositoryRow, nsSlug: string) {
-  return toGitnessRepo(row, nsSlug);
-}
 
 async function resolveSpace(c: GitnessContext, ref: string): Promise<NamespaceRow | Response> {
   // The SPA sends `space/+` on list endpoints — gitness's "this space and

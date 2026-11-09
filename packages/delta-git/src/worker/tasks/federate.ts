@@ -30,7 +30,7 @@ import { namespaces, repositories } from "@/worker/db/d1/schema";
 
 const te = new TextEncoder();
 
-export interface FederateTarget {
+interface FederateTarget {
   name: string;
   url: string;
 }

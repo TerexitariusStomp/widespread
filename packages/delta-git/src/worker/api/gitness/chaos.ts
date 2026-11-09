@@ -23,7 +23,7 @@ import { insertPatWithGrants, revokePatById } from "@/worker/db/d1/dal/tokens";
 import { findRepositoryByDoName } from "@/worker/db/d1/dal/repositories";
 import type { GitnessContext } from "./shared";
 
-export interface ChaosReport {
+interface ChaosReport {
   kind: string;
   measured: Record<string, unknown>;
   samples: number;

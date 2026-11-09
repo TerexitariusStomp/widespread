@@ -138,7 +138,7 @@ export interface FeedDoc {
   mirrors?: MirrorListing[];
 }
 
-export type EvidenceSource = "forge-diff" | "upstream-patch" | "unavailable";
+type EvidenceSource = "forge-diff" | "upstream-patch" | "unavailable";
 
 export interface CommitEvidence {
   sha: string;
@@ -226,7 +226,7 @@ export interface Writeback {
   error?: string;
 }
 
-export type ReviewStatus = "accepted_paid" | "accepted_unpaid" | "rejected" | "error";
+type ReviewStatus = "accepted_paid" | "accepted_unpaid" | "rejected" | "error";
 
 export interface ReviewRecord {
   /** `${owner}/${repo}:${seq}` — KV key + dashboard anchor. */

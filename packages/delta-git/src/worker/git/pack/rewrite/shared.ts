@@ -12,10 +12,10 @@ import { findFirstPackedObjectCandidate, getNextOffsetByIndex } from "@/worker/g
 import { SequentialReader } from "@/worker/git/pack/indexer/resolve/reader";
 import { readPackHeaderExFromBuf, readPackRange } from "../packMeta";
 
-export const HEADER_READ_BYTES = 128;
-export const DEFAULT_CHUNK_SIZE = 4_194_304;
+const HEADER_READ_BYTES = 128;
+const DEFAULT_CHUNK_SIZE = 4_194_304;
 export const WHOLE_PACK_MAX_BYTES = 8 * 1024 * 1024;
-export const WHOLE_PACK_TOTAL_BUDGET = 32 * 1024 * 1024;
+const WHOLE_PACK_TOTAL_BUDGET = 32 * 1024 * 1024;
 export const HEADER_STABILITY_CAP = 16;
 
 export type RewriteFailure = {

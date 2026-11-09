@@ -6,8 +6,8 @@ import type { Bounty, Env, ReviewRecord } from "./types";
 const INDEX_KEY = "index";
 const INDEX_CAP = 500;
 
-export const recordKey = (repo: string, seq: number) => `claim:${repo}:${seq}`;
-export const bountyKey = (repo: string) => `bounty:${repo}`;
+const recordKey = (repo: string, seq: number) => `claim:${repo}:${seq}`;
+const bountyKey = (repo: string) => `bounty:${repo}`;
 
 export async function getRecord(env: Env, repo: string, seq: number): Promise<ReviewRecord | null> {
   return env.CLAIMS.get<ReviewRecord>(recordKey(repo, seq), "json");

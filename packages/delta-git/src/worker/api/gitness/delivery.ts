@@ -72,7 +72,7 @@ async function resolveMemberSpace(
 
 /** Evaluate a freeze-window schedule ("sa,su" or "mo-fr 17-09") against `now`
  * in UTC — pure function, also used by the merge/push enforcement hooks. */
-export function freezeWindowActive(schedule: string, now = new Date()): boolean {
+function freezeWindowActive(schedule: string, now = new Date()): boolean {
   const days = ["su", "mo", "tu", "we", "th", "fr", "sa"];
   const [daysPart, hoursPart] = schedule.trim().toLowerCase().split(/\s+/);
   const wanted = new Set<number>();
@@ -844,7 +844,7 @@ export interface GateContext {
   actor?: string;
 }
 
-export interface PolicyRule {
+interface PolicyRule {
   when: { field: string; op: "eq" | "matches" | "ne"; value: string };
   action: "deny" | "warn";
   message?: string;
@@ -995,7 +995,7 @@ interface FlagTarget {
 }
 
 /** OpenFeature-shaped flag evaluation — deterministic percentage bucketing. */
-export function evaluateFlag(row: { state: number; targets: string }, subject: string): boolean {
+function evaluateFlag(row: { state: number; targets: string }, subject: string): boolean {
   if (row.state !== 1) return false;
   const targets = JSON.parse(row.targets) as FlagTarget[];
   if (targets.length === 0) return true;

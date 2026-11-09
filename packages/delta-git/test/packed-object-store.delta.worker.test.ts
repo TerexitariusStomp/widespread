@@ -6,7 +6,7 @@ import {
   buildAppendOnlyDelta,
   buildPack,
   callStubWithRetry,
-  seedLegacyPackedRepo,
+  seedPackedRepoState,
   uniqueRepoId,
 } from "./util/test-helpers";
 
@@ -30,7 +30,7 @@ describe("packed object store deltas", () => {
       },
     ]);
 
-    const { getStub: seededStub } = await seedLegacyPackedRepo({
+    const { getStub: seededStub } = await seedPackedRepoState({
       env,
       repoId,
       getStub,
@@ -70,7 +70,7 @@ describe("packed object store deltas", () => {
     // Pass packs newest-first to match production catalog chronology. The
     // helper indexes them oldest-to-newest so the base pack is still visible
     // when the newer REF_DELTA pack is indexed.
-    const { getStub: seededStub, packKeys } = await seedLegacyPackedRepo({
+    const { getStub: seededStub, packKeys } = await seedPackedRepoState({
       env,
       repoId,
       getStub,

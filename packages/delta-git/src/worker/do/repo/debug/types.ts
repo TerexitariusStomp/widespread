@@ -16,7 +16,7 @@ export type DebugPackState = {
   supersededBy: string | null;
 };
 
-export type DebugCompactionState = {
+type DebugCompactionState = {
   running: boolean;
   queued: boolean;
   startedAt?: number;

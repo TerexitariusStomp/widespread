@@ -22,7 +22,7 @@ import { enqueueFederatePush } from "@/worker/tasks/federate";
 // commits through the DO with method "adjudicated" so the op log records
 // that a quorum, not the auto-merger, produced it.
 
-export type ResolutionDoc = {
+type ResolutionDoc = {
   files: Record<string, { content_b64?: string; delete?: boolean }>;
 };
 

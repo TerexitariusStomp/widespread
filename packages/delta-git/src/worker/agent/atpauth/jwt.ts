@@ -23,14 +23,6 @@ export interface DidSessionClaims {
  * shared DG_SESSION_SECRET rather than SESSION_SECRET so each side can
  * rotate its own session key independently.
  */
-export async function signHs256Jwt(
-  secret: string,
-  claims: Record<string, string | number | undefined>
-): Promise<string> {
-  return await new SignJWT(claims)
-    .setProtectedHeader({ alg: "HS256", typ: "JWT" })
-    .sign(te.encode(secret));
-}
 
 export async function signDidSession(secret: string, claims: DidSessionClaims): Promise<string> {
   return await new SignJWT({ ...claims })

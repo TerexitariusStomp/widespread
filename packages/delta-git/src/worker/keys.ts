@@ -33,19 +33,10 @@ export function r2PackDirPrefix(prefix: string): string {
 }
 
 // Return true if the key ends with .pack
-export function isPackKey(key: string): boolean {
-  return key.endsWith(".pack");
-}
 
 // Return true if the key ends with .idx
-export function isIdxKey(key: string): boolean {
-  return key.endsWith(".idx");
-}
 
 // Given an .idx key, return the corresponding .pack key
-export function packKeyFromIndexKey(idxKey: string): string {
-  return idxKey.replace(/\.idx$/, ".pack");
-}
 
 // Extract the Durable Object ID from a path starting with "do/<id>/..."
 // Returns null when the path does not include the expected prefix.

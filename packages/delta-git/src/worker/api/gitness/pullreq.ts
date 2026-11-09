@@ -7,7 +7,7 @@
 import type { MergeIntentRow } from "@/worker/do/repo/db/schema";
 
 /** Gitness `EnumPullReqState` — a collapsed view of our richer status set. */
-export type GitnessPullReqState = "closed" | "merged" | "open";
+type GitnessPullReqState = "closed" | "merged" | "open";
 
 /** Subset of `TypesPullReq` we can honestly populate today. */
 export interface GitnessPullReq {

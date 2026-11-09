@@ -98,7 +98,7 @@ export interface ForgeSurface {
   receipt: "commit-status" | "mention" | "pr-comment" | "none";
 }
 
-export function forgeFor(url: string): ForgeSurface {
+function forgeFor(url: string): ForgeSurface {
   if (/github\.com/.test(url)) return { forge: "github", api: "https://api.github.com", receipt: "commit-status" };
   if (/tangled\.sh|tangled\.org/.test(url)) return { forge: "tangled", receipt: "mention" };
   if (/radicle\.xyz|rad\.icle/.test(url)) return { forge: "radicle", receipt: "mention" };
@@ -110,7 +110,7 @@ export function forgeFor(url: string): ForgeSurface {
 /* ---------- Funding pools — OpenCollective / Polar / OnlyDust ------------ */
 
 /** Read-only pool balances for the ecosystem feed. Public APIs, no auth. */
-export async function fundingPools(env: Env): Promise<Record<string, unknown>> {
+async function fundingPools(env: Env): Promise<Record<string, unknown>> {
   const out: Record<string, unknown> = {};
   const oc = (env as unknown as { OC_ORG?: string }).OC_ORG;
   if (oc) {
@@ -141,7 +141,7 @@ export async function fundingPools(env: Env): Promise<Record<string, unknown>> {
 
 /** Security bounty boards share our submit→judge→pay shape for vulns.
  *  Env-gated feeds; links are the always-on surface. */
-export function securityMarkets(env: Env): Record<string, unknown> {
+function securityMarkets(env: Env): Record<string, unknown> {
   const e = env as unknown as { SECURITY_FEEDS?: string };
   let feeds: unknown[] = [];
   try { feeds = e.SECURITY_FEEDS ? JSON.parse(e.SECURITY_FEEDS) : []; } catch { feeds = []; }
@@ -158,7 +158,7 @@ export function securityMarkets(env: Env): Record<string, unknown> {
 
 /* ---------- Settlement rails registry ------------------------------------ */
 
-export function rails(env: Env): Record<string, unknown>[] {
+function rails(env: Env): Record<string, unknown>[] {
   const e = env as unknown as Record<string, string | undefined>;
   return [
     { id: "near", status: e.NEAR_CONTRACT ? "live" : "configured", note: "contract escrow + oracle release" },
@@ -172,7 +172,7 @@ export function rails(env: Env): Record<string, unknown>[] {
 
 /* ---------- Agent workers — OpenHands / SWE-agent backends ---------------- */
 
-export function workers(env: Env): Record<string, unknown>[] {
+function workers(env: Env): Record<string, unknown>[] {
   const e = env as unknown as Record<string, string | undefined>;
   return [
     { id: "widespread-runner", status: "live", note: "sealed executor, dg-ship-1 claims" },

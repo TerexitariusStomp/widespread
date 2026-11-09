@@ -6,7 +6,7 @@ import {
   callStubWithRetry,
   readRepoCatalogState,
   runDOWithRetry,
-  seedLegacyPackedRepo,
+  seedPackedRepoState,
   seedPackedRepo,
   uniqueRepoId,
 } from "./util/test-helpers";
@@ -57,7 +57,7 @@ describe("packed object store catalog", () => {
     const id = env.REPO_DO.idFromName(repoId);
     const getStub = () => env.REPO_DO.get(id);
 
-    const { packKeys, getStub: seededStub } = await seedLegacyPackedRepo({
+    const { packKeys, getStub: seededStub } = await seedPackedRepoState({
       env,
       repoId,
       getStub,

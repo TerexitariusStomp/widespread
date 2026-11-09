@@ -23,9 +23,9 @@ const log = createLogger(undefined, { service: "WorkflowSync" });
 const td = new TextDecoder();
 
 /** Directories scanned for workflow files, in precedence order. */
-export const WORKFLOW_DIRS = [".github/workflows", ".delta/workflows", ".harness"];
+const WORKFLOW_DIRS = [".github/workflows", ".delta/workflows", ".harness"];
 
-export interface ParsedWorkflow {
+interface ParsedWorkflow {
   name: string;
   onPush: boolean;
   pushBranches: string[];
@@ -47,7 +47,7 @@ function branchList(value: unknown): string[] {
  * (release, workflow_dispatch handled as manual anyway, ...) are ignored —
  * a workflow we can't trigger still materializes so manual runs work.
  */
-export function parseWorkflowTriggers(fileName: string, text: string): ParsedWorkflow {
+function parseWorkflowTriggers(fileName: string, text: string): ParsedWorkflow {
   const doc = parseYaml(text) as Record<string, unknown>;
   const on = doc?.on;
   const parsed: ParsedWorkflow = {

@@ -31,14 +31,6 @@ export async function listVouches(db: Db, limit = 50): Promise<VouchRow[]> {
   return await db.select().from(vouches).orderBy(desc(vouches.createdAt)).limit(limit);
 }
 
-export async function listVouchesFor(db: Db, toDid: string, limit = 50): Promise<VouchRow[]> {
-  return await db
-    .select()
-    .from(vouches)
-    .where(eq(vouches.toDid, toDid))
-    .orderBy(desc(vouches.createdAt))
-    .limit(limit);
-}
 
 /** Sybil brake: a voucher can't praise the same target more than once/day. */
 export async function countRecentVouches(
@@ -89,20 +81,6 @@ export async function findRepTarget(db: Db, did: string): Promise<RepTarget | un
  * Resolve a browser session's userId to its rep-bearing identity. UI votes
  * are keyed by userId; the identity row maps it to a DID with rep.
  */
-export async function findRepTargetByUserId(
-  db: Db,
-  userId: string
-): Promise<{ kind: "identity"; did: string; rep: number; createdAt: number } | undefined> {
-  const rows = await db
-    .select({ did: identities.did, rep: identities.rep, createdAt: identities.createdAt })
-    .from(identities)
-    .where(eq(identities.userId, userId))
-    .limit(1);
-  const row = rows[0];
-  return row
-    ? { kind: "identity", did: row.did, rep: row.rep, createdAt: row.createdAt }
-    : undefined;
-}
 
 /**
  * Apply a rep delta to whichever actor type owns the key — an agent DID,
@@ -163,7 +141,7 @@ export async function insertEpoch(
   await db.insert(epochs).values({ ...row, status: "open" });
 }
 
-export async function getEpoch(db: Db, id: string): Promise<EpochRow | undefined> {
+async function getEpoch(db: Db, id: string): Promise<EpochRow | undefined> {
   const rows = await db.select().from(epochs).where(eq(epochs.id, id)).limit(1);
   return rows[0];
 }

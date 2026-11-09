@@ -28,12 +28,12 @@ const DEFAULT_CUT_BPS = 1000; // 10% — platform cut of the bounty at release
  * face value — the payer escrows the ORIGINAL amount and the contract
  * skims cut_bps of `locked` to CUT_SINK at release (on top of the 2% DAO
  * fee). Proportional, so no FX oracle is needed. */
-export function cutBps(env: Env): number {
+function cutBps(env: Env): number {
   const n = parseInt(env.CUT_BPS ?? "", 10);
   return Number.isFinite(n) && n >= 0 && n <= 5000 ? n : DEFAULT_CUT_BPS;
 }
 
-export function mirrorOffer(env: Env, amount?: string, currency?: string): MirrorOffer {
+function mirrorOffer(env: Env, amount?: string, currency?: string): MirrorOffer {
   return {
     action: "mirror", endpoint: "createMarket", contract: env.NEAR_CONTRACT,
     cut_bps: cutBps(env),
@@ -873,7 +873,7 @@ export async function handleMcp(env: Env, body: Record<string, unknown>, ctx?: E
 
 // --------------------------------------------------------------- runners
 
-export const RUNNERS = [
+const RUNNERS = [
   {
     id: "browser-tab", kind: "browser-tab",
     isolation: "wasm-sandbox (Pyodide + isomorphic-git)",

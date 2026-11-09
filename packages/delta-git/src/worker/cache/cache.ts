@@ -194,7 +194,7 @@ export function buildObjectCacheKey(req: Request, repoId: string, oid: string): 
  * @param keyReq - The cache key request
  * @returns Object data with type and payload, or null on miss
  */
-export async function cacheGetObject(
+async function cacheGetObject(
   keyReq: Request
 ): Promise<{ type: string; payload: Uint8Array } | null> {
   try {
@@ -219,7 +219,7 @@ export async function cacheGetObject(
  * @param type - Git object type (blob, tree, commit, tag)
  * @param payload - Raw object payload (without git header)
  */
-export async function cachePutObject(
+async function cachePutObject(
   keyReq: Request,
   type: string,
   payload: Uint8Array
@@ -284,7 +284,7 @@ export async function cacheOrLoadObject<T extends { type: string; payload: Uint8
  * @param ctx - ExecutionContext for waitUntil (optional)
  * @returns The cached or loaded data
  */
-export async function cacheOrLoadJSON<T>(
+async function cacheOrLoadJSON<T>(
   cacheKey: Request,
   loader: () => Promise<T | null>,
   ttl: number,
@@ -333,7 +333,7 @@ export async function cacheOrLoadJSONForRequest<T>(
  * Variant of cacheOrLoadJSON where the TTL depends on the loaded value.
  * Useful when the response type determines TTL (e.g., tree listings vs blob metadata).
  */
-export async function cacheOrLoadJSONWithTTL<T>(
+async function cacheOrLoadJSONWithTTL<T>(
   cacheKey: Request,
   loader: () => Promise<T | null>,
   ttlResolver: (value: T) => number,

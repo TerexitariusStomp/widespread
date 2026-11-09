@@ -15,7 +15,7 @@ function dayKey(ts: number): string {
   return new Date(ts).toISOString().slice(0, 10);
 }
 
-export function trafficCloneKey(doName: string, day: string): string {
+function trafficCloneKey(doName: string, day: string): string {
   return `gtraffic:${doName}:clones:${day}`;
 }
 

@@ -1,4 +1,3 @@
-import type { Logger } from "@/worker/common/logger";
 
 import { doPrefix } from "@/worker/keys";
 
@@ -77,9 +76,3 @@ export async function writeMergeAttestation(
   return { key, digest };
 }
 
-export function logAttestationWritten(
-  log: Logger | undefined,
-  args: { intentId: string; mergeOid: string; key: string }
-): void {
-  log?.info("attest:written", args);
-}
