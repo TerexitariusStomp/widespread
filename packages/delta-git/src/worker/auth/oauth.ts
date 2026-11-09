@@ -25,7 +25,7 @@ import {
 } from "@cloudflare/workers-oauth-provider";
 
 import { requestOrigin } from "@/worker/common";
-import { verifyDpopProof } from "@/vendor/widespread/auth/dpop";
+import { verifyDpopProof } from "@/worker/auth/dpop/dpop";
 import { findMembership } from "@/worker/db/d1/dal/namespaces";
 import type { Db } from "@/worker/db/d1/client";
 

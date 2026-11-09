@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { env, exports as workerExports } from "cloudflare:workers";
 
 import { didKeyFromPubkey } from "@/worker/agent/atpauth/didkey";
-import { computeJwkThumbprint } from "@/vendor/widespread/auth/dpop";
+import { computeJwkThumbprint } from "@/worker/auth/dpop/dpop";
 import { ensureD1Migrations } from "./util/d1Setup";
 
 const te = new TextEncoder();

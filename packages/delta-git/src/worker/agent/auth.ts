@@ -4,7 +4,7 @@ import type { Db } from "@/worker/db/d1";
 import { eq } from "drizzle-orm";
 import { agents } from "@/worker/db/d1/schema";
 import { bytesToHex } from "@/worker/common/hex";
-import { didKeyFromPubkey } from "./atpauth/didkey";
+import { didKeyFromPublicKey, verifyDg1Request } from "@widespread/protocol";
 
 // delta-git agent auth — ed25519 DID + signed request envelopes.
 //
@@ -12,17 +12,16 @@ import { didKeyFromPubkey } from "./atpauth/didkey";
 // `did:key:z6Mk…` identifiers — the only supported format.
 // Mutating agent endpoints carry signature headers:
 //   x-dg-did, x-dg-ts (unix seconds), x-dg-nonce, x-dg-sig (hex)
-// The signed payload is sha256("dg1\n" + did + "\n" + ts + "\n" + nonce + "\n"
-// + method + "\n" + path + "\n" + bodySha256Hex). Replay protection relies on
-// the timestamp window plus nonce freshness checks kept cheap in D1.
+// The dg1 payload/signature wire format and its verification live in
+// @widespread/protocol — shared with the bridge, runner, and Hermes plugin.
+// Replay protection relies on the timestamp window plus nonce freshness
+// checks kept cheap in D1.
 
 export const AGENT_SIG_WINDOW_SEC = 300;
 
-const te = new TextEncoder();
-
 /** Canonical agent DID for a new registration: `did:key` (ed25519). */
 export function didForPubkey(pubkeyBytes: Uint8Array): string {
-  return didKeyFromPubkey(pubkeyBytes, "ed25519");
+  return didKeyFromPublicKey(pubkeyBytes);
 }
 
 /** Canonical `did:key` for a hex-encoded ed25519 pubkey — used by platform
@@ -32,7 +31,7 @@ export function didForPubkeyHex(pubkeyHex: string): string {
   if (!pubkeyBytes || pubkeyBytes.length !== 32) {
     throw new Error("pubkey must be 32-byte hex");
   }
-  return didKeyFromPubkey(pubkeyBytes, "ed25519");
+  return didKeyFromPublicKey(pubkeyBytes);
 }
 
 export function hexToBytesSafe(hex: string): Uint8Array | undefined {
@@ -42,28 +41,9 @@ export function hexToBytesSafe(hex: string): Uint8Array | undefined {
   return out;
 }
 
-async function sha256Hex(input: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", te.encode(input));
-  return bytesToHex(new Uint8Array(digest));
-}
-
 export async function bodyDigestHex(body: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", body as BufferSource);
   return bytesToHex(new Uint8Array(digest));
-}
-
-async function importPubkey(pubkeyBytes: Uint8Array): Promise<CryptoKey | undefined> {
-  try {
-    return await crypto.subtle.importKey(
-      "raw",
-      pubkeyBytes as BufferSource,
-      { name: "Ed25519" },
-      false,
-      ["verify"]
-    );
-  } catch {
-    return undefined;
-  }
 }
 
 export type AgentAuth = { kind: "ok"; agent: AgentRow } | { kind: "rejected"; reason: string };
@@ -186,24 +166,26 @@ export async function verifyAgentRequest(args: {
   if (agent.banned === 1) return { kind: "rejected", reason: "agent-banned" };
 
   const pubkeyBytes = hexToBytesSafe(agent.pubkey);
-  const sigBytes = hexToBytesSafe(args.sig);
-  if (!pubkeyBytes || !sigBytes || sigBytes.length !== 64) {
-    return { kind: "rejected", reason: "bad-signature-format" };
+  if (!pubkeyBytes || pubkeyBytes.length !== 32) {
+    return { kind: "rejected", reason: "bad-pubkey" };
   }
-  const key = await importPubkey(pubkeyBytes);
-  if (!key) return { kind: "rejected", reason: "bad-pubkey" };
 
-  const bodySha = await bodyDigestHex(args.body);
-  const payload = await sha256Hex(
-    `dg1\n${args.did}\n${args.ts}\n${args.nonce}\n${args.method.toUpperCase()}\n${args.path}\n${bodySha}`
-  );
-  const ok = await crypto.subtle.verify(
-    "Ed25519",
-    key,
-    sigBytes as BufferSource,
-    te.encode(payload) as BufferSource
-  );
-  if (!ok) return { kind: "rejected", reason: "signature-mismatch" };
+  // Shared dg1 verification — timestamp/nonce/sig-format/Ed25519 checks.
+  // ts+nonce were already screened above so rejection ordering
+  // (stale/unknown-did) is unchanged; the helper re-checks them cheaply.
+  const verdict = await verifyDg1Request({
+    did: args.did,
+    publicKey: pubkeyBytes,
+    sig: args.sig,
+    ts: args.ts,
+    nonce: args.nonce,
+    method: args.method,
+    path: args.path,
+    body: args.body,
+    nowSec: args.nowSec,
+    windowSec: AGENT_SIG_WINDOW_SEC,
+  });
+  if (!verdict.ok) return { kind: "rejected", reason: verdict.reason };
 
   // Fold the optional x-dg-model attribution into the lastSeenAt touch so
   // per-request model reporting costs zero extra writes.

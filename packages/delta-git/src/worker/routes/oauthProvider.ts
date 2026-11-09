@@ -32,8 +32,8 @@ import {
   type OAuthTokenProps,
 } from "@/worker/auth/oauth";
 import { requestOrigin } from "@/worker/common";
-import { computeJwkThumbprint, verifyDpopProof } from "@/vendor/widespread/auth/dpop";
-import { base64UrlToBytes, bytesToUtf8 } from "@/vendor/widespread/crypto/index.js";
+import { computeJwkThumbprint, verifyDpopProof } from "@/worker/auth/dpop/dpop";
+import { base64UrlToBytes, bytesToUtf8 } from "@/worker/auth/dpop/encoding";
 import { findIdentityByUserId } from "@/worker/db/d1/dal/identities";
 import { listNamespacesForUser } from "@/worker/db/d1/dal/namespaces";
 

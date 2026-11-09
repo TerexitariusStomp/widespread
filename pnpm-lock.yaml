@@ -262,6 +262,9 @@ importers:
       '@simplewebauthn/server':
         specifier: ^14.0.3
         version: 14.1.0
+      '@widespread/protocol':
+        specifier: workspace:*
+        version: link:../protocol
       badge-maker:
         specifier: ^6.0.0
         version: 6.0.0

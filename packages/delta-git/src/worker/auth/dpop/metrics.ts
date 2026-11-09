@@ -1,13 +1,16 @@
 /**
  * Auth failure tracking for brute-force throttling.
  *
- * KV keys are HMAC'd with a pepper so stored counters are not reversible to
- * raw IPs/DIDs even if the namespace is dumped. The pepper is a server secret
- * (e.g. WORKER_SESSION_SECRET); it does not protect against a live compromise
- * of the isolate, but prevents cold-storage key material from being brute-
- * forced (the IPv4 space is ~4B — trivially enumerable without a pepper).
+ * Moved out of src/vendor/widespread — hex encoding now comes from
+ * @noble/hashes/utils.js (via ./encoding.js). KV keys are HMAC'd with a
+ * pepper so stored counters are not reversible to raw IPs/DIDs even if
+ * the namespace is dumped. The pepper is a server secret (e.g.
+ * WORKER_SESSION_SECRET); it does not protect against a live compromise
+ * of the isolate, but prevents cold-storage key material from being
+ * brute-forced (the IPv4 space is ~4B — trivially enumerable without a
+ * pepper).
  */
-import { bytesToHex } from "../crypto/index.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
 import type { ChallengeStore } from "./challenge.js";
 
 const AUTH_FAILURE_LIMIT = 10;
@@ -22,7 +25,7 @@ export async function pepperedHash(value: string, pepper: string): Promise<strin
     ["sign"]
   );
   const sig = await crypto.subtle.sign("HMAC", key, enc.encode(value));
-  return bytesToHex(new Uint8Array(sig).slice(0, 16));
+  return `0x${bytesToHex(new Uint8Array(sig).slice(0, 16))}`;
 }
 
 /**

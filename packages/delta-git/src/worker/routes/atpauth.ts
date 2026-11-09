@@ -8,7 +8,7 @@ import { canonicalJson, utf8, verifyKeySignature } from "@/worker/agent/atpauth/
 import { completeOAuth, startOAuth } from "@/worker/agent/atpauth/oauth";
 import { decodeKeyMultibase } from "@/worker/agent/atpauth/didkey";
 import { verifyServiceAuth } from "@/worker/agent/atpauth/serviceAuth";
-import { computeJwkThumbprint } from "@/vendor/widespread/auth/dpop";
+import { computeJwkThumbprint } from "@/worker/auth/dpop/dpop";
 import {
   clearDidSessionCookie,
   getDidSessionCookie,

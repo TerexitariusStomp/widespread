@@ -17,7 +17,7 @@ import {
   setSessionCookie,
 } from "./cookies";
 import { verifyDidSession } from "@/worker/agent/atpauth/jwt";
-import { verifyDpopProof } from "@/vendor/widespread/auth/dpop";
+import { verifyDpopProof } from "@/worker/auth/dpop/dpop";
 
 // Session cookie value shape: `goc_sess_<base64url AES-GCM blob>`.
 // The sealed blob contains the user id and expiry and is authenticated with

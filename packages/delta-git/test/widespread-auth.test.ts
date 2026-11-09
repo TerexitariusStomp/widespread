@@ -1,23 +1,31 @@
 import { describe, it, expect } from "vitest";
-import { computeJwkThumbprint, verifyDpopProof } from "@/vendor/widespread/auth/dpop.js";
+import { computeJwkThumbprint, verifyDpopProof } from "@/worker/auth/dpop/dpop.js";
 import {
   issueChallenge,
   consumeChallenge,
   type ChallengeStore,
-} from "@/vendor/widespread/auth/challenge.js";
+} from "@/worker/auth/dpop/challenge.js";
 
 describe("computeJwkThumbprint", () => {
+  // RFC 7638 thumbprints run through jose — jwks must be well-formed
+  // (kty + crv + base64url members), so tests use a real P-256 key.
+  const jwkA = {
+    kty: "EC", crv: "P-256",
+    x: "L9hKPAeXvV6uvd_axpjt_n-WpPCBE3drWbeVjRFmTs8",
+    y: "rBZT6bdsV08to_4WyKV-rNCSRo4uKB5GzxJCbh7esDY",
+  };
+  const jwkB = { ...jwkA, x: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" };
+
   it("computes a deterministic base64url thumbprint", async () => {
-    const jwk = { kty: "EC", x: "test-x", y: "test-y" };
-    const t1 = await computeJwkThumbprint(jwk);
-    const t2 = await computeJwkThumbprint(jwk);
+    const t1 = await computeJwkThumbprint(jwkA);
+    const t2 = await computeJwkThumbprint(jwkA);
     expect(t1).toBe(t2);
     expect(t1).toMatch(/^[A-Za-z0-9_-]+$/);
   });
 
   it("differs for different keys", async () => {
-    const a = await computeJwkThumbprint({ kty: "EC", x: "x1", y: "y1" });
-    const b = await computeJwkThumbprint({ kty: "EC", x: "x2", y: "y2" });
+    const a = await computeJwkThumbprint(jwkA);
+    const b = await computeJwkThumbprint(jwkB);
     expect(a).not.toBe(b);
   });
 });

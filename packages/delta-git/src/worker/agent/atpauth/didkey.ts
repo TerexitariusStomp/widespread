@@ -1,7 +1,9 @@
 import { fromBase58Btc, toBase58Btc } from "@atcute/multibase";
+import { didKeyFromPublicKey, publicKeyFromDidKey } from "@widespread/protocol";
 
-// did:key helpers (vendored from widespread/Rooted didkey.ts; base58btc
-// codec delegated to @atcute/multibase).
+// did:key helpers — ed25519 encode/decode delegates to @widespread/protocol
+// (the shared dg1/did:key contract); secp256k1 + P-256 remain local because
+// atproto sign-in supports them and the protocol package is ed25519-only.
 //
 // did:key encodes `<multicodec-prefix> || <raw pubkey>` as base58btc with a
 // "z" multibase marker. Supported key types:
@@ -11,15 +13,16 @@ import { fromBase58Btc, toBase58Btc } from "@atcute/multibase";
 
 export type DidKeyCurve = "ed25519" | "k256" | "p256";
 
-// Fixed 2-byte multicodec varints:
-//   ed25519: 0xed 0x01 | secp256k1: 0xe7 0x01 | P-256: 0x80 0x24
-const MULTICODEC_PREFIX: Record<DidKeyCurve, [number, number]> = {
-  ed25519: [0xed, 0x01],
+// Fixed 2-byte multicodec varints (non-ed25519 only — ed25519 goes through
+// @widespread/protocol):
+//   secp256k1: 0xe7 0x01 | P-256: 0x80 0x24
+const MULTICODEC_PREFIX: Record<Exclude<DidKeyCurve, "ed25519">, [number, number]> = {
   k256: [0xe7, 0x01],
   p256: [0x80, 0x24],
 };
 
 export function didKeyFromPubkey(pubkey: Uint8Array, curve: DidKeyCurve): string {
+  if (curve === "ed25519") return didKeyFromPublicKey(pubkey);
   const [hi, lo] = MULTICODEC_PREFIX[curve];
   const payload = new Uint8Array(2 + pubkey.length);
   payload[0] = hi;
@@ -36,6 +39,9 @@ export interface DecodedDidKey {
 export function pubkeyFromDidKey(did: string): DecodedDidKey | undefined {
   const match = /^did:key:z([1-9A-HJ-NP-Za-km-z]+)$/.exec(did);
   if (!match) return undefined;
+  // Fast path: ed25519 did:keys decode through the shared protocol helper.
+  const ed = publicKeyFromDidKey(did);
+  if (ed) return { curve: "ed25519", pubkey: ed };
   return decodeKeyMultibase(`z${match[1]}`);
 }
 

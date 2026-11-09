@@ -1,8 +1,8 @@
 /**
  * Challenge nonce issuance and consumption.
  *
- * Consolidates the challenge logic from worker (KV-based) and gateway (D1-based).
- * Uses oslo/crypto (MIT) for random nonce generation.
+ * Moved out of src/vendor/widespread — behavior unchanged; nonce
+ * generation still uses oslo/crypto (MIT).
  */
 import { generateRandomString, alphabet } from "oslo/crypto";
 import { pepperedHash } from "./metrics.js";
@@ -16,7 +16,7 @@ export interface ChallengeStore {
 }
 
 /**
- * Issue a challenge nonce using oslo/crypto (MIT).
+ * Issue a challenge nonce.
  * Stores in the challenge store with 5-min TTL.
  * The stored VALUE is HMAC(did, pepper) — nonces never hold a raw identity
  * and the pepper prevents enumerating which DIDs requested challenges from
