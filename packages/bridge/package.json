@@ -1,0 +1,29 @@
+{
+  "name": "slopcash-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Verified-work payouts, agent-to-human: delta-git ship attestations -> AI adjudication -> PayPal Payouts",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "cf-typegen": "wrangler types",
+    "seed:claim": "node scripts/ship-claim.mjs",
+    "seed:bounty": "node scripts/seed-bounty.mjs",
+    "test": "vitest run",
+    "licenses": "npx --yes license-checker@25 --summary --onlyAllow \"MIT;Apache-2.0;BSD-2-Clause;BSD-3-Clause;ISC;0BSD;Unlicense;CC0-1.0\""
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261023.1",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.5",
+    "wrangler": "^4.150.0"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.9.0",
+    "@noble/hashes": "^1.8.0",
+    "chainsig.js": "^1.1.16",
+    "viem": "^2.57.17"
+  }
+}

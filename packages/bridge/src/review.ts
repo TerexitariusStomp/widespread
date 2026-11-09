@@ -1,0 +1,203 @@
+// The pipeline: claim → evidence → AI verdict → PayPal payout → receipt.
+
+import { adjudicate } from "./adjudicator";
+import { crosscheck, findDerivative, gatherCommitEvidence, laterUpstreamFingerprints, upstreamFor } from "./evidence";
+import { oracleEnv, signVerdict } from "./oracle";
+import { fetchOpLog, verifyChain } from "./oplog";
+import { refreshBatch, sendPayout } from "./payouts";
+import { attestClaim } from "./ecosystem";
+import { getBounty, getRecord, putRecord } from "./store";
+import { writebackReceipt } from "./writeback";
+import type {
+  Bounty,
+  Env,
+  PayoutReceipt,
+  ReviewRecord,
+  ShipClaim,
+} from "./types";
+
+function receiverFor(claim: ShipClaim, bounty: Bounty | null, actor: string): string | null {
+  if (bounty?.recipients?.[actor]) return bounty.recipients[actor];
+  if (bounty?.receiver_email) return bounty.receiver_email;
+  if (claim.paypal_email) return claim.paypal_email;
+  return null;
+}
+
+/**
+ * Review one op-log entry end to end. Returns the persisted record;
+ * throws only on malformed requests (unknown repo / missing seq).
+ */
+export async function runReview(
+  env: Env,
+  repo: string,
+  seq: number,
+  opts: { force?: boolean } = {}
+): Promise<ReviewRecord> {
+  const id = `${repo}:${seq}`;
+  const entries = await fetchOpLog(env.FORGE_BASE, repo);
+  const entry = entries.find((e) => e.seq === seq);
+  if (!entry) throw new Error(`no op-log entry seq=${seq} in ${repo}`);
+  if (entry.kind !== "ship" || entry.payload?.ship !== true) {
+    throw new Error(`entry ${seq} is not an accepted ship claim (kind=${entry.kind})`);
+  }
+
+  // delta-git op-logs are reset periodically — a wiped repo restarts at
+  // genesis and reuses seq numbers. Only a stored record for THIS exact
+  // entry (same hash) counts as already-reviewed; a same-seq entry under a
+  // different hash is a new claim and earns a fresh review + payout.
+  const stored = await getRecord(env, repo, seq);
+  if (stored && !opts.force && stored.claim.hash === entry.hash) return stored;
+  // Same-claim prior → refresh its batch rather than re-POST (PayPal rejects
+  // a second send under the same sender_batch_id). Different-hash prior →
+  // a new claim; its payout gets a hash-keyed batch id.
+  const prior = stored?.claim.hash === entry.hash ? stored : null;
+
+  const claim = entry.payload as unknown as ShipClaim;
+  const [chain, bounty] = await Promise.all([verifyChain(entries), getBounty(env, repo)]);
+
+  // Recompute each claimed commit's diff independently of the forge verdict.
+  const commits = await Promise.all(
+    (claim.commits ?? []).map((sha) =>
+      gatherCommitEvidence(env, repo, sha, bounty?.upstream)
+    )
+  );
+  const check = crosscheck(claim, commits);
+
+  // Derivative-use scan: fingerprint the upstream repo's recent commits and
+  // check whether a later one landed this claim's exact patch — the
+  // "used my code, never merged the PR" proof, recorded on every review.
+  const upstream = upstreamFor(repo, env, bounty?.upstream);
+  const fp = commits.find((c) => c.patch_fingerprint)?.patch_fingerprint;
+  const derivative = upstream && fp
+    ? await findDerivative({
+        claimFingerprint: fp,
+        laterCommits: await laterUpstreamFingerprints(upstream),
+      }).catch(() => null)
+    : null;
+
+  const adjudication = await adjudicate(env, {
+    repo,
+    entry,
+    chain,
+    bounty,
+    commits,
+    check,
+    derivative,
+  });
+
+  // Money moves only on: model says accept + confidence floor + intact chain.
+  const minConfidence = Number(env.MIN_CONFIDENCE ?? "0.6");
+  const accepted =
+    adjudication.verdict === "accept" &&
+    adjudication.confidence >= minConfidence &&
+    chain.valid;
+
+  // When the market lives on-chain (NEAR_CONTRACT set), the adjudicator's
+  // verdict is signed as an oracle proof — release() on the contract binds
+  // this sig to the registered oracle instead of trusting a payer click.
+  const oracle = oracleEnv(env as unknown as {
+    NEAR_CONTRACT?: string; NEAR_RPC_URL?: string;
+    ORACLE_ACCOUNT?: string; ORACLE_SECRET_KEY?: string;
+    ORACLE_SEED_HEX?: string; ORACLE_PUBKEY_HEX?: string;
+  });
+  if (oracle && accepted && claim.commits?.length) {
+    const { sig } = await signVerdict(
+      oracle,
+      claim.work_id ?? String(seq),
+      entry.hash ?? "",
+      "accept",
+      String(bounty?.work_id ?? ""),
+    ).catch(() => ({ sig: "", pubkey: "" }));
+    if (sig) adjudication.oracle_verdict_sig = sig;
+  }
+
+  // Sigstore/Rekor: pin the claimed commit into the public transparency log.
+  // Env-gated — skipped with a reason when no ATTEST_* key is provisioned.
+  const attestation = claim.commits?.[0]
+    ? await attestClaim(env, { repo, sha: claim.commits[0], note: `ship-claim seq=${seq}` })
+        .catch(() => null)
+    : null;
+
+  let payout: PayoutReceipt | null = null;
+  if (accepted) {
+    const receiver = receiverFor(claim, bounty, entry.actor);
+    if (!env.PAYPAL_CLIENT_ID || !env.PAYPAL_CLIENT_SECRET) {
+      payout = { attempted: false, skipped_reason: "PAYPAL_CLIENT_ID/SECRET not set", sandbox: true };
+    } else if (!receiver) {
+      payout = {
+        attempted: false,
+        skipped_reason: "no recipient — seed a bounty for this repo or set claim.paypal_email",
+        sandbox: true,
+      };
+    } else if (prior?.payout?.batch_id) {
+      payout = await refreshBatch(env, prior.payout);
+    } else {
+      payout = await sendPayout(env, {
+        repo,
+        seq,
+        claimHash: entry.hash,
+        receiver,
+        amount: bounty?.amount ?? "1.00",
+        currency: bounty?.currency ?? "USD",
+        note: `Slop.cash bounty for ${repo} ship claim #${seq}`,
+      });
+    }
+  }
+
+  // Receipt back to the forge as a signed commit status (bidirectional audit).
+  const firstSha = claim.commits?.[0];
+  const writeback = firstSha
+    ? await writebackReceipt(env, {
+        repo,
+        sha: firstSha,
+        accepted,
+        description: payout?.batch_id
+          ? `PayPal Payouts batch ${payout.batch_id} (${payout.transaction_status ?? payout.batch_status ?? "sent"})`
+          : `adjudicated ${adjudication.verdict} (confidence ${adjudication.confidence})`,
+        claimId: id,
+      })
+    : { attempted: false, skipped_reason: "no commits in claim" };
+
+  const record: ReviewRecord = {
+    id,
+    repo,
+    seq,
+    status: adjudication.error
+      ? "error"
+      : !accepted
+        ? "rejected"
+        : payout?.batch_id
+          ? "accepted_paid"
+          : "accepted_unpaid",
+    claim: entry,
+    chain,
+    commits,
+    crosscheck: check,
+    bounty,
+    adjudication,
+    derivative,
+    attestation,
+    payout,
+    writeback,
+    reviewed_at: Date.now(),
+  };
+  await putRecord(env, record);
+  return record;
+}
+
+/** Review every unprocessed ship claim in a repo (cron + bulk /review). */
+export async function reviewOutstanding(
+  env: Env,
+  repo: string,
+  limit = 5
+): Promise<ReviewRecord[]> {
+  const entries = await fetchOpLog(env.FORGE_BASE, repo);
+  const shipEntries = entries.filter((e) => e.kind === "ship" && e.payload?.ship === true);
+  const out: ReviewRecord[] = [];
+  for (const entry of shipEntries.slice(-limit)) {
+    const stored = await getRecord(env, repo, entry.seq);
+    if (stored && stored.claim.hash === entry.hash) continue;
+    out.push(await runReview(env, repo, entry.seq));
+  }
+  return out;
+}

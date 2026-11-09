@@ -1,0 +1,50 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "widespread-bridge",
+  "account_id": "46966abcfb8f1245ec055842177edcb2",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    // delta-git forge base URL (public JSON API, no auth for reads).
+    "FORGE_BASE": "https://code.widespread.fyi",
+    // Repos the cron scanner watches for unreviewed `ship` op-log entries.
+    "WATCH_REPOS": "slop/slopdotcash,slop/protocol",
+    // PayPal REST base — sandbox by default, flip to api-m.paypal.com for live.
+    "PAYPAL_API_BASE": "https://api-m.sandbox.paypal.com",
+    // NEAR market contract — the on-chain source of truth for /api/markets.
+    "NEAR_CONTRACT": "wide-mkt-11561.testnet",
+    // Ops account that auto-escrows fiat-funded mirrors (key in
+    // NEAR_OPS_SECRET_KEY secret). Testnet demo account.
+    "NEAR_OPS_ACCOUNT": "wide-ops-328424.testnet",
+    "FUTARCHY_CONTRACT": "foreguild-ft-69240.testnet",
+    "HATS_CONTRACT": "intentional-hats-632291.testnet",
+    "HATS_ORG": "2",
+    "NEAR_RPC_URL": "https://rpc.testnet.near.org",
+    "ORACLE_PUBKEY_HEX": "1ad812e3b4a566d8a33358529adc431e3c752b6a0c2ca3fa70d92ee1423e0ef1",
+    "ORACLE_ACCOUNT": "wide-mkt-11561.testnet",
+    "NEAR_AI_MODEL": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    // Workers AI model for the adjudicator seat.
+    "LLM_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    // Minimum adjudicator confidence (0..1) required to release a payout.
+    "MIN_CONFIDENCE": "0.6",
+    // Public base URL of this deployment — used for receipt target_urls
+    // written back to the forge. Set after first deploy.
+    "PUBLIC_BASE": "https://widespread-bridge.widespread.workers.dev"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "CLAIMS",
+      "id": "8b4e482c9fe045da900792b76fbbc846"
+    }
+  ],
+  "ai": {
+    "binding": "AI",
+    "remote": true
+  },
+  // The scheduled() handler scans watched op-logs when a cron slot exists.
+  // Free tier allows 5 cron triggers/account — this account is full, so the
+  // dashboard's /api/state polling drives the same opportunistic scan.
+  // Uncomment when a slot is free:
+  // "triggers": { "crons": ["*/5 * * * *"] }
+}

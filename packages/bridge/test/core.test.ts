@@ -1,0 +1,83 @@
+import { describe, expect, it } from "vitest";
+import { entryHash, findShipEntry, verifyChain } from "../src/oplog";
+import { handlePremiumExport } from "../src/premium";
+import type { Env, OpLogEntry } from "../src/types";
+
+const mk = (seq: number, payload: Record<string, unknown>): OpLogEntry => ({
+  seq,
+  hash: "",
+  prev_hash: "",
+  kind: "ship",
+  actor: "did:key:z6Mktest",
+  payload,
+  created_at: 1793300000000 + seq,
+});
+
+describe("entryHash", () => {
+  it("replays the forge's canonical form — sha256(prevHash + JSON.stringify(entry-minus-hashes))", async () => {
+    const entry = mk(0, { ship: true, commits: ["a".repeat(40)] });
+    const h = await entryHash(entry, "genesis");
+    expect(h).toMatch(/^[0-9a-f]{64}$/);
+    // same input → same hash (deterministic canonicalization)
+    expect(await entryHash(entry, "genesis")).toBe(h);
+    // different prevHash → different hash (chain linkage)
+    expect(await entryHash(entry, "other")).not.toBe(h);
+  });
+});
+
+describe("verifyChain", () => {
+  it("validates a fabricated two-entry chain end to end", async () => {
+    const e0 = mk(0, { ship: true, commits: ["a".repeat(40)] });
+    e0.prev_hash = "genesis";
+    e0.hash = await entryHash(e0, "genesis");
+    const e1 = mk(1, { ship: true, commits: ["b".repeat(40)] });
+    e1.prev_hash = e0.hash;
+    e1.hash = await entryHash(e1, e0.hash);
+    const res = await verifyChain([e0, e1]);
+    expect(res.valid).toBe(true);
+    expect(res.checked).toBe(2);
+    expect(res.tip_hash).toBe(e1.hash);
+  });
+
+  it("fails closed on a tampered link", async () => {
+    const e0 = mk(0, { ship: true, commits: ["a".repeat(40)] });
+    e0.prev_hash = "genesis";
+    e0.hash = await entryHash(e0, "genesis");
+    const e1 = mk(1, { ship: true });
+    e1.prev_hash = "deadbeef"; // forged link
+    e1.hash = await entryHash(e1, "deadbeef");
+    const res = await verifyChain([e0, e1]);
+    expect(res.valid).toBe(false);
+  });
+});
+
+describe("findShipEntry", () => {
+  it("locates the entry by seq and misses others", () => {
+    const e = mk(0, { ship: true });
+    expect(findShipEntry([e], 0)).toBe(e);
+    expect(findShipEntry([e], 1)).toBeUndefined();
+  });
+});
+
+describe("premium 402", () => {
+  const env = { PAYPAL_API_BASE: "https://api-m.sandbox.paypal.com" } as Env;
+  it("returns 402 + invoice headers when no order id", async () => {
+    const res = await handlePremiumExport(
+      new Request("https://x/api/premium/oplog-export?repo=slop/slopdotcash"),
+      env
+    );
+    expect(res.status).toBe(402);
+    expect(res.headers.get("X-Payment-Required")).toBe("paypal");
+    const body = await res.json() as { invoice: { amount: string; currency: string; receiver: string } };
+    expect(body.invoice.amount).toBe("0.01");
+    expect(body.invoice.currency).toBe("USD");
+  });
+
+  it("rejects malformed repo slugs before invoicing", async () => {
+    const res = await handlePremiumExport(
+      new Request("https://x/api/premium/oplog-export?repo=../../etc"),
+      env
+    );
+    expect(res.status).toBe(400);
+  });
+});

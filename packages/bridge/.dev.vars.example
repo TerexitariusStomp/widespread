@@ -1,0 +1,16 @@
+# Copy to .dev.vars for `wrangler dev`, or set each with `wrangler secret put`.
+
+# PayPal Developer app credentials (https://developer.paypal.com) — sandbox app.
+PAYPAL_CLIENT_ID=
+PAYPAL_CLIENT_SECRET=
+
+# Optional: restrict bounty-registry writes (POST /api/bounties) with a bearer.
+# When unset, the route is open (fine for a sandbox demo).
+ADMIN_TOKEN=
+
+# Optional: signed-agent identity for writing payout receipts back to the
+# forge as commit statuses (POST /dg/status). Generate with
+#   node scripts/gen-agent-key.mjs
+# then register the printed pubkey via POST /api/agents.
+DG_AGENT_DID=
+DG_AGENT_KEY_PKCS8_B64=
