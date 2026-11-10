@@ -133,7 +133,7 @@ export default defineConfig({
     }),
   ],
   test: {
-    include: ["test/**/*.test.ts"],
+    include: ["test/**/*.test.ts", "eval/**/*.test.ts"],
     setupFiles: ["test/setup.ts"],
     testTimeout: 60000,
     hookTimeout: 60000,

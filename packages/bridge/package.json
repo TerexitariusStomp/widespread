@@ -11,7 +11,8 @@
     "cf-typegen": "wrangler types",
     "seed:claim": "node scripts/ship-claim.mjs",
     "test": "vitest run",
-    "licenses": "npx --yes license-checker@25 --summary --onlyAllow \"MIT;Apache-2.0;BSD-2-Clause;BSD-3-Clause;ISC;0BSD;Unlicense;CC0-1.0\""
+    "licenses": "npx --yes license-checker@25 --summary --onlyAllow \"MIT;Apache-2.0;BSD-2-Clause;BSD-3-Clause;ISC;0BSD;Unlicense;CC0-1.0\"",
+    "eval:goldset": "vitest run eval/goldset.test.ts"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.16.20",
