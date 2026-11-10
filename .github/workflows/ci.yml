@@ -73,6 +73,7 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @widespread/protocol build
       - run: pnpm --filter @widespread/bridge typecheck
       - run: pnpm --filter @widespread/bridge test
 
@@ -88,6 +89,7 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @widespread/protocol build
       - run: pnpm --filter @widespread/delta-git typecheck
       - run: pnpm --filter @widespread/delta-git test
 
@@ -108,6 +110,7 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @widespread/protocol build
       - run: pnpm --filter @widespread/delta-git build:spa
       - run: pnpm --filter @widespread/delta-git test:workers
 
@@ -151,6 +154,7 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @widespread/protocol build
       - run: pnpm --filter @widespread/runner test
 
   solana:
