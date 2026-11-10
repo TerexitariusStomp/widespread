@@ -47,7 +47,29 @@ export default {
   // when none is free the /api/state opportunistic scan covers pickup.
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(scan(env).catch((e) => console.error(`scan: ${String(e)}`)));
-    ctx.waitUntil(scanMirrorSubmissions(env).catch((e) => console.error(`ingest: ${String(e)}`)));
-    ctx.waitUntil(settleMergedClaims(env).catch((e) => console.error(`settle: ${String(e)}`)));
+    if (env.INGEST_Q) {
+      // Queue path: each task gets the consumer's own subrequest budget.
+      ctx.waitUntil(env.INGEST_Q.send({ task: "scan" }).then(() =>
+        env.INGEST_Q!.send({ task: "settle" })).catch(() => undefined));
+    } else {
+      ctx.waitUntil(scanMirrorSubmissions(env).catch((e) => console.error(`ingest: ${String(e)}`)));
+      ctx.waitUntil(settleMergedClaims(env).catch((e) => console.error(`settle: ${String(e)}`)));
+    }
+  },
+
+  // Queue consumer — the GitHub fan-out moves here when INGEST_Q is
+  // bound, so per-mirror fetches don't share a request's subrequest cap.
+  async queue(batch: MessageBatch, env: Env): Promise<void> {
+    for (const msg of batch.messages) {
+      const task = (msg.body as { task?: string }).task;
+      try {
+        if (task === "scan") await scanMirrorSubmissions(env);
+        else if (task === "settle") await settleMergedClaims(env);
+        msg.ack();
+      } catch (e) {
+        console.error(`queue ${task}: ${String(e)}`);
+        msg.retry();
+      }
+    }
   },
 } satisfies ExportedHandler<Env>;

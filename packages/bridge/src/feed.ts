@@ -713,10 +713,15 @@ export async function refreshFeed(env: Env, ctx?: ExecutionContext): Promise<Fee
     await putFeedDoc(env, doc);
     // Auto-ingest submissions on funded mirrors — agents keep using the
     // original forge flow (PRs on the issue); we file attested claims.
-    if (ctx) ctx.waitUntil(scanMirrorSubmissions(env).catch((e) => console.error(`ingest: ${String(e)}`)));
-    // Auto-settle: merged claims on funded mirrors pay out unattended
-    // (merge=accept — deterministic, same rule the platform runs on).
-    if (ctx) ctx.waitUntil(settleMergedClaims(env).catch((e) => console.error(`settle: ${String(e)}`)));
+    if (ctx) {
+      if (env.INGEST_Q) {
+        ctx.waitUntil(env.INGEST_Q.send({ task: "scan" }).then(() =>
+          env.INGEST_Q!.send({ task: "settle" })).catch(() => undefined));
+      } else {
+        ctx.waitUntil(scanMirrorSubmissions(env).catch((e) => console.error(`ingest: ${String(e)}`)));
+        ctx.waitUntil(settleMergedClaims(env).catch((e) => console.error(`settle: ${String(e)}`)));
+      }
+    }
     // Quality fill + embeddings run post-commit — never block the request.
     if (ctx) {
       ctx.waitUntil(fillQuality(env).catch((e) => console.error(`quality: ${String(e)}`)));

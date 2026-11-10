@@ -9,6 +9,9 @@ import type { ChainVerification, OpLogEntry } from "@widespread/protocol";
 /** Runtime environment — bindings + vars + secrets (see wrangler.jsonc). */
 export interface Env {
   CLAIMS: KVNamespace;
+  /** Ingest/settle task queue — optional; scheduled() falls back to
+   * inline waitsUntil when unbound. */
+  INGEST_Q?: Queue;
   /** D1 claim/settlement store — kv() prefers DB, falls back to CLAIMS
    *  so a deploy without the binding keeps working. */
   DB?: D1Database;
