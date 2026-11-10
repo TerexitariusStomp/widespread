@@ -19,7 +19,7 @@ import { sha256Hex } from "./forge";
 import { feedDoc } from "./feed";
 import { sendPayout } from "./payouts";
 import { resolvePayout } from "./routes/payouts";
-import { bumpFunderRep, repIndex, spamLikely, claimRank, writeVerdictRep } from "./rep";
+import { bumpFunderRep, repIndex, spamLikely, claimRank, writeVerdictRep, repVelocity, exportRep } from "./rep";
 import { kv } from "./db";
 import { emitWebhook } from "./webhooks";
 
@@ -64,6 +64,31 @@ export async function handleMirrorClaimPost(req: Request, env: Env, ctx?: Execut
       ok: false,
       error: `mirror not fiat-funded (status: ${funding?.status ?? "unfunded"}) — payer must complete /api/mirrors/fund + capture first`,
     }, { status: 409 });
+  }
+
+  // Rep-scaled claim constraint — the constraint layer in the trust
+  // taxonomy: spam-flagged identities (reject-heavy, zero wins) can't
+  // open claims on funded mirrors; burst claimants get flagged for the
+  // payer rather than silently filling the queue. The bond this replaces
+  // is reputation itself — skin they already burned.
+  if (body.forgeUserId) {
+    const [idx, events] = await Promise.all([
+      repIndex(env),
+      exportRep(env, String(body.forgeUserId)).catch(() => [] as Awaited<ReturnType<typeof exportRep>>),
+    ]);
+    const c = idx.contrib[String(body.forgeUserId)];
+    if (c && spamLikely(c)) {
+      return Response.json({ ok: false,
+        error: "reputation gate: this identity is spam-flagged (3+ rejects, 0 wins) — claims on funded mirrors are closed until rep recovers" },
+        { status: 429 });
+    }
+    const vel = repVelocity(events);
+    if (vel.burst) {
+      // flagged, not blocked — the payer sees it on the claim record
+      const ev = (body.evidence ?? {}) as Record<string, unknown>;
+      ev.velocity_flag = `burst claimant: ${vel.events_24h} events in 24h, no earlier history`;
+      body.evidence = ev;
+    }
   }
 
   const fv = await validateForgeSubmission(env, {
