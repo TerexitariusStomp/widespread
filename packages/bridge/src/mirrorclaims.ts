@@ -21,6 +21,7 @@ import { sendPayout } from "./payouts";
 import { resolvePayout } from "./routes/payouts";
 import { bumpFunderRep, repIndex, spamLikely, claimRank, writeVerdictRep } from "./rep";
 import { kv } from "./db";
+import { emitWebhook } from "./webhooks";
 
 const claimKey = (mirrorId: string, hash: string) => `mclaim:${mirrorId}:${hash}`;
 const claimsPrefix = (mirrorId: string) => `mclaim:${mirrorId}:`;
@@ -184,6 +185,7 @@ export async function handleMirrorVerdict(req: Request, env: Env, ctx?: Executio
     status: accept ? "won" : "rejected",
   };
   await kv(env).put(settleKey(mirrorId), JSON.stringify(settlement));
+  await emitWebhook(env, "settlement", settlement).catch(() => 0);
   claim.status = accept ? "won" : "rejected";
   await kv(env).put(claimKey(mirrorId, claimHash), JSON.stringify(claim));
   // Contributor rep — reject-heavy identities flag spam-likely for payers.
@@ -229,6 +231,7 @@ export async function executeMirrorPayout(env: Env, mirrorId: string): Promise<{
       });
       settlement.payout = { rail: "paypal-payouts", ...receipt };
       await kv(env).put(settleKey(mirrorId), JSON.stringify(settlement));
+      await emitWebhook(env, "payout", settlement).catch(() => 0);
       // Funder rep — pays out. Wash guard: don't credit a funder who paid
       // their own claim (payer email == winner's payout email).
       const funding = await kv(env).get(`fiatfund:${mirrorId}`).then((v) => v ? JSON.parse(v) : null).catch(() => null);

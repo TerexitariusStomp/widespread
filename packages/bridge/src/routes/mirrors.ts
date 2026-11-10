@@ -10,6 +10,7 @@ import { handleMirrorClaimPost, handleMirrorClaimsList, handleMirrorVerdict, han
 import type { Env } from "../types";
 import { bad, execCtx, json } from "./shared";
 import { kv } from "../db";
+import { registerWebhook, deleteWebhook, listWebhooks } from "../webhooks";
 
 export function mirrorRoutes() {
   const app = new Hono<{ Bindings: Env }>();
@@ -95,6 +96,20 @@ export function mirrorRoutes() {
 
   // Mirror an external/third-party bounty into a Widespread market at
   // face value — platformBps is our percent cut at release.
+  // Webhooks — operator push on money movement (settlement | payout | claim).
+  // HMAC-signed bodies when a secret is registered (x-widespread-signature).
+  app.post("/api/webhooks", async (c) => {
+    const b = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    const url = String(b?.url ?? "");
+    const events = (b?.events ?? ["settlement", "payout"]) as string[];
+    if (!/^https?:\/\//i.test(url)) return bad("https url required");
+    const sub = await registerWebhook(c.env, url, events, b?.secret as string | undefined);
+    return json({ ok: true, webhook: sub });
+  });
+  app.get("/api/webhooks", async (c) => json({ webhooks: await listWebhooks(c.env) }));
+  app.delete("/api/webhooks/:id", async (c) =>
+    json({ ok: await deleteWebhook(c.env, c.req.param("id")) }));
+
   app.post("/api/bounties/mirror", async (c) => {
     const b = (await c.req.json().catch(() => ({}))) as { record_id?: string; spec?: string };
     return handleMirrorQuote(c.env, execCtx(c), b);

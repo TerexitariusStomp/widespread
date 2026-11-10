@@ -16,6 +16,7 @@ import { getFeedDoc } from "./feedstore";
 import { validateForgeSubmission, attestationForMirror } from "./claims";
 import { GH_API, ghHeaders, sha256Hex } from "./forge";
 import { kv } from "./db";
+import { emitWebhook } from "./webhooks";
 
 const MIRROR_SCAN_LIMIT = 10;
 const PR_SCAN_LIMIT = 15;
@@ -224,6 +225,7 @@ export async function settleMergedClaims(env: Env): Promise<{
         status: "won",
       };
       await kv(env).put(settleKey(mirror.id), JSON.stringify(settlement));
+      await emitWebhook(env, "settlement", settlement).catch(() => 0);
       await kv(env).put(key, JSON.stringify({ ...claim, status: "won" }));
       if (claim.forge_user_id) {
         await writeVerdictRep(env, claim.forge_user_id, "win").catch(() => undefined);
