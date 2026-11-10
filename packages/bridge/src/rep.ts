@@ -23,7 +23,7 @@ import { kv } from "./db";
 const EVENT_PREFIX = "rep:event:";
 const CTR_PREFIX = "rep:ctr:";
 
-export interface RepCounters { merges: number; wins: number; rejects: number }
+export interface RepCounters { merges: number; wins: number; rejects: number; last_at?: number }
 export interface RepIndex { contrib: Record<string, RepCounters> }
 
 /** Signed, portable rep event — the contributor owns this record; anyone
@@ -72,6 +72,7 @@ async function bumpCounter(env: Env, actor: string, field: keyof RepCounters): P
   const raw = await env.QUALITY.get(key).then((o) => (o ? o.text() : null)).catch(() => null);
   const c = (raw ? JSON.parse(raw) : { merges: 0, wins: 0, rejects: 0 }) as RepCounters;
   c[field] = (c[field] ?? 0) + 1;
+  c.last_at = Date.now();
   await env.QUALITY.put(key, JSON.stringify(c));
 }
 
@@ -94,7 +95,8 @@ export async function repIndex(env: Env): Promise<RepIndex> {
     for (const o of page.objects) {
       const actor = o.key.slice(CTR_PREFIX.length);
       const c = (await env.QUALITY.get(o.key).then((b) => (b ? b.text() : null)).then((t) => (t ? JSON.parse(t) : null)).catch(() => null)) as RepCounters | null;
-      if (c) contrib[actor] = { merges: c.merges ?? 0, wins: c.wins ?? 0, rejects: c.rejects ?? 0 };
+      if (c) contrib[actor] = { merges: c.merges ?? 0, wins: c.wins ?? 0,
+        rejects: c.rejects ?? 0, ...(c.last_at ? { last_at: c.last_at } : {}) };
     }
     cursor = page.truncated ? page.cursor : undefined;
   } while (cursor);
@@ -137,6 +139,20 @@ export async function exportRep(env: Env, forgeUserId: string): Promise<RepEvent
     cursor = page.truncated ? page.cursor : undefined;
   } while (cursor);
   return events.sort((a, b) => a.at - b.at);
+}
+
+/** Velocity signals — recent-event rates from the actor's event log.
+ * Burst detection: many claims in 24h with zero prior history is the
+ * coordinated-slop shape; healthy actors accrete over days. */
+export function repVelocity(events: RepEvent[]): {
+  events_24h: number; events_7d: number; first_seen: number | null; burst: boolean;
+} {
+  const now = Date.now(), d = 86_400_000;
+  const e24 = events.filter((e) => now - e.at < d).length;
+  const e7 = events.filter((e) => now - e.at < 7 * d).length;
+  const first = events.length ? events[0].at : null;
+  const burst = e24 >= 5 && e7 === e24; // all history inside 24h at high volume
+  return { events_24h: e24, events_7d: e7, first_seen: first, burst };
 }
 
 /** Merge credit — caller gates on repo quality before calling. Each entry

@@ -9,7 +9,7 @@
 import { Hono } from "hono";
 import type { Env } from "../types";
 import { json } from "./shared";
-import { repIndex, spamLikely, exportRep, funderRep } from "../rep";
+import { repIndex, spamLikely, exportRep, funderRep, repVelocity } from "../rep";
 import { kv } from "../db";
 
 const NONCE_TTL = 600;
@@ -122,7 +122,8 @@ export function payoutRoutes() {
     const id = c.req.param("forgeUserId");
     const events = await exportRep(c.env, id);
     const fundRep = await funderRep(c.env, id).catch(() => null);
-    return json({ forgeUserId: id, events, funder: fundRep });
+    return json({ forgeUserId: id, events, funder: fundRep,
+      velocity: repVelocity(events) });
   });
 
   return app;
