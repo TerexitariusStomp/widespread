@@ -18,6 +18,7 @@ import { hatRoutes } from "./routes/hats";
 import { miscRoutes } from "./routes/misc";
 import { payoutRoutes } from "./routes/payouts";
 import { scanMirrorSubmissions, settleMergedClaims } from "./ingest";
+import { resolveExpiredProposals } from "./futarchy";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -50,10 +51,12 @@ export default {
     if (env.INGEST_Q) {
       // Queue path: each task gets the consumer's own subrequest budget.
       ctx.waitUntil(env.INGEST_Q.send({ task: "scan" }).then(() =>
-        env.INGEST_Q!.send({ task: "settle" })).catch(() => undefined));
+        env.INGEST_Q!.send({ task: "settle" }).then(() =>
+        env.INGEST_Q!.send({ task: "resolve-futarchy" }))).catch(() => undefined));
     } else {
       ctx.waitUntil(scanMirrorSubmissions(env).catch((e) => console.error(`ingest: ${String(e)}`)));
       ctx.waitUntil(settleMergedClaims(env).catch((e) => console.error(`settle: ${String(e)}`)));
+      ctx.waitUntil(resolveExpiredProposals(env).catch((e) => console.error(`futarchy: ${String(e)}`)));
     }
   },
 
@@ -65,6 +68,7 @@ export default {
       try {
         if (task === "scan") await scanMirrorSubmissions(env);
         else if (task === "settle") await settleMergedClaims(env);
+        else if (task === "resolve-futarchy") await resolveExpiredProposals(env);
         msg.ack();
       } catch (e) {
         console.error(`queue ${task}: ${String(e)}`);

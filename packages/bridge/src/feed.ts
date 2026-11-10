@@ -12,6 +12,7 @@
 
 import { nearView } from "./near";
 import { scanMirrorSubmissions, settleMergedClaims } from "./ingest";
+import { resolveExpiredProposals } from "./futarchy";
 import { attachQuality, fillQuality, embedRecords, embedText, recordVector, vectorIdMap, repoQualityEntry } from "./quality";
 import { creditMerges } from "./rep";
 import { listBounties, listRecords } from "./store";
@@ -716,10 +717,12 @@ export async function refreshFeed(env: Env, ctx?: ExecutionContext): Promise<Fee
     if (ctx) {
       if (env.INGEST_Q) {
         ctx.waitUntil(env.INGEST_Q.send({ task: "scan" }).then(() =>
-          env.INGEST_Q!.send({ task: "settle" })).catch(() => undefined));
+          env.INGEST_Q!.send({ task: "settle" }).then(() =>
+            env.INGEST_Q!.send({ task: "resolve-futarchy" }))).catch(() => undefined));
       } else {
         ctx.waitUntil(scanMirrorSubmissions(env).catch((e) => console.error(`ingest: ${String(e)}`)));
         ctx.waitUntil(settleMergedClaims(env).catch((e) => console.error(`settle: ${String(e)}`)));
+        ctx.waitUntil(resolveExpiredProposals(env).catch((e) => console.error(`futarchy: ${String(e)}`)));
       }
     }
     // Quality fill + embeddings run post-commit — never block the request.
