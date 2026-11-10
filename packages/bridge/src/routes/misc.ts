@@ -10,6 +10,7 @@ import { OPENAPI } from "../openapi/spec";
 import type { Env } from "../types";
 import { json } from "./shared";
 import { kv } from "../db";
+import { fileDispute, getDispute } from "../disputes";
 
 export function miscRoutes() {
   const app = new Hono<{ Bindings: Env }>();
@@ -32,6 +33,22 @@ export function miscRoutes() {
   // Collaborator ecosystem feed — rails, funding pools, security boards,
   // forges, workers, dispute/proof seams. All env-gated, all optional.
   app.get("/api/ecosystem", async (c) => json(await ecosystem(c.env)));
+
+  // Disputes — record a challenge; posts to the optimistic oracle when
+  // DISPUTE_* env is set (UMA OO on Base). The record exists either way.
+  app.post("/api/disputes", async (c) => {
+    const b = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    const assertion = String(b?.assertion ?? "");
+    if (!assertion) return json({ error: "assertion required" }, 400);
+    const d = await fileDispute(c.env, {
+      assertion, disputer: String(b?.disputer ?? "unknown"),
+      ...(b?.mirror_id ? { mirror_id: String(b.mirror_id) } : {}),
+      ...(b?.claim_hash ? { claim_hash: String(b.claim_hash) } : {}),
+    });
+    return json({ ok: true, dispute: d });
+  });
+  app.get("/api/disputes/:id", async (c) =>
+    json({ dispute: await getDispute(c.env, c.req.param("id")) }));
 
   // OpenAPI — the public contract, served for SDK codegen
   // (openapi-typescript / openapi-fetch). Maintained by hand: routes

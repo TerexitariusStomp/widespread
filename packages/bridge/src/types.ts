@@ -40,6 +40,13 @@ export interface Env {
   ERC8004_SIGNER_KEY?: string;
   ERC8004_RPC_URL?: string;
   ERC8004_REP_REGISTRY?: `0x${string}`;
+  // Optimistic-oracle dispute escalation (UMA OO on Base) — optional
+  DISPUTE_SIGNER_KEY?: string;
+  DISPUTE_RPC_URL?: string;
+  DISPUTE_OO_ADDRESS?: `0x${string}`;
+  DISPUTE_CURRENCY?: string;
+  DISPUTE_BOND_WEI?: string;
+  DISPUTE_LIVENESS_S?: string;
   NEAR_AI_BASE?: string;
   NEAR_AI_MODEL?: string;
   // Unified bounty feed — source credentials + watchlists (all optional;
