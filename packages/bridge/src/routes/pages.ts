@@ -7,7 +7,7 @@
 
 import { Hono } from "hono";
 import { OPS_HTML } from "../ops";
-import { homePage, bountiesPage, bountyPage, fundPage, receiptPage, docsPage, bountyMarkdown } from "../web/pages";
+import { homePage, bountiesPage, bountyPage, fundPage, receiptPage, docsPage, bountyMarkdown, healthPage } from "../web/pages";
 import { sponsorPage } from "../sponsor";
 import type { Env } from "../types";
 import { bad, cachedPage, execCtx, isAuthorized, json, safeDecode } from "./shared";
@@ -36,6 +36,8 @@ export function pageRoutes() {
     if (!id) return bad("id required", 400);
     return cachedPage(url, c.req.raw, () => bountyPage(c.env, execCtx(c), id));
   });
+
+  app.all("/health", (c) => cachedPage(new URL(c.req.url), c.req.raw, () => healthPage(c.env)));
 
   app.all("/fund/*", (c, next) => {
     const url = new URL(c.req.url);

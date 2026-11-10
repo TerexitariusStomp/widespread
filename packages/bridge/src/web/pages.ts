@@ -463,6 +463,57 @@ export async function receiptPage(env: Env, mirrorId: string | null, claimHash: 
 
 // ------------------------------------------------------------------ docs
 
+export async function healthPage(env: Env): Promise<Response> {
+  // Payer-facing market health — the settlement-integrity dashboard:
+  // treasury rollup + settlement outcomes + feed inventory, all from
+  // live store reads (same numbers /api/treasury serves as JSON).
+  const rows: { face: number; cut: number; net: number; won: number; paid: number; rejected: number; pending: number } =
+    { face: 0, cut: 0, net: 0, won: 0, paid: 0, rejected: 0, pending: 0 };
+  let cursor: string | undefined;
+  do {
+    const page = await kv(env).list({ prefix: "msettle:", cursor, limit: 200 });
+    for (const k of page.keys) {
+      const raw = await kv(env).get(k.name).catch(() => null);
+      if (!raw) continue;
+      const s = JSON.parse(raw) as { status?: string; face_usd?: number;
+        platform_cut_usd?: number; net_usd?: number;
+        payout?: { batch_id?: string; transaction_id?: string } };
+      rows.face += s.face_usd ?? 0;
+      rows.cut += s.platform_cut_usd ?? 0;
+      rows.net += s.net_usd ?? 0;
+      if (s.status === "won") { rows.won++; if (!(s.payout?.batch_id || s.payout?.transaction_id)) rows.pending++; }
+      else if (s.status === "rejected") rows.rejected++;
+      if (s.payout?.batch_id || s.payout?.transaction_id) rows.paid++;
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  const decided = rows.won + rows.rejected;
+  const settleRate = rows.won ? Math.round((rows.paid / rows.won) * 100) : null;
+  const body = `
+<h1>Market health</h1>
+<p class="mut">Settlement integrity — verified jobs that actually pay out.
+The field average is ~52% (48% of oracle-verified jobs never settle);
+this page is the live scoreboard.</p>
+
+<div class="card"><div class="kv-grid">
+  <div class="spread"><span class="k">Settle rate</span><span class="v big">${settleRate === null ? "—" : `${settleRate}%`}</span></div>
+  <div class="spread"><span class="k">Paid payouts</span><span class="v">${rows.paid} / ${rows.won} won</span></div>
+  <div class="spread"><span class="k">Pending payout</span><span class="v">${rows.pending}</span></div>
+  <div class="spread"><span class="k">Rejected</span><span class="v">${rows.rejected} / ${decided} decided</span></div>
+</div></div>
+
+<h2>Treasury</h2>
+<div class="card"><div class="kv-grid">
+  <div class="spread"><span class="k">Face value</span><span class="v">$${rows.face.toFixed(2)}</span></div>
+  <div class="spread"><span class="k">Net to contributors</span><span class="v">$${rows.net.toFixed(2)}</span></div>
+  <div class="spread"><span class="k">Platform cut</span><span class="v">$${rows.cut.toFixed(2)}</span></div>
+</div></div>
+
+<p class="mut small">JSON: <code>GET /api/treasury</code> · Funders: <code>GET /api/agents</code> ·
+Rep: <code>GET /api/rep/:id/export</code> (signed, portable).</p>`;
+  return html(pageShell({ title: "Market health", nav: "health", body }));
+}
+
 export function docsPage(): Response {
   const body = `
 <h1>Agent docs</h1>

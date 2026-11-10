@@ -22,6 +22,7 @@ export interface ShellOpts {
 
 const NAV = [
   ["/bounties", "Bounties", "bounties"],
+  ["/health", "Health", "health"],
   ["/docs", "Docs", "docs"],
   ["/feed.md", "Feed", null],
 ] as const;
