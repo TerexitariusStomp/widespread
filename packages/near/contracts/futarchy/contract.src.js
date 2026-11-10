@@ -55,7 +55,10 @@ export class ForeguildFutarchy {
   setResolvers({ metricId, accounts }) {
     const who = near.predecessorAccountId();
     assert(this.dao && who === this.dao, "only the dao admin registers resolvers");
-    this.resolvers[metricId] = Object.fromEntries((accounts ?? []).map((a) => [a, "1"]));
+    this.resolvers ??= {};
+    const map = {};
+    for (const a of accounts ?? []) map[a] = "1";
+    this.resolvers[metricId] = map;
     return { metricId, resolvers: accounts ?? [] };
   }
 
@@ -132,12 +135,12 @@ export class ForeguildFutarchy {
     const now = near.blockTimestamp();
     const caller = near.predecessorAccountId();
     const isProposer = caller === p.proposer;
-    const isResolver = !!this.resolvers[p.metricId]?.[caller];
+    const isResolver = !!(this.resolvers ?? {})[p.metricId]?.[caller];
     const expired = now > BigInt(p.deadline);
     // When resolvers are registered for the metric, attestation belongs
     // to them (pre- or post-deadline); permissionless fallback only once
     // the deadline passes AND no resolver exists for the metric.
-    const hasResolvers = Object.keys(this.resolvers[p.metricId] ?? {}).length > 0;
+    const hasResolvers = Object.keys((this.resolvers ?? {})[p.metricId] ?? {}).length > 0;
     const allowed = isResolver || (isProposer && !hasResolvers) ||
       (expired && !hasResolvers);
     assert(allowed, "resolution requires a registered resolver for this metric");
@@ -181,7 +184,7 @@ export class ForeguildFutarchy {
       BigInt(p.resolution.ts) + BigInt(p.challengeWindowNs);
     assert(within, "challenge window closed — resolution final");
     const caller = near.predecessorAccountId();
-    assert(this.resolvers[p.metricId]?.[caller], "only a registered resolver challenges");
+    assert((this.resolvers ?? {})[p.metricId]?.[caller], "only a registered resolver challenges");
     assert(evidenceHash && evidenceHash.length > 16, "evidenceHash required");
     const mv = BigInt(metricValue);
     const th = BigInt(p.threshold);
@@ -270,7 +273,7 @@ export class ForeguildFutarchy {
 
   @view({})
   getResolvers({ metricId }) {
-    return Object.keys(this.resolvers[metricId] ?? {});
+    return Object.keys((this.resolvers ?? {})[metricId] ?? {});
   }
 
   @view({})
