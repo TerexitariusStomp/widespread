@@ -159,6 +159,9 @@ export interface MirrorListing {
   createMarketArgs: Record<string, unknown>;
   status: "seeking-funder" | "fiat-funded" | "funded";
   funded_market_id?: string;
+  /** Payer's release history on funded mirrors — release_rate is the
+   * settlement-integrity signal claimants screen on. */
+  funder_rep?: { payer: string; funded: number; paid: number; release_rate: number };
   /** Present when a fiat pay-in was captured (PayPal order). */
   fiat?: { amount: string; currency: string; payer_email?: string };
   created_at: number;

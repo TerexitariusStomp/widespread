@@ -14,7 +14,7 @@ import { nearView } from "./near";
 import { scanMirrorSubmissions, settleMergedClaims } from "./ingest";
 import { resolveExpiredProposals } from "./futarchy";
 import { attachQuality, fillQuality, embedRecords, embedText, recordVector, vectorIdMap, repoQualityEntry } from "./quality";
-import { creditMerges } from "./rep";
+import { creditMerges, funderRep } from "./rep";
 import { listBounties, listRecords } from "./store";
 import {
   acquireFeedLock, getFeedDoc, getSourceStamp, putFeedDoc,
@@ -820,6 +820,18 @@ async function buildMirrors(env: Env, records: FeedRecord[], prior: MirrorListin
     const specHash = "sha256:" + await sha256Hex(spec);
     const prev = priorById.get(rec.id);
     const fundedMid = fundedBySpec.get(specHash);
+    // Funder-rep lookup for funded mirrors — the payer's release_rate is
+    // the settlement-integrity signal other claimants screen on. Bounded:
+    // one getMarket view per funded mirror (funded count is small).
+    let funderRepRec: { payer: string; funded: number; paid: number; release_rate: number } | undefined;
+    if (fundedMid && env.NEAR_CONTRACT) {
+      const m = await nearView(env, env.NEAR_CONTRACT, "getMarket",
+        { marketId: Number(fundedMid) }).catch(() => null) as { payer?: string } | null;
+      if (m?.payer) {
+        const fr = await funderRep(env, m.payer).catch(() => null);
+        if (fr) funderRepRec = { payer: m.payer, ...fr };
+      }
+    }
     out.push({
       id: `mirror:${rec.id}`,
       record_id: rec.id,
@@ -834,6 +846,7 @@ async function buildMirrors(env: Env, records: FeedRecord[], prior: MirrorListin
       createMarketArgs: mirrorArgs(env, rec, spec, specHash),
       status: fundedMid ? "funded" : "seeking-funder",
       ...(fundedMid ? { funded_market_id: fundedMid } : {}),
+      ...(funderRepRec ? { funder_rep: funderRepRec } : {}),
       created_at: prev?.created_at ?? Date.now(),
       updated_at: Date.now(),
     });
