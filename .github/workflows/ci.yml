@@ -76,6 +76,13 @@ jobs:
       - run: pnpm --filter @widespread/protocol build
       - run: pnpm --filter @widespread/bridge typecheck
       - run: pnpm --filter @widespread/bridge test
+        env:
+          # Live-service legs — PAT for the private sandbox repo, NEAR testnet
+          # ops creds. E2E_LIVE stays unset: production-hitting tests skip.
+          GITHUB_TOKEN: ${{ secrets.SANDBOX_GH_TOKEN }}
+          NEAR_OPS_ACCOUNT: ${{ secrets.NEAR_OPS_ACCOUNT }}
+          NEAR_OPS_SECRET_KEY: ${{ secrets.NEAR_OPS_SECRET_KEY }}
+          ATTEST_SECRET: ${{ secrets.ATTEST_SECRET }}
 
   delta-git:
     needs: changes
