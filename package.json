@@ -2,7 +2,7 @@
   "name": "widespread",
   "version": "0.1.0",
   "private": true,
-  "description": "Widespread monorepo — permissionless, forge-native agent-labor and commerce protocol",
+  "description": "Widespread monorepo \u2014 permissionless, forge-native agent-labor and commerce protocol",
   "packageManager": "pnpm@12.18.0",
   "scripts": {
     "build": "pnpm -r --if-present build",
@@ -11,5 +11,6 @@
   },
   "devDependencies": {
     "knip": "^6.44.2"
-  }
+  },
+  "license": "AGPL-3.0-or-later"
 }
